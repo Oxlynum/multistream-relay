@@ -1,19 +1,23 @@
 # CLAUDE.md — context for continuing this project
 
 ## What it is
-Upload one HEVC stream from a Mac mini M4 (Apple VT hardware encoder) to a rented
-cloud GPU; the GPU transcodes and fans out to Twitch, Kick, YouTube. Purpose:
-let low-upload streamers and multistreamers push good 1080p60 that H.264 couldn't
-fit. Long-term goal: a sellable, white-label, **self-hosted** product (the
+**SlimCast** — upload one HEVC stream from a Mac mini M4 (Apple VT hardware encoder)
+to a rented cloud GPU; the GPU transcodes and fans out to Twitch, Kick, YouTube.
+Purpose: let low-upload streamers and multistreamers push good 1080p60 that H.264
+couldn't fit. Long-term goal: a sellable, white-label, **self-hosted** product (the
 customer rents their own GPU; you never hold their keys). See docs/PRODUCT_PLAN.md.
 
 ## Current status
 - Working end-to-end; Twitch confirmed live at 1080p.
 - Hardening quality; moving toward a UDP/SRT host near the user (Vultr Atlanta).
+- Web app (Next.js) built in `web/` — Supabase + Stripe wired up, deploying to Vercel.
 
 ## Layout
 - `relay/` — the deployable server. All runtime files live here together so the
   scripts' relative paths work. Deploy this folder to the GPU box.
+- `web/` — SlimCast website: landing page, auth, dashboard, license key system.
+  Stack: Next.js + Supabase + Stripe. Deploys to Vercel.
+- `obs-relay-control/` — OBS plugin for native start/stop control.
 - `docs/ARCHITECTURE.md` — pipeline detail, tuning, caveats.
 - `docs/PRODUCT_PLAN.md` — productization, licensing, codec roadmap.
 
