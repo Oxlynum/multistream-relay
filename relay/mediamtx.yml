@@ -1,0 +1,40 @@
+# MediaMTX ingest config for the multistream relay.
+# Receives enhanced-RTMP HEVC from OBS over TCP and republishes it on a
+# loopback RTSP URL that the encoder processes pull from.
+
+logLevel: info
+logDestinations: [stdout]
+
+# --- RTMP ingest (OBS -> pod, over RunPod's exposed TCP port) --------------
+rtmp: yes
+rtmpAddress: :1935
+# enhanced-RTMP (H.265/HEVC, AV1) is accepted automatically by current builds.
+
+# --- SRT republish (loopback, consumed by FFmpeg) -------------------------
+# The encoders pull the feed over SRT (MPEG-TS), NOT RTSP: RTSP/RTP mangles
+# Apple's temporal-layered HEVC and causes dropped frames / artifacts. SRT
+# carries HEVC cleanly. Loopback SRT is lossless. Keep 8890 OUT of RunPod's
+# exposed ports so it stays internal.
+srt: yes
+srtAddress: :8890
+
+# Still expose RTSP locally as a fallback source if ever needed.
+rtsp: yes
+rtspAddress: :8554
+
+# Disable protocols we do not use.
+hls: no
+webrtc: no
+
+paths:
+  # OBS publishes to rtmp://<pod>:1935/live ; encoders pull rtsp://127.0.0.1:8554/live
+  live:
+    source: publisher
+
+    # Auto start/stop the transcoder with OBS:
+    #   runOnReady    fires when OBS starts publishing  -> turn relay ON
+    #   runOnNotReady fires when OBS stops publishing    -> turn relay OFF
+    # hook.sh must be executable and in this folder (start.sh chmods it).
+    runOnReady: bash hook.sh start
+    runOnReadyRestart: no
+    runOnNotReady: bash hook.sh stop

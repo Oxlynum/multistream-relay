@@ -1,0 +1,89 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "dependencies",
+      "hidden": true,
+      "vendor": {
+        "obsproject.com/obs-studio": {
+          "dependencies": {
+            "qt6": {
+              "version": "2025-08-23",
+              "baseUrl": "https://github.com/obsproject/obs-deps/releases/download",
+              "label": "Pre-Built Qt6",
+              "hashes": {
+                "macos-universal": "990f11638b80a4509e14e8c315f6e4caa0861e37fcd3113a256fbff835ffca29",
+                "windows-x64": "c62e82483bc7c0bf199e8ac3220c66a85a6e8a0cd69a05b6d44f873b830e415f"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "macos-arm64",
+      "displayName": "macOS (Apple Silicon)",
+      "inherits": ["dependencies"],
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/macos-arm64",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_OSX_ARCHITECTURES": "arm64",
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "12.0"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      }
+    },
+    {
+      "name": "macos-x86_64",
+      "displayName": "macOS (Intel)",
+      "inherits": ["dependencies"],
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/macos-x86_64",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_OSX_ARCHITECTURES": "x86_64",
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "12.0"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      }
+    },
+    {
+      "name": "windows-x64",
+      "displayName": "Windows (x64)",
+      "inherits": ["dependencies"],
+      "generator": "Visual Studio 17 2022",
+      "binaryDir": "${sourceDir}/build/windows-x64",
+      "toolset": "host=x64",
+      "architecture": "x64",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "macos-arm64",
+      "configurePreset": "macos-arm64",
+      "configuration": "RelWithDebInfo"
+    },
+    {
+      "name": "macos-x86_64",
+      "configurePreset": "macos-x86_64",
+      "configuration": "RelWithDebInfo"
+    },
+    {
+      "name": "windows-x64",
+      "configurePreset": "windows-x64",
+      "configuration": "RelWithDebInfo"
+    }
+  ]
+}

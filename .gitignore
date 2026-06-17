@@ -1,0 +1,16 @@
+# Relay server
+relay/__pycache__/
+relay/config.json
+relay/relay.crt
+relay/relay.key
+
+# Installer output
+*.pkg
+
+# Old copies
+multistream-relay/
+multistream-relay 2/
+multistream-relay.zip
+
+# macOS
+.DS_Store

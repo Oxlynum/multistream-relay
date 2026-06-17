@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Multistream Relay</title>
+<style>
+  :root {
+    --bg:#0f1115; --panel:#171a21; --panel2:#1f242e; --line:#2a3140;
+    --text:#e6e9ef; --muted:#8b94a7; --accent:#5b8cff; --good:#37d67a;
+    --warn:#ffb020; --bad:#ff5470;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;
+         background:var(--bg); color:var(--text); }
+  header { display:flex; align-items:center; gap:12px; padding:14px 18px;
+           border-bottom:1px solid var(--line); background:var(--panel); }
+  header h1 { font-size:16px; margin:0; font-weight:600; }
+  .grow { flex:1; }
+  button { font:inherit; border:1px solid var(--line); background:var(--panel2);
+           color:var(--text); padding:7px 12px; border-radius:8px; cursor:pointer; }
+  button:hover { border-color:var(--accent); }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button.danger { border-color:var(--bad); color:var(--bad); }
+  main { padding:18px; max-width:980px; margin:0 auto; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:12px;
+          padding:16px; margin-bottom:14px; }
+  .row { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .out-head { justify-content:space-between; margin-bottom:12px; }
+  .out-title { display:flex; align-items:center; gap:10px; font-weight:600; font-size:15px; }
+  .dot { width:10px; height:10px; border-radius:50%; background:var(--muted); }
+  .dot.running { background:var(--good); box-shadow:0 0 8px var(--good); }
+  .dot.restarting { background:var(--warn); }
+  .dot.error { background:var(--bad); }
+  .dot.stopped { background:var(--muted); }
+  label { display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--muted); }
+  input, select { font:inherit; background:var(--panel2); color:var(--text);
+                  border:1px solid var(--line); border-radius:8px; padding:7px 9px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; }
+  .wide { grid-column:1 / -1; }
+  .muted { color:var(--muted); }
+  .badge { font-size:11px; padding:2px 8px; border-radius:20px; border:1px solid var(--line);
+           color:var(--muted); }
+  .logs { background:#0a0c10; border:1px solid var(--line); border-radius:8px; padding:10px;
+          font:12px/1.45 ui-monospace,Menlo,monospace; color:#b9c2d4; max-height:160px;
+          overflow:auto; white-space:pre-wrap; margin-top:10px; display:none; }
+  .toggle { display:flex; align-items:center; gap:6px; font-size:12px; color:var(--muted); }
+  .toast { position:fixed; bottom:18px; left:50%; transform:translateX(-50%);
+           background:var(--panel2); border:1px solid var(--accent); padding:10px 16px;
+           border-radius:10px; opacity:0; transition:opacity .2s; }
+  .toast.show { opacity:1; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Multistream Relay</h1>
+  <span id="globalState" class="badge">…</span>
+  <span class="grow"></span>
+  <button id="btnStart" class="primary">Start</button>
+  <button id="btnRestart">Restart</button>
+  <button id="btnStop" class="danger">Stop</button>
+</header>
+
+<main>
+  <div id="outputs"></div>
+  <div class="row" style="margin-top:6px">
+    <button id="btnAdd">+ Add destination</button>
+    <span class="grow"></span>
+    <button id="btnSave" class="primary">Save &amp; apply</button>
+  </div>
+</main>
+
+<div id="toast" class="toast"></div>
+
+<script>
+// token auth for OBS browser-dock use: panel URL may include ?token=...
+const TOKEN = new URLSearchParams(location.search).get("token") || "";
+const Q = TOKEN ? ("?token=" + encodeURIComponent(TOKEN)) : "";
+const PLATFORM_HINTS = {
+  twitch: "rtmp://live.twitch.tv/app",
+  kick:   "rtmps://fa723fc1b171.global-contribute.live-video.net/app",
+  youtube:"https://a.upload.youtube.com/http_upload_hls?cid=YOUR_KEY&copy=0&file=stream.m3u8"
+};
+
+let config = { outputs: [] };
+
+async function api(path, opts={}) {
+  const r = await fetch("/api"+path+Q, {
+    headers:{"Content-Type":"application/json"}, ...opts
+  });
+  if (!r.ok) throw new Error((await r.text()) || r.status);
+  return r.headers.get("content-type")?.includes("json") ? r.json() : r.text();
+}
+
+function toast(msg) {
+  const t = document.getElementById("toast");
+  t.textContent = msg; t.classList.add("show");
+  setTimeout(()=>t.classList.remove("show"), 2200);
+}
+
+function outputCard(out, i) {
+  const isPass = out.mode === "passthrough";
+  return `
+  <div class="card" data-i="${i}">
+    <div class="row out-head">
+      <div class="out-title">
+        <span class="dot stopped" id="dot-${i}"></span>
+        <input value="${out.name||""}" data-f="name" style="width:120px" />
+        <span class="badge" id="st-${i}">—</span>
+      </div>
+      <label class="toggle">
+        <input type="checkbox" data-f="enabled" ${out.enabled?"checked":""}/> enabled
+      </label>
+    </div>
+    <div class="grid">
+      <label class="wide">Mode
+        <select data-f="mode">
+          <option value="transcode" ${!isPass?"selected":""}>Transcode → H.264 (Twitch/Kick)</option>
+          <option value="passthrough" ${isPass?"selected":""}>Passthrough HEVC → HLS (YouTube)</option>
+        </select>
+      </label>
+      <label class="wide">${isPass?"HLS ingest URL":"RTMP ingest URL"}
+        <input value="${out.url||""}" data-f="url" placeholder="${PLATFORM_HINTS[out.name]||""}"/>
+      </label>
+      ${isPass ? "" : `
+      <label class="wide">Stream key
+        <input value="${out.key||""}" data-f="key" type="password" placeholder="paste stream key"/>
+      </label>
+      <label>Max bitrate (kbps)
+        <input type="number" value="${out.bitrate_kbps||8000}" data-f="bitrate_kbps" min="1000" step="500"/>
+      </label>
+      <label>Width
+        <input type="number" value="${out.width||1920}" data-f="width" step="2"/>
+      </label>
+      <label>Height
+        <input type="number" value="${out.height||1080}" data-f="height" step="2"/>
+      </label>
+      <label>FPS
+        <select data-f="fps">
+          ${[60,50,48,30].map(f=>`<option ${out.fps==f?"selected":""}>${f}</option>`).join("")}
+        </select>
+      </label>`}
+    </div>
+    <div class="row" style="margin-top:10px">
+      <button data-act="logs" data-i="${i}">Logs</button>
+      <span class="grow"></span>
+      <button class="danger" data-act="remove" data-i="${i}">Remove</button>
+    </div>
+    <div class="logs" id="logs-${i}"></div>
+  </div>`;
+}
+
+function render() {
+  document.getElementById("outputs").innerHTML =
+    config.outputs.map(outputCard).join("");
+}
+
+// read DOM back into config
+function collect() {
+  document.querySelectorAll(".card").forEach(card => {
+    const i = +card.dataset.i;
+    const o = config.outputs[i];
+    card.querySelectorAll("[data-f]").forEach(el => {
+      const f = el.dataset.f;
+      if (el.type === "checkbox") o[f] = el.checked;
+      else if (el.type === "number") o[f] = +el.value;
+      else o[f] = el.value;
+    });
+  });
+}
+
+async function save() {
+  collect();
+  try { await api("/config", {method:"POST", body:JSON.stringify(config)});
+        toast("Saved & applied"); }
+  catch(e){ toast("Save failed: "+e.message); }
+}
+
+async function load() {
+  config = await api("/config");
+  if (!config.outputs) config.outputs = [];
+  render();
+}
+
+async function poll() {
+  try {
+    const s = await api("/status");
+    const byName = {};
+    s.outputs.forEach(o => byName[o.name] = o);
+    config.outputs.forEach((o,i) => {
+      const st = byName[o.name];
+      const dot = document.getElementById("dot-"+i);
+      const lbl = document.getElementById("st-"+i);
+      if (dot && st) { dot.className = "dot "+st.state;
+        lbl.textContent = st.state + (st.restarts?` · ${st.restarts} restarts`:""); }
+    });
+  } catch(e){ /* ignore transient */ }
+}
+
+document.addEventListener("click", async (e) => {
+  const act = e.target.dataset.act;
+  if (act === "remove") { config.outputs.splice(+e.target.dataset.i,1); collect(); render(); }
+  if (act === "logs") {
+    const i = e.target.dataset.i;
+    const box = document.getElementById("logs-"+i);
+    if (box.style.display === "block") { box.style.display="none"; return; }
+    box.style.display = "block";
+    const r = await api("/logs/"+encodeURIComponent(config.outputs[i].name));
+    box.textContent = r.lines.join("\n") || "(no output yet)";
+    box.scrollTop = box.scrollHeight;
+  }
+});
+
+document.getElementById("btnAdd").onclick = () => {
+  collect();
+  config.outputs.push({name:"new", enabled:false, mode:"transcode",
+    url:"", key:"", bitrate_kbps:8000, width:1920, height:1080, fps:60});
+  render();
+};
+document.getElementById("btnSave").onclick = save;
+document.getElementById("btnStart").onclick   = async()=>{ await api("/control",{method:"POST",body:JSON.stringify({action:"start"})}); toast("Started"); };
+document.getElementById("btnRestart").onclick = async()=>{ await api("/control",{method:"POST",body:JSON.stringify({action:"restart"})}); toast("Restarted"); };
+document.getElementById("btnStop").onclick    = async()=>{ await api("/control",{method:"POST",body:JSON.stringify({action:"stop"})}); toast("Stopped"); };
+
+load().then(()=>{ poll(); setInterval(poll, 3000); });
+</script>
+</body>
+</html>

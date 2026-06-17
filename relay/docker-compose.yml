@@ -1,0 +1,23 @@
+services:
+  relay:
+    build: .
+    image: multistream-relay:latest
+    restart: unless-stopped
+    environment:
+      - RELAY_PASSWORD=${RELAY_PASSWORD:?set RELAY_PASSWORD}
+      - RELAY_USERNAME=${RELAY_USERNAME:-admin}
+      - RELAY_TOKEN=${RELAY_TOKEN:-}        # for the OBS browser dock (?token=...)
+      - RELAY_STOP_GRACE=${RELAY_STOP_GRACE:-20}  # secs to wait before stopping on OBS drop
+    ports:
+      - "1935:1935"   # RTMP ingest  (map this to a RunPod Direct TCP port)
+      - "8080:8080"   # control panel
+    # persist config.json edits made from the panel
+    volumes:
+      - ./config.json:/app/config.json
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

@@ -1,0 +1,5 @@
+.deps/
+build/
+.staging-macos/
+.scripts-macos/
+.component.pkg

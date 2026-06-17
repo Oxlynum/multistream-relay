@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="2">
+
+    <title>Relay Control for OBS</title>
+    <welcome    file="welcome.html"    mime-type="text/html"/>
+    <conclusion file="conclusion.html" mime-type="text/html"/>
+
+    <!-- Allow install to the startup volume only; no relocating -->
+    <options customize="never" require-scripts="false" rootVolumeOnly="true"/>
+    <domains enable_localSystem="true"/>
+
+    <pkg-ref id="com.relaycontrol.obs-relay-control"/>
+
+    <choices-outline>
+        <line choice="default">
+            <line choice="com.relaycontrol.obs-relay-control"/>
+        </line>
+    </choices-outline>
+
+    <choice id="default"/>
+    <choice id="com.relaycontrol.obs-relay-control" visible="false">
+        <pkg-ref id="com.relaycontrol.obs-relay-control"/>
+    </choice>
+
+    <pkg-ref id="com.relaycontrol.obs-relay-control"
+             version="1.0.0"
+             onConclusion="none">.component.pkg</pkg-ref>
+
+</installer-gui-script>
