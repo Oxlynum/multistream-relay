@@ -30,6 +30,8 @@ export async function createPod(params: {
   apiKey: string
   gpuTypeId?: string
 }): Promise<{ podId: string }> {
+  const registryAuthId = process.env.RUNPOD_REGISTRY_AUTH_ID
+
   const pod = await request<RunPodPod>('POST', '/pods', {
     name: params.name,
     imageName: params.imageTag,
@@ -39,6 +41,7 @@ export async function createPod(params: {
     volumeInGb: 0,
     ports: '1935/tcp,8080/tcp',
     env: [{ key: 'SLIMCAST_API_KEY', value: params.apiKey }],
+    ...(registryAuthId ? { containerRegistryAuthId: registryAuthId } : {}),
   })
   return { podId: pod.id }
 }
