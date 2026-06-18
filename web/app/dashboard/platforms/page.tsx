@@ -72,7 +72,7 @@ export default function PlatformsPage() {
         .eq('user_id', user.id)
 
       const map: Record<string, PlatformConfig> = {}
-      for (const row of data ?? []) {
+      for (const row of (data ?? []) as PlatformConfig[]) {
         map[row.platform] = { ...row, connected: true }
       }
       setConnections(map)
@@ -104,7 +104,7 @@ export default function PlatformsPage() {
       .eq('user_id', session.user.id)
 
     const map: Record<string, PlatformConfig> = {}
-    for (const row of data ?? []) {
+    for (const row of (data ?? []) as PlatformConfig[]) {
       map[row.platform] = { ...row, connected: true }
     }
     setConnections(map)

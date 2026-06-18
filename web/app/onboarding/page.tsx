@@ -82,7 +82,7 @@ export default function OnboardingPage() {
         .select('status')
         .eq('user_id', session.user.id)
         .single()
-      if (data?.status === 'running') {
+      if ((data as { status: string } | null)?.status === 'running') {
         setGpuStatus('running')
         return
       }
