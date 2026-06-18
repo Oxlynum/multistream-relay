@@ -13,8 +13,30 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "SlimCast — Stream everywhere, no setup",
-  description: "Push one stream from OBS to Twitch, Kick, YouTube, TikTok, and Facebook simultaneously.",
+  metadataBase: new URL("https://slimcast.com"),
+  title: {
+    default: "SlimCast — One stream in. Every platform live.",
+    template: "%s · SlimCast",
+  },
+  description:
+    "Push one HEVC stream from OBS and go live on Twitch, YouTube, Kick, TikTok, and Facebook at once. Cloud GPU transcoding, pay-per-second, no setup.",
+  keywords: [
+    "multistream", "OBS multistream", "stream to Twitch and YouTube",
+    "HEVC streaming", "restream alternative", "multistreaming for creators",
+  ],
+  openGraph: {
+    title: "SlimCast — One stream in. Every platform live.",
+    description:
+      "Multistream infrastructure for creators. One HEVC feed from OBS, live everywhere, billed by the second.",
+    url: "https://slimcast.com",
+    siteName: "SlimCast",
+    type: "website",
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "SlimCast — One stream in. Every platform live.",
+    description: "One HEVC feed from OBS, live on five platforms. Pay-per-second, no setup.",
+  },
 };
 
 export default function RootLayout({

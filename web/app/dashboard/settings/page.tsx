@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { createBrowserClient } from '@/lib/supabase'
+import { DashboardNav } from '@/components/dashboard-nav'
 
 interface PlatformSettings {
   platform: string
@@ -23,6 +24,7 @@ const PLATFORM_META: Record<string, { label: string; minBitrate: number; maxBitr
 export default function SettingsPage() {
   const router = useRouter()
   const [settings, setSettings] = useState<PlatformSettings[]>([])
+  const [loaded, setLoaded] = useState(false)
   const [saving, setSaving] = useState<string | null>(null)
   const [saved, setSaved] = useState<string | null>(null)
 
@@ -39,14 +41,13 @@ export default function SettingsPage() {
         .order('platform')
 
       setSettings(data ?? [])
+      setLoaded(true)
     }
     load()
   }, [router])
 
   function update(platform: string, field: string, value: unknown) {
-    setSettings(prev => prev.map(s =>
-      s.platform === platform ? { ...s, [field]: value } : s
-    ))
+    setSettings(prev => prev.map(s => (s.platform === platform ? { ...s, [field]: value } : s)))
   }
 
   async function save(platform: string) {
@@ -60,15 +61,8 @@ export default function SettingsPage() {
 
     await fetch(`/api/platforms/${platform}`, {
       method: 'PATCH',
-      headers: {
-        Authorization: `Bearer ${session.access_token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        bitrate_kbps: s.bitrate_kbps,
-        fps: s.fps,
-        orientation: s.orientation,
-      }),
+      headers: { Authorization: `Bearer ${session.access_token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ bitrate_kbps: s.bitrate_kbps, fps: s.fps, orientation: s.orientation }),
     })
 
     setSaving(null)
@@ -76,53 +70,51 @@ export default function SettingsPage() {
     setTimeout(() => setSaved(null), 2000)
   }
 
-  if (settings.length === 0) {
+  if (loaded && settings.length === 0) {
     return (
-      <main className="min-h-screen bg-gray-950 text-white">
-        <nav className="flex items-center gap-4 px-8 py-5 border-b border-gray-800">
-          <a href="/dashboard" className="text-gray-400 hover:text-white transition-colors text-sm">← Dashboard</a>
-          <span className="text-xl font-bold tracking-tight">Settings</span>
-        </nav>
-        <div className="max-w-2xl mx-auto px-6 py-16 text-center text-gray-500">
+      <div className="min-h-screen">
+        <DashboardNav />
+        <div className="max-w-2xl mx-auto px-6 py-16 text-center text-ink-muted">
           <p className="mb-4">No platforms connected yet.</p>
-          <a href="/dashboard/platforms" className="text-blue-400 hover:text-blue-300">Connect platforms →</a>
+          <a href="/dashboard/platforms" className="text-accent hover:text-accent-strong">Connect platforms →</a>
         </div>
-      </main>
+      </div>
     )
   }
 
   return (
-    <main className="min-h-screen bg-gray-950 text-white">
-      <nav className="flex items-center gap-4 px-8 py-5 border-b border-gray-800">
-        <a href="/dashboard" className="text-gray-400 hover:text-white transition-colors text-sm">← Dashboard</a>
-        <span className="text-xl font-bold tracking-tight">Settings</span>
-      </nav>
+    <div className="min-h-screen">
+      <DashboardNav />
 
-      <div className="max-w-2xl mx-auto px-6 py-10 space-y-4">
+      <main className="max-w-2xl mx-auto px-6 py-10 space-y-4">
+        <div>
+          <h1 className="text-lg font-semibold">Stream settings</h1>
+          <p className="text-sm text-ink-muted mt-1">Tune quality per platform. Changes apply to your next stream.</p>
+        </div>
+
         {settings.map(s => {
           const meta = PLATFORM_META[s.platform]
           if (!meta) return null
           const bitrate = s.bitrate_kbps ?? meta.maxBitrate
 
           return (
-            <div key={s.platform} className="bg-gray-900 border border-gray-800 rounded-2xl p-6">
+            <div key={s.platform} className="bg-surface border border-line rounded-2xl p-6">
               <div className="flex items-center justify-between mb-5">
                 <span className="font-semibold">{meta.label}</span>
                 <button
                   onClick={() => save(s.platform)}
                   disabled={saving === s.platform}
-                  className="bg-blue-600 hover:bg-blue-500 disabled:opacity-40 px-4 py-1.5 rounded-lg text-sm font-semibold transition-colors min-w-[70px]"
+                  className="bg-accent hover:bg-accent-strong text-base disabled:opacity-40 px-4 py-1.5 rounded-lg text-sm font-semibold transition-colors min-w-[70px]"
                 >
                   {saving === s.platform ? '…' : saved === s.platform ? 'Saved!' : 'Save'}
                 </button>
               </div>
 
               <div className="space-y-5">
-                {/* Bitrate */}
                 <div>
-                  <div className="flex justify-between text-xs text-gray-400 mb-2">
+                  <div className="flex justify-between text-xs text-ink-muted mb-2">
                     <span>Bitrate</span>
-                    <span className="font-mono">{bitrate.toLocaleString()} kbps</span>
+                    <span className="font-mono text-ink">{bitrate.toLocaleString()} kbps</span>
                   </div>
                   <input
                     type="range"
@@ -131,23 +123,22 @@ export default function SettingsPage() {
                     step={250}
                     value={bitrate}
                     onChange={e => update(s.platform, 'bitrate_kbps', parseInt(e.target.value))}
-                    className="w-full accent-blue-500"
+                    className="w-full accent-accent"
                   />
-                  <div className="flex justify-between text-xs text-gray-600 mt-1">
-                    <span>{meta.minBitrate.toLocaleString()} kbps</span>
-                    <span>{meta.maxBitrate.toLocaleString()} kbps</span>
+                  <div className="flex justify-between text-xs text-ink-faint mt-1">
+                    <span>{meta.minBitrate.toLocaleString()}</span>
+                    <span>{meta.maxBitrate.toLocaleString()}</span>
                   </div>
                 </div>
 
-                {/* FPS */}
                 <div>
-                  <div className="text-xs text-gray-400 mb-2">Frame rate</div>
+                  <div className="text-xs text-ink-muted mb-2">Frame rate</div>
                   <div className="flex gap-2">
                     {[60, 30].map(fps => (
                       <button
                         key={fps}
                         onClick={() => update(s.platform, 'fps', fps)}
-                        className={`px-4 py-1.5 rounded-lg text-sm font-semibold transition-colors ${s.fps === fps ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-300 hover:bg-gray-700'}`}
+                        className={`px-4 py-1.5 rounded-lg text-sm font-semibold transition-colors ${s.fps === fps ? 'bg-accent text-base' : 'bg-base border border-line text-ink-muted hover:text-ink'}`}
                       >
                         {fps} fps
                       </button>
@@ -155,23 +146,22 @@ export default function SettingsPage() {
                   </div>
                 </div>
 
-                {/* Orientation (only for platforms that support portrait) */}
                 {meta.supportsPortrait && (
                   <div>
-                    <div className="text-xs text-gray-400 mb-2">Orientation</div>
+                    <div className="text-xs text-ink-muted mb-2">Orientation</div>
                     <div className="flex gap-2">
                       {['landscape', 'portrait'].map(o => (
                         <button
                           key={o}
                           onClick={() => update(s.platform, 'orientation', o)}
-                          className={`px-4 py-1.5 rounded-lg text-sm font-semibold transition-colors capitalize ${s.orientation === o ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-300 hover:bg-gray-700'}`}
+                          className={`px-4 py-1.5 rounded-lg text-sm font-semibold transition-colors capitalize ${s.orientation === o ? 'bg-accent text-base' : 'bg-base border border-line text-ink-muted hover:text-ink'}`}
                         >
                           {o}
                         </button>
                       ))}
                     </div>
                     {s.orientation === 'portrait' && (
-                      <p className="text-xs text-gray-500 mt-2">Portrait adds pillarbox bars to fill the vertical frame.</p>
+                      <p className="text-xs text-ink-faint mt-2">Portrait adds pillarbox bars to fill the vertical frame.</p>
                     )}
                   </div>
                 )}
@@ -179,7 +169,7 @@ export default function SettingsPage() {
             </div>
           )
         })}
-      </div>
-    </main>
+      </main>
+    </div>
   )
 }

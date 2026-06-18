@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 import { createBrowserClient } from '@/lib/supabase'
+import { DashboardNav } from '@/components/dashboard-nav'
 
 interface DashboardData {
   credits_seconds: number
@@ -46,6 +47,7 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true)
   const [statsLoading, setStatsLoading] = useState(false)
   const [apiKey, setApiKey] = useState<string | null>(null)
+  const [keyLoading, setKeyLoading] = useState(false)
   const [copied, setCopied] = useState<string | null>(null)
 
   const load = useCallback(async () => {
@@ -54,16 +56,13 @@ export default function DashboardPage() {
       const { data: { session } } = await supabase.auth.getSession()
       if (!session) { router.push('/login'); return }
 
-      const token = session.access_token
-      const headers = { Authorization: `Bearer ${token}` }
-
+      const headers = { Authorization: `Bearer ${session.access_token}` }
       const [profileRes, platformRes] = await Promise.all([
         fetch('/api/credits/balance', { headers }),
         supabase.from('platform_connections').select('platform').eq('user_id', session.user.id),
       ])
 
       const credits = await profileRes.json().catch(() => ({ seconds: 0 }))
-
       setData({
         credits_seconds: credits.seconds ?? 0,
         platforms: (platformRes.data ?? []).map((p: { platform: string }) => p.platform),
@@ -94,16 +93,20 @@ export default function DashboardPage() {
   useEffect(() => { loadStats(period) }, [loadStats, period])
 
   async function generateApiKey() {
-    const supabase = createBrowserClient()
-    const { data: { session } } = await supabase.auth.getSession()
-    if (!session) return
-    const res = await fetch('/api/apikey', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${session.access_token}` },
-    })
-    const body = await res.json()
-    setApiKey(body.api_key)
-    await load()
+    setKeyLoading(true)
+    try {
+      const supabase = createBrowserClient()
+      const { data: { session } } = await supabase.auth.getSession()
+      if (!session) return
+      const res = await fetch('/api/apikey', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      })
+      const body = await res.json()
+      setApiKey(body.api_key)
+    } finally {
+      setKeyLoading(false)
+    }
   }
 
   function copy(text: string, label: string) {
@@ -112,59 +115,47 @@ export default function DashboardPage() {
     setTimeout(() => setCopied(null), 2000)
   }
 
-  async function signOut() {
-    const supabase = createBrowserClient()
-    await supabase.auth.signOut()
-    router.push('/')
-  }
-
   if (loading) {
-    return <main className="min-h-screen bg-gray-950 text-white flex items-center justify-center text-gray-500">Loading…</main>
+    return (
+      <div className="min-h-screen">
+        <DashboardNav />
+        <div className="flex items-center justify-center py-32 text-ink-faint text-sm">Loading…</div>
+      </div>
+    )
   }
 
   const creditsLow = (data?.credits_seconds ?? 0) < 1800
 
   return (
-    <main className="min-h-screen bg-gray-950 text-white">
-      <nav className="flex items-center justify-between px-8 py-5 border-b border-gray-800">
-        <span className="text-xl font-bold tracking-tight">SlimCast</span>
-        <div className="flex items-center gap-6 text-sm">
-          <a href="/dashboard/platforms" className="text-gray-400 hover:text-white transition-colors">Platforms</a>
-          <a href="/dashboard/settings" className="text-gray-400 hover:text-white transition-colors">Settings</a>
-          <a href="/dashboard/credits" className="text-gray-400 hover:text-white transition-colors">Credits</a>
-          <button onClick={signOut} className="text-gray-400 hover:text-white transition-colors">Sign out</button>
-        </div>
-      </nav>
+    <div className="min-h-screen">
+      <DashboardNav />
 
-      <div className="max-w-3xl mx-auto px-6 py-10 space-y-5">
-
+      <main className="max-w-5xl mx-auto px-6 py-10 space-y-5">
         {/* Credits */}
-        <div className={`border rounded-2xl p-6 flex items-center justify-between ${creditsLow ? 'bg-amber-950/30 border-amber-800' : 'bg-gray-900 border-gray-800'}`}>
+        <div className={`border rounded-2xl p-6 flex items-center justify-between ${creditsLow ? 'bg-amber-950/20 border-amber-800/60' : 'bg-surface border-line'}`}>
           <div>
-            <div className="text-sm text-gray-400 mb-1">Streaming credits</div>
-            <div className={`text-3xl font-bold ${creditsLow ? 'text-amber-400' : 'text-white'}`}>
+            <div className="text-sm text-ink-muted mb-1">Streaming credits</div>
+            <div className={`text-3xl font-bold font-mono ${creditsLow ? 'text-amber-400' : 'text-ink'}`}>
               {fmt(data?.credits_seconds ?? 0)}
             </div>
             {creditsLow && <div className="text-sm text-amber-500 mt-1">Less than 30 minutes remaining</div>}
           </div>
-          <a href="/dashboard/credits" className="bg-blue-600 hover:bg-blue-500 px-5 py-2 rounded-lg text-sm font-semibold transition-colors">
-            Buy Credits
+          <a href="/dashboard/credits" className="bg-accent hover:bg-accent-strong text-base px-5 py-2 rounded-lg text-sm font-semibold transition-colors">
+            Buy credits
           </a>
         </div>
 
         {/* Stats */}
-        <div className="bg-gray-900 border border-gray-800 rounded-2xl p-6">
+        <div className="bg-surface border border-line rounded-2xl p-6">
           <div className="flex items-center justify-between mb-5">
-            <div className="text-sm text-gray-400">Streaming stats</div>
-            <div className="flex gap-1 bg-gray-800 rounded-lg p-1">
+            <div className="text-sm text-ink-muted">Streaming stats</div>
+            <div className="flex gap-1 bg-base border border-line rounded-lg p-1">
               {PERIODS.map(({ value, label }) => (
                 <button
                   key={value}
                   onClick={() => setPeriod(value)}
                   className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${
-                    period === value
-                      ? 'bg-gray-600 text-white'
-                      : 'text-gray-400 hover:text-white'
+                    period === value ? 'bg-elevated text-ink' : 'text-ink-muted hover:text-ink'
                   }`}
                 >
                   {label}
@@ -174,39 +165,24 @@ export default function DashboardPage() {
           </div>
 
           {statsLoading ? (
-            <div className="text-gray-600 text-sm">Loading…</div>
+            <div className="text-ink-faint text-sm py-4">Loading…</div>
           ) : (
             <>
               <div className="grid grid-cols-2 gap-4 sm:grid-cols-4 mb-5">
-                <Stat
-                  label="Hours streamed"
-                  value={fmt(stats?.total_duration_seconds ?? 0)}
-                />
-                <Stat
-                  label="Sessions"
-                  value={String(stats?.session_count ?? 0)}
-                />
-                <Stat
-                  label="Avg session"
-                  value={fmt(stats?.avg_duration_seconds ?? 0)}
-                />
-                <Stat
-                  label="Credits used"
-                  value={fmt(stats?.total_credits_used_seconds ?? 0)}
-                />
+                <Stat label="Hours streamed" value={fmt(stats?.total_duration_seconds ?? 0)} />
+                <Stat label="Sessions" value={String(stats?.session_count ?? 0)} />
+                <Stat label="Avg session" value={fmt(stats?.avg_duration_seconds ?? 0)} />
+                <Stat label="Credits used" value={fmt(stats?.total_credits_used_seconds ?? 0)} />
               </div>
 
               {(stats?.top_platforms?.length ?? 0) > 0 && (
                 <div>
-                  <div className="text-xs text-gray-500 mb-2">Platforms streamed to</div>
+                  <div className="text-xs text-ink-faint mb-2">Platforms streamed to</div>
                   <div className="flex flex-wrap gap-2">
                     {stats?.top_platforms.map(({ platform, count }) => (
-                      <span
-                        key={platform}
-                        className="bg-gray-800 text-gray-300 text-xs px-3 py-1 rounded-full"
-                      >
+                      <span key={platform} className="bg-base border border-line text-ink-muted text-xs px-3 py-1 rounded-full">
                         {PLATFORM_LABELS[platform] ?? platform}
-                        <span className="text-gray-500 ml-1">×{count}</span>
+                        <span className="text-ink-faint ml-1">×{count}</span>
                       </span>
                     ))}
                   </div>
@@ -214,7 +190,7 @@ export default function DashboardPage() {
               )}
 
               {stats?.session_count === 0 && (
-                <p className="text-sm text-gray-600">
+                <p className="text-sm text-ink-faint">
                   No streams yet in this period. Start streaming in OBS to see your stats here.
                 </p>
               )}
@@ -222,20 +198,20 @@ export default function DashboardPage() {
           )}
         </div>
 
-        {/* Platforms connected */}
-        <div className="bg-gray-900 border border-gray-800 rounded-2xl p-6">
+        {/* Platforms */}
+        <div className="bg-surface border border-line rounded-2xl p-6">
           <div className="flex items-center justify-between mb-4">
-            <div className="text-sm text-gray-400">Platforms</div>
-            <a href="/dashboard/platforms" className="text-xs text-blue-400 hover:text-blue-300">Manage →</a>
+            <div className="text-sm text-ink-muted">Platforms</div>
+            <a href="/dashboard/platforms" className="text-xs text-accent hover:text-accent-strong">Manage →</a>
           </div>
           {(data?.platforms.length ?? 0) === 0 ? (
-            <p className="text-sm text-gray-500">
-              No platforms connected. <a href="/dashboard/platforms" className="text-blue-400 hover:text-blue-300">Add platforms →</a>
+            <p className="text-sm text-ink-muted">
+              No platforms connected. <a href="/dashboard/platforms" className="text-accent hover:text-accent-strong">Add platforms →</a>
             </p>
           ) : (
             <div className="flex flex-wrap gap-2">
               {data?.platforms.map(p => (
-                <span key={p} className="bg-gray-800 text-gray-300 text-sm px-3 py-1 rounded-full">
+                <span key={p} className="bg-base border border-line text-ink-muted text-sm px-3 py-1 rounded-full">
                   {PLATFORM_LABELS[p] ?? p}
                 </span>
               ))}
@@ -243,24 +219,24 @@ export default function DashboardPage() {
           )}
         </div>
 
-        {/* API Key */}
-        <div className="bg-gray-900 border border-gray-800 rounded-2xl p-6">
-          <div className="text-sm text-gray-400 mb-1">OBS API key</div>
-          <div className="text-xs text-gray-500 mb-4">
+        {/* API key */}
+        <div className="bg-surface border border-line rounded-2xl p-6">
+          <div className="text-sm text-ink-muted mb-1">OBS API key</div>
+          <div className="text-xs text-ink-faint mb-4">
             Paste this into the SlimCast panel inside OBS. Refreshing creates a new key and invalidates the old one.
           </div>
           {apiKey ? (
             <div className="space-y-3">
-              <div className="bg-amber-950/40 border border-amber-800 rounded-lg px-3 py-2 text-xs text-amber-400">
+              <div className="bg-amber-950/30 border border-amber-800/60 rounded-lg px-3 py-2 text-xs text-amber-400">
                 Copy this now — it won&apos;t be shown again.
               </div>
               <div className="flex items-center gap-3">
-                <code className="flex-1 bg-gray-800 rounded-lg px-3 py-2 text-sm font-mono text-gray-300 break-all">
+                <code className="flex-1 bg-base border border-line rounded-lg px-3 py-2 text-sm font-mono text-ink break-all">
                   {apiKey}
                 </code>
                 <button
                   onClick={() => copy(apiKey, 'apikey')}
-                  className={`px-3 py-2 rounded-lg text-sm transition-colors min-w-[70px] ${copied === 'apikey' ? 'bg-green-700 text-white' : 'bg-gray-700 hover:bg-gray-600'}`}
+                  className={`px-3 py-2 rounded-lg text-sm font-medium transition-colors min-w-[70px] ${copied === 'apikey' ? 'bg-accent text-base' : 'bg-elevated hover:bg-line-strong text-ink'}`}
                 >
                   {copied === 'apikey' ? 'Copied!' : 'Copy'}
                 </button>
@@ -269,23 +245,23 @@ export default function DashboardPage() {
           ) : (
             <button
               onClick={generateApiKey}
-              className="bg-gray-700 hover:bg-gray-600 px-5 py-2 rounded-lg text-sm font-semibold transition-colors"
+              disabled={keyLoading}
+              className="bg-elevated hover:bg-line-strong disabled:opacity-50 px-5 py-2 rounded-lg text-sm font-semibold transition-colors"
             >
-              Refresh API key
+              {keyLoading ? 'Generating…' : 'Refresh API key'}
             </button>
           )}
         </div>
-
-      </div>
-    </main>
+      </main>
+    </div>
   )
 }
 
 function Stat({ label, value }: { label: string; value: string }) {
   return (
-    <div className="bg-gray-800/60 rounded-xl p-4">
-      <div className="text-xs text-gray-500 mb-1">{label}</div>
-      <div className="text-2xl font-bold text-white">{value}</div>
+    <div className="bg-base border border-line rounded-xl p-4">
+      <div className="text-xs text-ink-faint mb-1">{label}</div>
+      <div className="text-2xl font-bold font-mono text-ink">{value}</div>
     </div>
   )
 }

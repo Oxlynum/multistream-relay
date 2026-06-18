@@ -1,26 +1,91 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+/* ── SlimCast design system — infra-grade slate + teal ──────────────────── */
+@theme {
+  /* Surfaces */
+  --color-base: #0a0e14;
+  --color-surface: #10151e;
+  --color-elevated: #161d27;
+  --color-line: #1f2832;
+  --color-line-strong: #2b3744;
+
+  /* Brand accent */
+  --color-accent: #2dd4bf;
+  --color-accent-strong: #14b8a6;
+  --color-accent-soft: #0d3733;
+
+  /* Text */
+  --color-ink: #e6edf3;
+  --color-ink-muted: #8b97a8;
+  --color-ink-faint: #5a6675;
+
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, "SF Mono", monospace;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+@layer base {
+  html {
+    color-scheme: dark;
+  }
+  body {
+    background-color: var(--color-base);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  ::selection {
+    background-color: rgba(45, 212, 191, 0.25);
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+@layer utilities {
+  /* Eyebrow / mono kicker label */
+  .kicker {
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--color-accent);
+  }
+
+  /* Faint engineering grid backdrop */
+  .bg-grid {
+    background-image:
+      linear-gradient(to right, rgba(139, 151, 168, 0.06) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(139, 151, 168, 0.06) 1px, transparent 1px);
+    background-size: 60px 60px;
+  }
+
+  /* Radial fade mask for grid/glow sections */
+  .mask-fade {
+    -webkit-mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, #000 40%, transparent 100%);
+    mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, #000 40%, transparent 100%);
+  }
+
+  .text-gradient {
+    background: linear-gradient(180deg, #ffffff 0%, #9fb0c0 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  .glow-accent {
+    box-shadow: 0 0 0 1px rgba(45, 212, 191, 0.2), 0 0 40px -8px rgba(45, 212, 191, 0.35);
+  }
+
+  /* Animated live pulse dot */
+  .pulse-dot::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: 9999px;
+    background-color: currentColor;
+    opacity: 0.55;
+    animation: pulse-ring 1.8s cubic-bezier(0, 0, 0.2, 1) infinite;
+  }
+  @keyframes pulse-ring {
+    0% { transform: scale(1); opacity: 0.55; }
+    100% { transform: scale(2.6); opacity: 0; }
+  }
 }
