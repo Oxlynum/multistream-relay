@@ -1,3 +1,4 @@
+import { createBrowserClient as ssrBrowserClient } from '@supabase/ssr'
 import { createClient } from '@supabase/supabase-js'
 
 export type Tier = 'free' | 'pro'
@@ -13,6 +14,7 @@ export const TIER_LIMITS: Record<Tier, TierLimits> = {
   pro:  { tier: 'pro',  max_outputs: null, max_resolution: null },
 }
 
+// Server client for API routes — uses service role key, bypasses RLS.
 export function createServerClient() {
   return createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -20,11 +22,12 @@ export function createServerClient() {
   )
 }
 
-let _browserClient: ReturnType<typeof createClient> | null = null
+// Browser client — uses @supabase/ssr so session is stored in cookies (readable by middleware).
+let _browserClient: ReturnType<typeof ssrBrowserClient> | null = null
 
 export function createBrowserClient() {
   if (!_browserClient) {
-    _browserClient = createClient(
+    _browserClient = ssrBrowserClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
       process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     )
