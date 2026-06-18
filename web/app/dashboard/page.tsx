@@ -54,30 +54,35 @@ export default function DashboardPage() {
   const [copied, setCopied] = useState<string | null>(null)
 
   const load = useCallback(async () => {
-    const supabase = createBrowserClient()
-    const { data: { session } } = await supabase.auth.getSession()
-    if (!session) { router.push('/login'); return }
+    try {
+      const supabase = createBrowserClient()
+      const { data: { session } } = await supabase.auth.getSession()
+      if (!session) { router.push('/login'); return }
 
-    const token = session.access_token
-    const headers = { Authorization: `Bearer ${token}` }
+      const token = session.access_token
+      const headers = { Authorization: `Bearer ${token}` }
 
-    const [profileRes, gpuRes, platformRes, keyRes] = await Promise.all([
-      fetch('/api/credits/balance', { headers }),
-      supabase.from('gpu_instances').select('status, ip_address, last_seen_at').eq('user_id', session.user.id).maybeSingle(),
-      supabase.from('platform_connections').select('platform').eq('user_id', session.user.id),
-      fetch('/api/apikey', { headers }),
-    ])
+      const [profileRes, gpuRes, platformRes, keyRes] = await Promise.all([
+        fetch('/api/credits/balance', { headers }),
+        supabase.from('gpu_instances').select('status, ip_address, last_seen_at').eq('user_id', session.user.id).maybeSingle(),
+        supabase.from('platform_connections').select('platform').eq('user_id', session.user.id),
+        fetch('/api/apikey', { headers }),
+      ])
 
-    const credits = await profileRes.json().catch(() => ({ seconds: 0 }))
-    const keyData = await keyRes.json().catch(() => ({ exists: false }))
+      const credits = await profileRes.json().catch(() => ({ seconds: 0 }))
+      const keyData = await keyRes.json().catch(() => ({ exists: false }))
 
-    setData({
-      credits_seconds: credits.seconds ?? 0,
-      gpu: gpuRes.data ?? null,
-      platforms: (platformRes.data ?? []).map((p: { platform: string }) => p.platform),
-      api_key_exists: keyData.exists ?? false,
-    })
-    setLoading(false)
+      setData({
+        credits_seconds: credits.seconds ?? 0,
+        gpu: gpuRes.data ?? null,
+        platforms: (platformRes.data ?? []).map((p: { platform: string }) => p.platform),
+        api_key_exists: keyData.exists ?? false,
+      })
+    } catch (err) {
+      console.error('Dashboard load failed:', err)
+    } finally {
+      setLoading(false)
+    }
   }, [router])
 
   useEffect(() => { load() }, [load])
