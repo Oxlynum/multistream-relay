@@ -3,6 +3,7 @@ relay/__pycache__/
 relay/config.json
 relay/relay.crt
 relay/relay.key
+relay/relay.env
 
 # Installer output
 *.pkg

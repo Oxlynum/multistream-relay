@@ -6,26 +6,22 @@
 #   bash installers/macos/build-installer.sh
 #
 # Requirements: Xcode CLT, CMake, OBS.app at /Applications/OBS.app
-# Output:  obs-relay-control-<version>-macOS.pkg  (in current directory)
+# Output:  slimcast-obs-<version>-macOS.pkg  (in current directory)
 
 set -euo pipefail
 cd "$(dirname "$0")/../.."   # repo root = obs-relay-control/
 
 # ── Config ────────────────────────────────────────────────────────────────────
-PLUGIN_ID="com.relaycontrol.obs-relay-control"
-VERSION="1.0.0"
-OUT_PKG="obs-relay-control-${VERSION}-macOS.pkg"
+PLUGIN_ID="com.slimcast.obs-plugin"
+VERSION="2.0.0"
+OUT_PKG="slimcast-obs-${VERSION}-macOS.pkg"
 
-# OBS on macOS only loads plugins from the user Library, not the system Library.
-# The .pkg payload stages the plugin under /Library/... (requires admin) and the
-# postinstall script moves it into the current user's ~/Library/... afterwards.
-SYSTEM_STAGE_SUBPATH="Library/Application Support/obs-relay-control-staging"
+SYSTEM_STAGE_SUBPATH="Library/Application Support/slimcast-obs-staging"
 
 STAGING_DIR="$(pwd)/.staging-macos"
 SCRIPTS_DIR="$(pwd)/.scripts-macos"
 COMP_PKG="$(pwd)/.component.pkg"
 
-# Pick the right preset for this machine (arm64 or x86_64)
 case "$(uname -m)" in
     arm64)  PRESET="macos-arm64"  ;;
     x86_64) PRESET="macos-x86_64" ;;
@@ -52,8 +48,6 @@ cmake --install "$BUILD_DIR" \
     --prefix "$STAGING_DIR/$SYSTEM_STAGE_SUBPATH"
 
 # ── postinstall script ────────────────────────────────────────────────────────
-# Runs as root after the payload is dropped. Moves the plugin from the staging
-# area into the current user's OBS plugins directory (the only path OBS scans).
 cat > "$SCRIPTS_DIR/postinstall" << 'EOF'
 #!/bin/bash
 set -euo pipefail
@@ -65,15 +59,14 @@ fi
 
 USER_HOME=$(dscl . -read /Users/"$CONSOLE_USER" NFSHomeDirectory | awk '{print $2}')
 OBS_PLUGINS="$USER_HOME/Library/Application Support/obs-studio/plugins"
-STAGING="/Library/Application Support/obs-relay-control-staging"
+STAGING="/Library/Application Support/slimcast-obs-staging"
 
 mkdir -p "$OBS_PLUGINS"
-rm -rf "$OBS_PLUGINS/obs-relay-control.plugin"
-cp -rf "$STAGING/obs-relay-control.plugin" "$OBS_PLUGINS/"
-chown -R "$CONSOLE_USER" "$OBS_PLUGINS/obs-relay-control.plugin"
+rm -rf "$OBS_PLUGINS/slimcast-obs.plugin"
+cp -rf "$STAGING/slimcast-obs.plugin" "$OBS_PLUGINS/"
+chown -R "$CONSOLE_USER" "$OBS_PLUGINS/slimcast-obs.plugin"
 rm -rf "$STAGING"
 
-# Self-delete the .pkg — $PACKAGE_PATH is set by macOS Installer to the pkg path
 if [ -n "${PACKAGE_PATH:-}" ] && [ -f "$PACKAGE_PATH" ]; then
     rm -f "$PACKAGE_PATH"
 fi
@@ -90,7 +83,7 @@ pkgbuild \
     --install-location "/" \
     "$COMP_PKG"
 
-# ── Distribution package (wraps component with installer UI) ──────────────────
+# ── Distribution package ──────────────────────────────────────────────────────
 echo "==> Creating distribution package…"
 productbuild \
     --distribution "$(dirname "$0")/distribution.xml" \
@@ -103,5 +96,4 @@ rm -rf "$STAGING_DIR" "$SCRIPTS_DIR" "$COMP_PKG"
 
 echo ""
 echo "Done: $OUT_PKG"
-echo "Double-click the .pkg to install. Restart OBS afterwards."
-echo "(Docks → Relay Control)"
+echo "Double-click to install. Restart OBS, then open Docks → SlimCast."

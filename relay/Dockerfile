@@ -32,9 +32,12 @@ COPY requirements.txt .
 RUN pip3 install --no-cache-dir -r requirements.txt
 
 COPY . .
-RUN chmod +x start.sh
+RUN chmod +x start.sh hook.sh 2>/dev/null || true
 
-# 1935 = RTMP ingest (expose via RunPod TCP) ; 8080 = control panel
+# 1935 = RTMP ingest (expose via RunPod TCP) ; 8080 = control panel (debug)
 EXPOSE 1935 8080
 
-CMD ["./start.sh"]
+# agent.py is the production entrypoint.
+# It handles pairing with Vercel, starting MediaMTX, and polling config.
+# start.sh remains for local development / debugging.
+CMD ["python3", "agent.py"]

@@ -38,5 +38,22 @@ echo "==> Python deps"
 pip3 install -r requirements.txt
 
 chmod +x start.sh hook.sh run.sh 2>/dev/null || true
+
+if [[ ! -f relay.env ]]; then
+  echo "==> Generating credentials"
+  PASS=$(python3 -c "import secrets; print(secrets.token_urlsafe(16))")
+  TOKEN=$(python3 -c "import secrets; print(secrets.token_urlsafe(16))")
+  cat > relay.env <<EOF
+RELAY_PASSWORD='$PASS'
+RELAY_TOKEN='$TOKEN'
+RELAY_STOP_GRACE=20
+EOF
+  echo "    Password : $PASS"
+  echo "    Token    : $TOKEN"
+  echo "    Saved to relay.env (never commit this file)"
+else
+  echo "==> relay.env already exists — skipping credential generation"
+fi
+
 echo
 echo "Setup complete.  Start everything with:   bash run.sh"

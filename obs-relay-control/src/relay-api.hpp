@@ -5,35 +5,41 @@
 #include <QJsonArray>
 #include <functional>
 
-// Thin async wrapper around the relay's FastAPI control plane.
-// All results are delivered via signals on the Qt main thread.
+struct GpuInfo {
+    QString status;       // "provisioning" | "running" | "stopped" | "error"
+    QString ip;           // populated when running
+    QString rtmpUrl;      // rtmp://{ip}:1935/live
+    int     creditsSeconds = 0;
+};
+
+// All communication with slimcast.com. Base URL is compiled in; API key is
+// set once by the user and persisted in QSettings.
 class RelayApi : public QObject {
     Q_OBJECT
 
 public:
     explicit RelayApi(QObject *parent = nullptr);
 
-    void setEndpoint(const QString &baseUrl, const QString &token);
-    bool hasEndpoint() const { return !m_baseUrl.isEmpty(); }
+    void setApiKey(const QString &key);
+    bool hasApiKey() const { return !m_apiKey.isEmpty(); }
 
-    void fetchConfig();
-    void saveConfig(const QJsonObject &config);
-    void sendControl(const QString &action, bool grace = false);
-    void fetchStatus();
-    void fetchLogs(const QString &outputName);
+    void fetchGpuStatus();
+    void provisionGpu();
+    void stopGpu();
+    void sendControl(const QString &command);   // "start" | "stop"
+    void fetchCredits();
 
 signals:
-    void configLoaded(QJsonObject config);
-    void configSaved();
-    void controlAcked(QString action);
-    void statusUpdated(QJsonArray outputs);
-    void logsReceived(QString name, QStringList lines);
+    void gpuStatusUpdated(GpuInfo info);
+    void gpuProvisioned();
+    void gpuStopped();
+    void controlSent(QString command);
+    void creditsUpdated(int seconds);
     void networkError(QString message);
 
 private:
     QNetworkAccessManager *m_nam;
-    QString m_baseUrl;
-    QString m_token;
+    QString m_apiKey;
 
     QNetworkRequest makeRequest(const QString &path) const;
     void dispatch(QNetworkReply *reply,

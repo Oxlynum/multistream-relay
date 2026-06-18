@@ -18,14 +18,21 @@ export default function SignupPage() {
     setError('')
 
     const supabase = createBrowserClient()
-    const { error } = await supabase.auth.signUp({ email, password })
+    const { data, error } = await supabase.auth.signUp({ email, password })
     if (error) {
-      setError(error.message)
+      setError(error.message || JSON.stringify(error))
       setLoading(false)
       return
     }
 
-    router.push('/dashboard')
+    // Supabase returns a fake session when email confirmation is on
+    if (!data.session) {
+      setError('Check your email to confirm your account before logging in.')
+      setLoading(false)
+      return
+    }
+
+    router.push('/onboarding')
   }
 
   return (

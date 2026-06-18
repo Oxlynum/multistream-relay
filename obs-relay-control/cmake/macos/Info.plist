@@ -5,21 +5,21 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleDisplayName</key>
-    <string>obs-relay-control</string>
+    <string>SlimCast</string>
     <key>CFBundleExecutable</key>
-    <string>obs-relay-control</string>
+    <string>slimcast-obs</string>
     <key>CFBundleIdentifier</key>
-    <string>com.obsrelaycontrol.obs-relay-control</string>
+    <string>com.slimcast.obs-plugin</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>obs-relay-control</string>
+    <string>slimcast-obs</string>
     <key>CFBundlePackageType</key>
     <string>BNDL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0.0</string>
+    <string>2.0.0</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>2</string>
     <key>LSMinimumSystemVersion</key>
     <string>12.0</string>
 </dict>

@@ -35,6 +35,17 @@ if [[ ! -f relay.crt ]] || [[ ! -f relay.key ]]; then
     echo "TLS certificate generated (relay.crt / relay.key)"
 fi
 
+# Print OBS setup info so the user can copy-paste without hunting for the token.
+EXT_IP=$(curl -sf --max-time 4 https://api.ipify.org 2>/dev/null || echo '<pod-external-ip>')
+DOCK_TOKEN="${RELAY_TOKEN:-${RELAY_PASSWORD}}"
+echo ""
+echo "==> OBS Setup"
+echo "    Stream URL   (Settings → Stream → Custom RTMP):"
+echo "      rtmp://${EXT_IP}:1935/live"
+echo "    Control Dock (Docks → Custom Browser Dock):"
+echo "      https://${EXT_IP}:8080/?token=${DOCK_TOKEN}"
+echo ""
+
 # 2) Control panel + relay supervisor (foreground)
 echo "Starting control panel on :8080 (HTTPS)..."
 exec uvicorn app:app --host 0.0.0.0 --port 8080 \

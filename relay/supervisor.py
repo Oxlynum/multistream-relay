@@ -64,6 +64,19 @@ def _full_rtmp_url(out: dict) -> str:
     return url.rstrip("/") + "/" + key
 
 
+PLATFORM_MAX_BITRATE: dict[str, int] = {
+    "twitch": 8000,
+    "kick": 8000,
+    "youtube": 9000,
+    "tiktok": 4500,
+    "facebook": 4000,
+}
+
+# Source resolution (must match OBS output — used for pillarbox pad calculation).
+SOURCE_WIDTH = int(os.environ.get("SOURCE_WIDTH", "1920"))
+SOURCE_HEIGHT = int(os.environ.get("SOURCE_HEIGHT", "1080"))
+
+
 def build_cmd(out: dict, source: str = LOCAL_SOURCE) -> list[str]:
     """Return an FFmpeg argv list for a single output definition."""
     mode = out.get("mode", "transcode")
@@ -85,30 +98,51 @@ def build_cmd(out: dict, source: str = LOCAL_SOURCE) -> list[str]:
         ]
 
     # transcode mode: NVDEC decode -> H.264 NVENC -> RTMP(S)
-    bv = str(int(out.get("bitrate_kbps", 8000)))
+    platform = out.get("name", "")
+    max_bv = PLATFORM_MAX_BITRATE.get(platform, 8000)
+    bv = min(int(out.get("bitrate_kbps", max_bv)), max_bv)
     fps = int(out.get("fps", 60))
     gop = str(fps * 2)  # 2-second keyframe interval
+    orientation = out.get("orientation", "landscape")
+    portrait = orientation == "portrait"
 
-    cmd = [
-        "ffmpeg", "-hide_banner", "-loglevel", "warning",
-        "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
-        *_input_args(source),
-        "-i", source,
-    ]
+    if portrait:
+        # Portrait output (TikTok 9:16): CPU-side pillarbox.
+        # Landscape source → scale down preserving aspect → pad to 1080×1920.
+        # Using CPU (scale + pad) because scale_cuda does not support pad.
+        # Acceptable: portrait outputs are lower bitrate (≤4500 kbps).
+        out_w, out_h = 1080, 1920
+        vf = (
+            f"scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,"
+            f"pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black"
+        )
+        cmd = [
+            "ffmpeg", "-hide_banner", "-loglevel", "warning",
+            *_input_args(source),
+            "-i", source,
+            "-vf", vf,
+        ]
+    else:
+        cmd = [
+            "ffmpeg", "-hide_banner", "-loglevel", "warning",
+            "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
+            *_input_args(source),
+            "-i", source,
+        ]
+        width = out.get("width")
+        height = out.get("height")
+        if width and height:
+            # GPU-side rescale; only added when the output differs from source.
+            cmd += ["-vf", f"scale_cuda={int(width)}:{int(height)}"]
 
-    width = out.get("width")
-    height = out.get("height")
-    if width and height:
-        # GPU-side rescale; only added when the output differs from source.
-        cmd += ["-vf", f"scale_cuda={int(width)}:{int(height)}"]
-
+    bufsize = str(bv * 2)  # 2x bitrate: headroom for explosion/complexity spikes
     cmd += [
         "-c:v", "h264_nvenc",
         "-preset", "p7", "-tune", "hq", "-multipass", "fullres",
-        "-rc", "cbr", "-b:v", f"{bv}k", "-maxrate", f"{bv}k", "-bufsize", f"{bv}k",
+        "-rc", "cbr", "-b:v", f"{bv}k", "-maxrate", f"{bv}k", "-bufsize", f"{bufsize}k",
         "-profile:v", "high", "-g", gop,
-        "-bf", "3", "-b_ref_mode", "middle", "-rc-lookahead", "20",
-        "-spatial-aq", "1", "-temporal-aq", "1", "-aq-strength", "8",
+        "-bf", "3", "-b_ref_mode", "middle", "-rc-lookahead", "32",
+        "-spatial-aq", "1", "-temporal-aq", "1", "-aq-strength", "6",
         "-r", str(fps),
         "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
         "-f", "flv", _full_rtmp_url(out),
