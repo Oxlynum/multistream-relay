@@ -1,8 +1,8 @@
 import { createServerClient } from '@/lib/supabase'
 import { generateApiKey, hashApiKey } from '@/lib/agent-auth'
 
-// GET  — check whether an API key exists (returns exists: bool, not the key itself)
-// POST — generate (or regenerate) an API key; returns the raw key ONCE
+// GET  — check whether a user API key exists
+// POST — generate (or regenerate) a user API key; returns the raw key ONCE
 export async function GET(request: Request) {
   const supabase = createServerClient()
 
@@ -15,7 +15,10 @@ export async function GET(request: Request) {
     .from('agent_api_keys')
     .select('id, created_at')
     .eq('user_id', user.id)
-    .single()
+    .eq('label', 'user')
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
 
   return Response.json({ exists: !!data, created_at: data?.created_at ?? null })
 }
@@ -31,12 +34,20 @@ export async function POST(request: Request) {
   const rawKey = generateApiKey()
   const keyHash = hashApiKey(rawKey)
 
-  // Upsert — replaces any existing key for this user.
-  await supabase.from('agent_api_keys').upsert(
-    { user_id: user.id, key_hash: keyHash, created_at: new Date().toISOString() },
-    { onConflict: 'user_id' }
-  )
+  // Delete all existing user-label keys, then insert the new one.
+  // Keeps pod-label keys (ephemeral per-session) untouched.
+  await supabase
+    .from('agent_api_keys')
+    .delete()
+    .eq('user_id', user.id)
+    .eq('label', 'user')
 
-  // Return the raw key. It cannot be recovered after this response.
+  await supabase.from('agent_api_keys').insert({
+    user_id: user.id,
+    key_hash: keyHash,
+    label: 'user',
+  })
+
+  // Return the raw key — it cannot be recovered after this response.
   return Response.json({ api_key: rawKey })
 }

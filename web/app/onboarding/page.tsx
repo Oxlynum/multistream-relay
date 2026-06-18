@@ -1,10 +1,10 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 import { createBrowserClient } from '@/lib/supabase'
 
-const STEPS = ['Connect Platforms', 'Download Plugin', 'Launch GPU', "You're Ready"]
+const STEPS = ['Connect Platforms', 'Your API Key', 'Install Plugin', "You're Ready"]
 
 const PLATFORMS = [
   { id: 'twitch',   label: 'Twitch',   note: '' },
@@ -14,15 +14,15 @@ const PLATFORMS = [
   { id: 'facebook', label: 'Facebook', note: 'Use your Creator Studio stream key' },
 ]
 
-type GpuStatus = 'idle' | 'provisioning' | 'running' | 'error'
-
 export default function OnboardingPage() {
   const router = useRouter()
   const [step, setStep] = useState(0)
   const [streamKeys, setStreamKeys] = useState<Record<string, string>>({})
   const [saving, setSaving] = useState(false)
-  const [gpuStatus, setGpuStatus] = useState<GpuStatus>('idle')
   const [token, setToken] = useState<string | null>(null)
+  const [apiKey, setApiKey] = useState<string | null>(null)
+  const [apiKeyCopied, setApiKeyCopied] = useState(false)
+  const [apiKeyLoading, setApiKeyLoading] = useState(false)
 
   useEffect(() => {
     async function init() {
@@ -34,12 +34,25 @@ export default function OnboardingPage() {
     init()
   }, [router])
 
+  const generateKey = useCallback(async (tok: string) => {
+    setApiKeyLoading(true)
+    try {
+      const res = await fetch('/api/apikey', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${tok}` },
+      })
+      const body = await res.json()
+      setApiKey(body.api_key)
+    } finally {
+      setApiKeyLoading(false)
+    }
+  }, [])
+
   const connectedCount = Object.values(streamKeys).filter(v => v.trim()).length
 
   async function savePlatforms() {
     if (!token || connectedCount === 0) return
     setSaving(true)
-
     await Promise.all(
       Object.entries(streamKeys)
         .filter(([, key]) => key.trim())
@@ -51,45 +64,20 @@ export default function OnboardingPage() {
           })
         )
     )
-
     setSaving(false)
-    setStep(1)
+    goToApiKeyStep()
   }
 
-  async function provisionGpu() {
-    if (!token) return
-    setGpuStatus('provisioning')
+  function goToApiKeyStep() {
+    setStep(1)
+    if (token && !apiKey) generateKey(token)
+  }
 
-    const res = await fetch('/api/gpu/provision', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}` },
-    })
-
-    if (!res.ok) {
-      setGpuStatus('error')
-      return
-    }
-
-    // Poll until agent checks in (up to 90s)
-    const supabase = createBrowserClient()
-    const { data: { session } } = await supabase.auth.getSession()
-    if (!session) return
-
-    for (let i = 0; i < 18; i++) {
-      await new Promise(r => setTimeout(r, 5000))
-      const { data } = await supabase
-        .from('gpu_instances')
-        .select('status')
-        .eq('user_id', session.user.id)
-        .single()
-      if ((data as { status: string } | null)?.status === 'running') {
-        setGpuStatus('running')
-        return
-      }
-    }
-
-    // Timed out but likely still starting — mark running anyway for UX
-    setGpuStatus('running')
+  function copyKey() {
+    if (!apiKey) return
+    navigator.clipboard.writeText(apiKey)
+    setApiKeyCopied(true)
+    setTimeout(() => setApiKeyCopied(false), 2000)
   }
 
   return (
@@ -100,7 +88,7 @@ export default function OnboardingPage() {
           <p className="text-gray-400 text-sm mt-1">Stream everywhere, no setup.</p>
         </div>
 
-        {/* Progress bar */}
+        {/* Progress */}
         <div className="flex gap-1 mb-10">
           {STEPS.map((label, i) => (
             <div key={label} className="flex-1 flex flex-col items-center gap-1">
@@ -144,7 +132,7 @@ export default function OnboardingPage() {
                 {saving ? 'Saving…' : `Continue with ${connectedCount} platform${connectedCount !== 1 ? 's' : ''}`}
               </button>
               <button
-                onClick={() => setStep(1)}
+                onClick={() => goToApiKeyStep()}
                 className="px-4 py-3 text-sm text-gray-500 hover:text-gray-300 transition-colors"
               >
                 Skip
@@ -153,12 +141,78 @@ export default function OnboardingPage() {
           </div>
         )}
 
-        {/* Step 1: Download Plugin */}
+        {/* Step 1: API Key */}
         {step === 1 && (
+          <div>
+            <h1 className="text-xl font-bold mb-2">Your API key</h1>
+            <p className="text-sm text-gray-400 mb-6">
+              This key links your OBS plugin to your SlimCast account. Enter it once in the SlimCast panel inside OBS — you&apos;re never asked again.
+            </p>
+
+            {apiKeyLoading && (
+              <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 text-center text-gray-500 text-sm mb-4">
+                Generating your key…
+              </div>
+            )}
+
+            {apiKey && (
+              <div className="space-y-3 mb-6">
+                <div className="bg-amber-950/40 border border-amber-800 rounded-xl px-4 py-3 text-sm text-amber-400">
+                  Copy this key now — it won&apos;t be shown again.
+                </div>
+                <div className="flex items-center gap-3">
+                  <code className="flex-1 bg-gray-900 border border-gray-700 rounded-xl px-4 py-3 text-sm font-mono text-gray-200 break-all">
+                    {apiKey}
+                  </code>
+                  <button
+                    onClick={copyKey}
+                    className={`px-4 py-3 rounded-xl text-sm font-semibold transition-colors min-w-[80px] ${
+                      apiKeyCopied
+                        ? 'bg-green-700 text-white'
+                        : 'bg-blue-600 hover:bg-blue-500 text-white'
+                    }`}
+                  >
+                    {apiKeyCopied ? 'Copied!' : 'Copy'}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 text-sm text-gray-400 space-y-2 mb-6">
+              <p className="font-medium text-white text-xs uppercase tracking-wider mb-3">Where to paste it</p>
+              <div className="flex gap-3">
+                <span className="text-blue-400 font-bold shrink-0">1.</span>
+                <span>Open OBS → look for the <strong className="text-white">SlimCast</strong> panel in your docks</span>
+              </div>
+              <div className="flex gap-3">
+                <span className="text-blue-400 font-bold shrink-0">2.</span>
+                <span>Click the <strong className="text-white">Account</strong> tab</span>
+              </div>
+              <div className="flex gap-3">
+                <span className="text-blue-400 font-bold shrink-0">3.</span>
+                <span>Paste your API key and click <strong className="text-white">Save</strong></span>
+              </div>
+            </div>
+
+            <p className="text-xs text-gray-600 mb-6">
+              Lost your key? You can generate a new one anytime from the dashboard. This will invalidate the old key.
+            </p>
+
+            <button
+              onClick={() => setStep(2)}
+              className="w-full bg-blue-600 hover:bg-blue-500 py-3 rounded-xl font-semibold transition-colors"
+            >
+              I&apos;ve copied it — continue
+            </button>
+          </div>
+        )}
+
+        {/* Step 2: Install Plugin */}
+        {step === 2 && (
           <div>
             <h1 className="text-xl font-bold mb-2">Install the OBS plugin</h1>
             <p className="text-sm text-gray-400 mb-6">
-              The SlimCast plugin adds a dock to OBS. One double-click to install — no settings to configure.
+              One double-click to install. The SlimCast panel appears in OBS automatically.
             </p>
             <div className="flex gap-3 mb-6">
               <a
@@ -176,68 +230,17 @@ export default function OnboardingPage() {
                 <div className="text-xs text-gray-400">.exe installer</div>
               </a>
             </div>
-            <ol className="text-sm text-gray-400 space-y-1 list-decimal list-inside mb-8">
-              <li>Download and double-click the installer</li>
-              <li>Open OBS — the SlimCast panel will be there</li>
-              <li>Enter your API key from the dashboard (one time)</li>
-            </ol>
-            <button
-              onClick={() => setStep(2)}
-              className="w-full bg-blue-600 hover:bg-blue-500 py-3 rounded-xl font-semibold transition-colors"
-            >
-              I&apos;ve installed it
-            </button>
-          </div>
-        )}
-
-        {/* Step 2: Provision GPU */}
-        {step === 2 && (
-          <div>
-            <h1 className="text-xl font-bold mb-2">Launch your GPU</h1>
-            <p className="text-sm text-gray-400 mb-6">
-              SlimCast spins up a cloud GPU to transcode and relay your stream. Takes about 45 seconds.
-            </p>
-            {gpuStatus === 'idle' && (
-              <button
-                onClick={provisionGpu}
-                className="w-full bg-green-700 hover:bg-green-600 py-4 rounded-xl font-semibold transition-colors mb-4"
-              >
-                Launch GPU
-              </button>
-            )}
-            {gpuStatus === 'provisioning' && (
-              <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 text-center mb-4">
-                <div className="text-yellow-400 font-semibold mb-2">Starting up…</div>
-                <div className="text-sm text-gray-400">This takes about 45 seconds.</div>
-                <div className="mt-4 h-1 bg-gray-800 rounded-full overflow-hidden">
-                  <div className="h-full bg-yellow-500 animate-pulse rounded-full w-3/4" />
-                </div>
-              </div>
-            )}
-            {gpuStatus === 'running' && (
-              <div className="bg-green-900/30 border border-green-700 rounded-xl p-6 text-center mb-4">
-                <div className="text-green-400 font-semibold text-lg mb-1">GPU Ready ✓</div>
-                <div className="text-sm text-gray-400">Your relay is online.</div>
-              </div>
-            )}
-            {gpuStatus === 'error' && (
-              <div className="bg-red-950/40 border border-red-800 rounded-xl p-4 text-sm text-red-400 mb-4">
-                Something went wrong. <button onClick={() => setGpuStatus('idle')} className="underline">Try again</button>
-              </div>
-            )}
-            {(gpuStatus === 'running') && (
-              <button
-                onClick={() => setStep(3)}
-                className="w-full bg-blue-600 hover:bg-blue-500 py-3 rounded-xl font-semibold transition-colors"
-              >
-                Continue
-              </button>
-            )}
             <button
               onClick={() => setStep(3)}
-              className="w-full mt-3 text-sm text-gray-500 hover:text-gray-300 py-2 transition-colors"
+              className="w-full bg-blue-600 hover:bg-blue-500 py-3 rounded-xl font-semibold transition-colors mb-3"
             >
-              Skip — I&apos;ll do this later
+              Installed — continue
+            </button>
+            <button
+              onClick={() => setStep(3)}
+              className="w-full text-sm text-gray-500 hover:text-gray-300 py-2 transition-colors"
+            >
+              Skip — I&apos;ll install it later
             </button>
           </div>
         )}
@@ -256,14 +259,17 @@ export default function OnboardingPage() {
                   <span>✓</span><span>{connectedCount} platform{connectedCount !== 1 ? 's' : ''} connected</span>
                 </div>
               )}
-              <div className="flex items-center gap-2 text-gray-400">
-                <span>→</span><span>Install OBS plugin + enter API key from dashboard</span>
-              </div>
-              {gpuStatus === 'running' && (
+              {apiKey && (
                 <div className="flex items-center gap-2 text-green-400">
-                  <span>✓</span><span>GPU online</span>
+                  <span>✓</span><span>API key generated</span>
                 </div>
               )}
+              <div className="flex items-center gap-2 text-gray-400">
+                <span>→</span>
+                <span>
+                  Start Streaming in OBS → SlimCast auto-launches your GPU and goes live on all platforms
+                </span>
+              </div>
             </div>
 
             <button

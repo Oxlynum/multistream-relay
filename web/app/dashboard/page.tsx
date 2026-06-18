@@ -7,7 +7,6 @@ import { createBrowserClient } from '@/lib/supabase'
 interface DashboardData {
   credits_seconds: number
   platforms: string[]
-  api_key_exists: boolean
 }
 
 interface Stats {
@@ -58,19 +57,16 @@ export default function DashboardPage() {
       const token = session.access_token
       const headers = { Authorization: `Bearer ${token}` }
 
-      const [profileRes, platformRes, keyRes] = await Promise.all([
+      const [profileRes, platformRes] = await Promise.all([
         fetch('/api/credits/balance', { headers }),
         supabase.from('platform_connections').select('platform').eq('user_id', session.user.id),
-        fetch('/api/apikey', { headers }),
       ])
 
       const credits = await profileRes.json().catch(() => ({ seconds: 0 }))
-      const keyData = await keyRes.json().catch(() => ({ exists: false }))
 
       setData({
         credits_seconds: credits.seconds ?? 0,
         platforms: (platformRes.data ?? []).map((p: { platform: string }) => p.platform),
-        api_key_exists: keyData.exists ?? false,
       })
     } catch (err) {
       console.error('Dashboard load failed:', err)
@@ -249,14 +245,14 @@ export default function DashboardPage() {
 
         {/* API Key */}
         <div className="bg-gray-900 border border-gray-800 rounded-2xl p-6">
-          <div className="text-sm text-gray-400 mb-1">SlimCast API key</div>
+          <div className="text-sm text-gray-400 mb-1">OBS API key</div>
           <div className="text-xs text-gray-500 mb-4">
-            Enter this once in the OBS plugin to link your account.
+            Paste this into the SlimCast panel inside OBS. Refreshing creates a new key and invalidates the old one.
           </div>
           {apiKey ? (
             <div className="space-y-3">
               <div className="bg-amber-950/40 border border-amber-800 rounded-lg px-3 py-2 text-xs text-amber-400">
-                Save this key now — it won&apos;t be shown again.
+                Copy this now — it won&apos;t be shown again.
               </div>
               <div className="flex items-center gap-3">
                 <code className="flex-1 bg-gray-800 rounded-lg px-3 py-2 text-sm font-mono text-gray-300 break-all">
@@ -264,7 +260,7 @@ export default function DashboardPage() {
                 </code>
                 <button
                   onClick={() => copy(apiKey, 'apikey')}
-                  className="bg-gray-700 hover:bg-gray-600 px-3 py-2 rounded-lg text-sm transition-colors min-w-[60px]"
+                  className={`px-3 py-2 rounded-lg text-sm transition-colors min-w-[70px] ${copied === 'apikey' ? 'bg-green-700 text-white' : 'bg-gray-700 hover:bg-gray-600'}`}
                 >
                   {copied === 'apikey' ? 'Copied!' : 'Copy'}
                 </button>
@@ -275,7 +271,7 @@ export default function DashboardPage() {
               onClick={generateApiKey}
               className="bg-gray-700 hover:bg-gray-600 px-5 py-2 rounded-lg text-sm font-semibold transition-colors"
             >
-              {data?.api_key_exists ? 'Regenerate API key' : 'Generate API key'}
+              Refresh API key
             </button>
           )}
         </div>
