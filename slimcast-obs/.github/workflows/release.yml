@@ -45,7 +45,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: obs-relay-control-macOS
+          name: slimcast-obs-macOS
           path: "*.pkg"
           if-no-files-found: error
 
@@ -84,7 +84,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: obs-relay-control-Windows
+          name: slimcast-obs-Windows
           path: "*.exe"
           if-no-files-found: error
 

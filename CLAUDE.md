@@ -15,7 +15,7 @@ No subscription. 2 free hours on signup.
 - Pipeline confirmed working end-to-end (Twitch at 1080p60).
 - Provider: **RunPod** (pay-per-use, Ada NVENC, ~$0.20/hr, ~45s cold start).
 - Web app (Next.js) in `web/` — Supabase + Stripe wired, deploys to Vercel.
-- OBS plugin in `obs-relay-control/` — complete v1.0.0 C++ plugin with .pkg/.exe
+- OBS plugin in `slimcast-obs/` — complete v2.0.0 C++ plugin with .pkg/.exe
   installer and CI/CD. Needs to be updated for the new Vercel-agent architecture.
 - **Active build sprint:** productizing into a fully self-serve SaaS.
   See the plan at `/Users/danielaltom/.claude/plans/alright-lets-plan-this-eventual-clover.md`
@@ -25,7 +25,7 @@ No subscription. 2 free hours on signup.
   agent.py (to be built) replaces setup.sh/run.sh for Docker auto-boot.
 - `web/` — Next.js app: auth, dashboard, platform config, credit billing, OBS dock.
   Stack: Next.js + Supabase + Stripe. Deploys to Vercel.
-- `obs-relay-control/` — C++ OBS plugin (v1.0.0 complete). Manages relay from OBS.
+- `slimcast-obs/` — C++ OBS plugin (v2.0.0 complete). Manages relay from OBS.
 - `docs/` — architecture notes and product plan (may be stale vs plan file above).
 
 ## Target user flow (the north star — nothing should require a terminal)
@@ -95,7 +95,7 @@ They just aren't the brand. The brand is "stream everywhere, no setup."
 - `app/obs-dock/` (TO BUILD) — compact dark panel loaded inside OBS.
 - `middleware.ts` (TO BUILD) — protect /dashboard/* routes.
 
-### obs-relay-control/
+### slimcast-obs/
 - Complete v1.0.0 C++ plugin. Has 3 tabs, CI/CD, .pkg/.exe installer.
 - Needs: API key input replacing server IP; relay-api pointing to slimcast.com;
   cloud-provider.cpp removed; TikTok/Facebook platforms added; credit balance display.

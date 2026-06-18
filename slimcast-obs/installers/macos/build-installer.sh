@@ -2,14 +2,14 @@
 # installers/macos/build-installer.sh
 #
 # Builds the plugin and produces a macOS .pkg installer.
-# Run from the obs-relay-control/ directory:
+# Run from the slimcast-obs/ directory:
 #   bash installers/macos/build-installer.sh
 #
 # Requirements: Xcode CLT, CMake, OBS.app at /Applications/OBS.app
 # Output:  slimcast-obs-<version>-macOS.pkg  (in current directory)
 
 set -euo pipefail
-cd "$(dirname "$0")/../.."   # repo root = obs-relay-control/
+cd "$(dirname "$0")/../.."   # repo root = slimcast-obs/
 
 # ── Config ────────────────────────────────────────────────────────────────────
 PLUGIN_ID="com.slimcast.obs-plugin"
