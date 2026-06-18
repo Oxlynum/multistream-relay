@@ -253,8 +253,9 @@ void RelayDock::onStartRelay()
 void RelayDock::onStopRelay()
 {
     if (!m_api->hasApiKey()) return;
-    m_api->sendControl("stop");
-    m_statusBar->setText("Stop command sent.");
+    m_api->stopGpu();
+    setServerStatus("● Offline", "gray");
+    m_statusBar->setText("Server shut down.");
 }
 
 // ── OBS stream event handlers ─────────────────────────────────────────────────
@@ -301,7 +302,10 @@ void RelayDock::onObsStreamingStopped()
         // Don't relay the stop signal to the server.
         return;
     }
-    m_api->sendControl("stop");
+    // Destroy the pod entirely — no idle billing between streams.
+    m_api->stopGpu();
+    setServerStatus("● Offline", "gray");
+    m_statusBar->setText("Stream stopped. Server shut down.");
 }
 
 // ── GPU status & launch polling ───────────────────────────────────────────────
