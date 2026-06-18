@@ -4,52 +4,48 @@ import { useEffect, useState, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 import { createBrowserClient } from '@/lib/supabase'
 
-interface GpuInstance {
-  status: string
-  ip_address: string | null
-  last_seen_at: string | null
-}
-
-interface AgentOutput {
-  name: string
-  state: string
-}
-
 interface DashboardData {
   credits_seconds: number
-  gpu: GpuInstance | null
   platforms: string[]
   api_key_exists: boolean
+}
+
+interface Stats {
+  period: string
+  credit_balance_seconds: number
+  total_duration_seconds: number
+  total_credits_used_seconds: number
+  session_count: number
+  avg_duration_seconds: number
+  top_platforms: Array<{ platform: string; count: number }>
 }
 
 const PLATFORM_LABELS: Record<string, string> = {
   twitch: 'Twitch', kick: 'Kick', youtube: 'YouTube', tiktok: 'TikTok', facebook: 'Facebook',
 }
 
-function creditsFormatted(seconds: number) {
+function fmt(seconds: number) {
+  if (seconds <= 0) return '0m'
   const h = Math.floor(seconds / 3600)
   const m = Math.floor((seconds % 3600) / 60)
-  return h > 0 ? `${h}h ${m}m` : `${m}m`
+  if (h > 0 && m > 0) return `${h}h ${m}m`
+  if (h > 0) return `${h}h`
+  return `${m}m`
 }
 
-function gpuStatusColor(status: string) {
-  if (status === 'running') return 'bg-green-500'
-  if (status === 'provisioning') return 'bg-yellow-500'
-  return 'bg-gray-500'
-}
-
-function gpuStatusLabel(status: string) {
-  if (status === 'running') return 'Online'
-  if (status === 'provisioning') return 'Starting…'
-  return 'Offline'
-}
+const PERIODS = [
+  { value: '7d',  label: '7 days' },
+  { value: '30d', label: '30 days' },
+  { value: 'all', label: 'All time' },
+]
 
 export default function DashboardPage() {
   const router = useRouter()
   const [data, setData] = useState<DashboardData | null>(null)
-  const [outputs, setOutputs] = useState<AgentOutput[]>([])
+  const [stats, setStats] = useState<Stats | null>(null)
+  const [period, setPeriod] = useState('30d')
   const [loading, setLoading] = useState(true)
-  const [gpuLoading, setGpuLoading] = useState(false)
+  const [statsLoading, setStatsLoading] = useState(false)
   const [apiKey, setApiKey] = useState<string | null>(null)
   const [copied, setCopied] = useState<string | null>(null)
 
@@ -62,9 +58,8 @@ export default function DashboardPage() {
       const token = session.access_token
       const headers = { Authorization: `Bearer ${token}` }
 
-      const [profileRes, gpuRes, platformRes, keyRes] = await Promise.all([
+      const [profileRes, platformRes, keyRes] = await Promise.all([
         fetch('/api/credits/balance', { headers }),
-        supabase.from('gpu_instances').select('status, ip_address, last_seen_at').eq('user_id', session.user.id).maybeSingle(),
         supabase.from('platform_connections').select('platform').eq('user_id', session.user.id),
         fetch('/api/apikey', { headers }),
       ])
@@ -74,7 +69,6 @@ export default function DashboardPage() {
 
       setData({
         credits_seconds: credits.seconds ?? 0,
-        gpu: gpuRes.data ?? null,
         platforms: (platformRes.data ?? []).map((p: { platform: string }) => p.platform),
         api_key_exists: keyData.exists ?? false,
       })
@@ -85,53 +79,23 @@ export default function DashboardPage() {
     }
   }, [router])
 
-  useEffect(() => { load() }, [load])
-
-  // Poll agent status if GPU is running
-  useEffect(() => {
-    if (!data?.gpu || data.gpu.status !== 'running') return
-    const interval = setInterval(async () => {
+  const loadStats = useCallback(async (p: string) => {
+    setStatsLoading(true)
+    try {
       const supabase = createBrowserClient()
       const { data: { session } } = await supabase.auth.getSession()
       if (!session) return
-      const res = await fetch('/api/agent/status', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${session.access_token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ outputs, streaming: outputs.some(o => o.state === 'running') }),
-      }).catch(() => null)
-      if (res?.ok) {
-        const body = await res.json()
-        if (body.outputs) setOutputs(body.outputs)
-      }
-    }, 5000)
-    return () => clearInterval(interval)
-  }, [data?.gpu, outputs])
+      const res = await fetch(`/api/stats?period=${p}`, {
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      })
+      if (res.ok) setStats(await res.json())
+    } finally {
+      setStatsLoading(false)
+    }
+  }, [])
 
-  async function provisionGpu() {
-    setGpuLoading(true)
-    const supabase = createBrowserClient()
-    const { data: { session } } = await supabase.auth.getSession()
-    if (!session) return
-    await fetch('/api/gpu/provision', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${session.access_token}` },
-    })
-    await load()
-    setGpuLoading(false)
-  }
-
-  async function stopGpu() {
-    setGpuLoading(true)
-    const supabase = createBrowserClient()
-    const { data: { session } } = await supabase.auth.getSession()
-    if (!session) return
-    await fetch('/api/gpu/stop', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${session.access_token}` },
-    })
-    await load()
-    setGpuLoading(false)
-  }
+  useEffect(() => { load() }, [load])
+  useEffect(() => { loadStats(period) }, [loadStats, period])
 
   async function generateApiKey() {
     const supabase = createBrowserClient()
@@ -162,9 +126,7 @@ export default function DashboardPage() {
     return <main className="min-h-screen bg-gray-950 text-white flex items-center justify-center text-gray-500">Loading…</main>
   }
 
-  const gpu = data?.gpu
   const creditsLow = (data?.credits_seconds ?? 0) < 1800
-  const rtmpUrl = gpu?.ip_address ? `rtmp://${gpu.ip_address}:1935/live` : null
 
   return (
     <main className="min-h-screen bg-gray-950 text-white">
@@ -185,7 +147,7 @@ export default function DashboardPage() {
           <div>
             <div className="text-sm text-gray-400 mb-1">Streaming credits</div>
             <div className={`text-3xl font-bold ${creditsLow ? 'text-amber-400' : 'text-white'}`}>
-              {creditsFormatted(data?.credits_seconds ?? 0)}
+              {fmt(data?.credits_seconds ?? 0)}
             </div>
             {creditsLow && <div className="text-sm text-amber-500 mt-1">Less than 30 minutes remaining</div>}
           </div>
@@ -194,86 +156,102 @@ export default function DashboardPage() {
           </a>
         </div>
 
-        {/* GPU */}
+        {/* Stats */}
         <div className="bg-gray-900 border border-gray-800 rounded-2xl p-6">
-          <div className="flex items-center justify-between mb-4">
-            <div className="text-sm text-gray-400">GPU</div>
-            <div className="flex items-center gap-2">
-              <span className={`w-2 h-2 rounded-full ${gpuStatusColor(gpu?.status ?? 'stopped')}`} />
-              <span className="text-sm">{gpuStatusLabel(gpu?.status ?? 'stopped')}</span>
-            </div>
-          </div>
-          {gpu?.status === 'running' && gpu.ip_address && (
-            <div className="mb-4 space-y-2">
-              <div className="text-xs text-gray-500">OBS stream URL</div>
-              <div className="flex items-center gap-3">
-                <code className="flex-1 bg-gray-800 rounded-lg px-3 py-2 text-sm font-mono text-gray-300">
-                  {rtmpUrl}
-                </code>
+          <div className="flex items-center justify-between mb-5">
+            <div className="text-sm text-gray-400">Streaming stats</div>
+            <div className="flex gap-1 bg-gray-800 rounded-lg p-1">
+              {PERIODS.map(({ value, label }) => (
                 <button
-                  onClick={() => copy(rtmpUrl!, 'rtmp')}
-                  className="bg-gray-700 hover:bg-gray-600 px-3 py-2 rounded-lg text-sm transition-colors min-w-[60px]"
+                  key={value}
+                  onClick={() => setPeriod(value)}
+                  className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${
+                    period === value
+                      ? 'bg-gray-600 text-white'
+                      : 'text-gray-400 hover:text-white'
+                  }`}
                 >
-                  {copied === 'rtmp' ? 'Copied!' : 'Copy'}
+                  {label}
                 </button>
-              </div>
+              ))}
             </div>
-          )}
-          <div className="flex gap-3">
-            {(!gpu || gpu.status === 'stopped') && (
-              <button
-                onClick={provisionGpu}
-                disabled={gpuLoading}
-                className="bg-green-700 hover:bg-green-600 disabled:opacity-50 px-5 py-2 rounded-lg text-sm font-semibold transition-colors"
-              >
-                {gpuLoading ? 'Launching…' : 'Launch GPU'}
-              </button>
-            )}
-            {gpu?.status === 'running' && (
-              <button
-                onClick={stopGpu}
-                disabled={gpuLoading}
-                className="bg-gray-700 hover:bg-gray-600 disabled:opacity-50 px-5 py-2 rounded-lg text-sm font-semibold transition-colors"
-              >
-                {gpuLoading ? 'Stopping…' : 'Stop GPU'}
-              </button>
-            )}
-            {gpu?.status === 'provisioning' && (
-              <div className="text-sm text-yellow-400 py-2">Starting up (~45 seconds)…</div>
-            )}
           </div>
+
+          {statsLoading ? (
+            <div className="text-gray-600 text-sm">Loading…</div>
+          ) : (
+            <>
+              <div className="grid grid-cols-2 gap-4 sm:grid-cols-4 mb-5">
+                <Stat
+                  label="Hours streamed"
+                  value={fmt(stats?.total_duration_seconds ?? 0)}
+                />
+                <Stat
+                  label="Sessions"
+                  value={String(stats?.session_count ?? 0)}
+                />
+                <Stat
+                  label="Avg session"
+                  value={fmt(stats?.avg_duration_seconds ?? 0)}
+                />
+                <Stat
+                  label="Credits used"
+                  value={fmt(stats?.total_credits_used_seconds ?? 0)}
+                />
+              </div>
+
+              {(stats?.top_platforms?.length ?? 0) > 0 && (
+                <div>
+                  <div className="text-xs text-gray-500 mb-2">Platforms streamed to</div>
+                  <div className="flex flex-wrap gap-2">
+                    {stats?.top_platforms.map(({ platform, count }) => (
+                      <span
+                        key={platform}
+                        className="bg-gray-800 text-gray-300 text-xs px-3 py-1 rounded-full"
+                      >
+                        {PLATFORM_LABELS[platform] ?? platform}
+                        <span className="text-gray-500 ml-1">×{count}</span>
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {stats?.session_count === 0 && (
+                <p className="text-sm text-gray-600">
+                  No streams yet in this period. Start streaming in OBS to see your stats here.
+                </p>
+              )}
+            </>
+          )}
         </div>
 
-        {/* Stream status */}
-        {gpu?.status === 'running' && (
-          <div className="bg-gray-900 border border-gray-800 rounded-2xl p-6">
-            <div className="text-sm text-gray-400 mb-4">Platforms</div>
-            {data?.platforms.length === 0 ? (
-              <p className="text-sm text-gray-500">
-                No platforms connected. <a href="/dashboard/platforms" className="text-blue-400 hover:text-blue-300">Add platforms →</a>
-              </p>
-            ) : (
-              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-                {data?.platforms.map(p => {
-                  const output = outputs.find(o => o.name === p)
-                  const live = output?.state === 'running'
-                  return (
-                    <div key={p} className="flex items-center gap-2">
-                      <span className={`w-2 h-2 rounded-full flex-shrink-0 ${live ? 'bg-green-500' : 'bg-gray-600'}`} />
-                      <span className="text-sm">{PLATFORM_LABELS[p] ?? p}</span>
-                    </div>
-                  )
-                })}
-              </div>
-            )}
+        {/* Platforms connected */}
+        <div className="bg-gray-900 border border-gray-800 rounded-2xl p-6">
+          <div className="flex items-center justify-between mb-4">
+            <div className="text-sm text-gray-400">Platforms</div>
+            <a href="/dashboard/platforms" className="text-xs text-blue-400 hover:text-blue-300">Manage →</a>
           </div>
-        )}
+          {(data?.platforms.length ?? 0) === 0 ? (
+            <p className="text-sm text-gray-500">
+              No platforms connected. <a href="/dashboard/platforms" className="text-blue-400 hover:text-blue-300">Add platforms →</a>
+            </p>
+          ) : (
+            <div className="flex flex-wrap gap-2">
+              {data?.platforms.map(p => (
+                <span key={p} className="bg-gray-800 text-gray-300 text-sm px-3 py-1 rounded-full">
+                  {PLATFORM_LABELS[p] ?? p}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
 
         {/* API Key */}
         <div className="bg-gray-900 border border-gray-800 rounded-2xl p-6">
-          <div className="text-sm text-gray-400 mb-3">SlimCast API key</div>
+          <div className="text-sm text-gray-400 mb-1">SlimCast API key</div>
           <div className="text-xs text-gray-500 mb-4">
-            Enter this once in the OBS plugin. It authenticates your GPU and OBS dock.
+            Enter this once in the OBS plugin to link your account.
           </div>
           {apiKey ? (
             <div className="space-y-3">
@@ -304,5 +282,14 @@ export default function DashboardPage() {
 
       </div>
     </main>
+  )
+}
+
+function Stat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="bg-gray-800/60 rounded-xl p-4">
+      <div className="text-xs text-gray-500 mb-1">{label}</div>
+      <div className="text-2xl font-bold text-white">{value}</div>
+    </div>
   )
 }
