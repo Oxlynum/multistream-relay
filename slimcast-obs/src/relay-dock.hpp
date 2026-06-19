@@ -88,6 +88,7 @@ private:
     bool m_resumingStream = false;
     bool m_wasStreaming   = false;  // to auto-engage the channel lock on stream start
     bool m_haveEncode     = false;
+    int  m_orphanTicks    = 0;      // consecutive polls of "pod up, OBS not streaming"
 
     GpuInfo                   m_lastGpuInfo;
     QMap<QString, PlatformConfig> m_platforms;  // platform -> current config

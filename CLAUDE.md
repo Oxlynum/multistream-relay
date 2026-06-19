@@ -104,6 +104,24 @@ They just aren't the brand. The brand is "stream everywhere, no setup."
    that deducts; the dashboard/OBS dock poll the same endpoint with the user key
    and must never deduct. See `lib/billing.ts`.
 
+10. **Pod safety is defense-in-depth — a rogue pod is the #1 financial risk.**
+    A running pod bills RunPod 24/7, so destruction (not just stopping outputs)
+    must happen on every failure path. Layers, each independent:
+    - **Plugin**: OBS Stop → destroy; orphan auto-destroy (pod up + OBS not
+      streaming for ~10s → destroy, catches reopened-after-crash).
+    - **Heartbeat self-destruct** (`/api/agent/status`, pod only): tears the pod
+      down on credits<=0, idle>5m (tracked via `idle_since`), or session>12h.
+    - **Agent watchdogs** (`relay/agent.py`): stop outputs after ~60s of failed
+      heartbeats (unsupervised); self-request `/api/agent/terminate` on idle>5m or
+      session>12h.
+    - **Cron reaper** (`/api/cron/reap`, every minute via `web/vercel.json`): the
+      backstop for pods that stop phoning home — destroys on stale heartbeat
+      (>150s), never-paired (>180s), max-session, or idle. **Needs `CRON_SECRET`
+      env set; every-minute cron requires a Vercel Pro plan.**
+    - All teardown goes through `lib/pod-teardown.ts` `teardownInstance()`
+      (idempotent: provider destroy + revoke pod key + delete row; best-effort so
+      a provider error never strands the row).
+
 ## Key files
 ### relay/
 - `supervisor.py` — `plan_runners()` groups enabled outputs by orientation +
@@ -134,7 +152,11 @@ They just aren't the brand. The brand is "stream everywhere, no setup."
 - `lib/billing.ts` — transcodeCount + burnRatePerSec (Arch #9).
 - `lib/agent-config.ts` — shared output builder for config+pair routes (incl. the
   YouTube HLS passthrough URL from the stream key).
-- `app/api/agent/*` — pair, config, status (billing clock), control.
+- `app/api/agent/*` — pair, config, status (billing clock + safety self-destruct),
+  control, terminate (pod self-requested teardown).
+- `app/api/cron/reap/` — every-minute reaper (stale/never-paired/idle/max-session).
+- `lib/pod-teardown.ts` — `teardownInstance()`, the one idempotent destroy path.
+- `web/vercel.json` — cron schedule for the reaper.
 - `app/api/gpu/*` — provision (geo → broker), stop, destroy (via provider registry).
   All accept `authenticateUserOrAgent` (dashboard session OR OBS API key) so the
   dock can drive the GPU lifecycle.

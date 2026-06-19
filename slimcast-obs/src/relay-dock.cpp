@@ -362,6 +362,21 @@ void RelayDock::onGpuStatusUpdated(GpuInfo info)
         m_resumingStream = true;
         applyObsStreamUrl(info.rtmpUrl);
         obs_frontend_streaming_start();
+        return;
+    }
+
+    // SAFETY: a running pod while OBS is not streaming (and we aren't mid-launch)
+    // is an orphan — e.g. OBS crashed and was reopened, or a Stop teardown failed.
+    // Confirm across two polls (~10s) to avoid racing the launch/resume window,
+    // then destroy it so a forgotten pod can never keep billing.
+    const bool obsActive = obs_frontend_streaming_active();
+    if (info.status == "running" && !obsActive && !m_autoLaunching && !m_resumingStream) {
+        if (++m_orphanTicks >= 2) {
+            m_orphanTicks = 0;
+            m_api->destroyGpu();
+        }
+    } else {
+        m_orphanTicks = 0;
     }
 }
 
