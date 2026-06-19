@@ -114,10 +114,13 @@ They just aren't the brand. The brand is "stream everywhere, no setup."
     - **Agent watchdogs** (`relay/agent.py`): stop outputs after ~60s of failed
       heartbeats (unsupervised); self-request `/api/agent/terminate` on idle>5m or
       session>12h.
-    - **Cron reaper** (`/api/cron/reap`, every minute via `web/vercel.json`): the
-      backstop for pods that stop phoning home — destroys on stale heartbeat
-      (>150s), never-paired (>180s), max-session, or idle. **Needs `CRON_SECRET`
-      env set; every-minute cron requires a Vercel Pro plan.**
+    - **Cron reaper** (`/api/cron/reap`, daily via `web/vercel.json`): the backstop
+      for pods that stop phoning home — destroys on stale heartbeat (>150s),
+      never-paired (>180s), max-session, or idle. **Daily because Vercel Hobby
+      caps crons at once/day** (every-minute schedules fail the build). Optional
+      `CRON_SECRET` protects it. For minute-level reaping of dead-agent pods, go
+      Pro or point an external pinger at the endpoint — the live-agent self-destruct
+      already covers the common cases within seconds.
     - All teardown goes through `lib/pod-teardown.ts` `teardownInstance()`
       (idempotent: provider destroy + revoke pod key + delete row; best-effort so
       a provider error never strands the row).

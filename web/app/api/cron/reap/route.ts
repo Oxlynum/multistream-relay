@@ -1,11 +1,13 @@
 import { createServerClient } from '@/lib/supabase'
 import { teardownInstance } from '@/lib/pod-teardown'
 
-// The independent backstop. Runs every minute (Vercel cron) and destroys any pod
-// that the in-pod safeties can't catch — chiefly a pod that has stopped phoning
-// home (agent crashed, lost network, RunPod node died) and would otherwise bill
-// forever. Also re-checks the same caps the heartbeat enforces, in case a
-// heartbeat was missed.
+// The independent backstop. Runs daily (Vercel Hobby caps crons at once/day) and
+// destroys any pod that the in-pod safeties can't catch — chiefly a pod that has
+// stopped phoning home (agent crashed, lost network, RunPod node died) and would
+// otherwise bill forever. The live agent self-destructs within seconds on
+// idle/credits/max-session, so this only matters when the agent is dead; for
+// faster reaping of that case, move to a Pro plan (every-minute) or point an
+// external uptime pinger at this endpoint. Endpoint is safe to call any time.
 
 // No heartbeat for this long → the pod is gone or unreachable; destroy it.
 const STALE_S = 150
