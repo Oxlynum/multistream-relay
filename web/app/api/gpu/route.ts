@@ -1,5 +1,5 @@
 import { createServerClient } from '@/lib/supabase'
-import { destroyPod } from '@/lib/runpod'
+import { getProvider } from '@/lib/providers/runpod'
 
 export async function DELETE(request: Request) {
   const supabase = createServerClient()
@@ -13,7 +13,7 @@ export async function DELETE(request: Request) {
 
   const { data: instance } = await supabase
     .from('gpu_instances')
-    .select('provider_id, pod_key_hash')
+    .select('provider_id, pod_key_hash, provider')
     .eq('user_id', user.id)
     .single()
 
@@ -21,7 +21,7 @@ export async function DELETE(request: Request) {
     return Response.json({ error: 'No streaming server found' }, { status: 404 })
   }
 
-  await destroyPod(instance.provider_id)
+  await getProvider(instance.provider).destroy(instance.provider_id)
 
   // Revoke the pod's ephemeral key so it can no longer authenticate.
   if (instance.pod_key_hash) {

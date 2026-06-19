@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 import { createBrowserClient } from '@/lib/supabase'
 import { DashboardNav } from '@/components/dashboard-nav'
+import { CostMeter } from '@/components/cost-meter'
 
 interface DashboardData {
   credits_seconds: number
@@ -21,7 +22,7 @@ interface Stats {
 }
 
 const PLATFORM_LABELS: Record<string, string> = {
-  twitch: 'Twitch', kick: 'Kick', youtube: 'YouTube', tiktok: 'TikTok', facebook: 'Facebook',
+  twitch: 'Twitch', kick: 'Kick', youtube: 'YouTube', tiktok: 'TikTok',
 }
 
 function fmt(seconds: number) {
@@ -131,6 +132,9 @@ export default function DashboardPage() {
       <DashboardNav />
 
       <main className="max-w-5xl mx-auto px-6 py-10 space-y-5">
+        {/* Live cost meter (only visible while streaming) */}
+        <CostMeter />
+
         {/* Credits */}
         <div className={`border rounded-2xl p-6 flex items-center justify-between ${creditsLow ? 'bg-amber-950/20 border-amber-800/60' : 'bg-surface border-line'}`}>
           <div>

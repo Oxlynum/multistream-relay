@@ -19,9 +19,7 @@ const PLATFORMS = [
   { id: 'twitch',   label: 'Twitch',   note: null },
   { id: 'kick',     label: 'Kick',     note: null },
   { id: 'youtube',  label: 'YouTube',  note: null },
-  { id: 'tiktok',   label: 'TikTok',   note: 'Requires LIVE access (1000+ followers or manual approval). Portrait mode is enabled automatically.' },
-  { id: 'facebook', label: 'Facebook', note: 'Use your stream key from Facebook Creator Studio.' },
-]
+  { id: 'tiktok',   label: 'TikTok',   note: 'Requires LIVE access (1000+ followers or manual approval). Portrait mode is enabled automatically.' },]
 
 export default function PlatformsPage() {
   const router = useRouter()

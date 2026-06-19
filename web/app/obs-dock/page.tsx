@@ -12,11 +12,12 @@ interface PlatformStatus {
 interface DockState {
   outputs: PlatformStatus[]
   credits_seconds: number
+  burn_rate: number
   command: string | null
 }
 
 const LABELS: Record<string, string> = {
-  twitch: 'Twitch', kick: 'Kick', youtube: 'YouTube', tiktok: 'TikTok', facebook: 'Facebook',
+  twitch: 'Twitch', kick: 'Kick', youtube: 'YouTube', tiktok: 'TikTok',
 }
 
 function fmtCredits(seconds: number) {
@@ -101,6 +102,16 @@ function ObsDockInner() {
         <div className={`rounded-lg px-3 py-2 mb-3 text-xs flex justify-between ${creditsLow ? 'bg-amber-950/40 text-amber-400' : 'bg-gray-900 text-gray-400'}`}>
           <span>Credits</span>
           <span className="font-mono font-semibold">{fmtCredits(state.credits_seconds)}</span>
+        </div>
+      )}
+
+      {/* Live cost meter */}
+      {isLive && (state?.burn_rate ?? 0) > 0 && (
+        <div className="rounded-lg px-3 py-2 mb-3 text-xs flex justify-between bg-gray-900 text-gray-400">
+          <span>${((state!.burn_rate) * 2).toFixed(2)}/hr</span>
+          <span className="font-mono">
+            ~{fmtCredits(Math.floor(state!.credits_seconds / state!.burn_rate))} left
+          </span>
         </div>
       )}
 

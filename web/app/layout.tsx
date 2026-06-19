@@ -19,7 +19,7 @@ export const metadata: Metadata = {
     template: "%s · SlimCast",
   },
   description:
-    "Push one HEVC stream from OBS and go live on Twitch, YouTube, Kick, TikTok, and Facebook at once. Cloud GPU transcoding, pay-per-second, no setup.",
+    "Push one HEVC stream from OBS and go live on Twitch, YouTube, Kick, and TikTok at once. Cloud GPU transcoding, pay-per-second, no setup.",
   keywords: [
     "multistream", "OBS multistream", "stream to Twitch and YouTube",
     "HEVC streaming", "restream alternative", "multistreaming for creators",

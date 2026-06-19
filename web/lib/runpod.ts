@@ -5,6 +5,7 @@ interface RunPodPod {
   id: string
   name: string
   desiredStatus: string
+  costPerHr?: number
   runtime?: { ports?: Array<{ ip: string; isIpPublic: boolean; privatePort: number; publicPort: number }> }
 }
 
@@ -24,26 +25,35 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   return res.json() as Promise<T>
 }
 
+export interface PodEnv { key: string; value: string }
+
+// Low-level pod create for one specific candidate (gpu type + cloud + DC list).
+// The broker (lib/gpu-broker.ts) calls this repeatedly down a priority list and
+// catches "no capacity" errors to cascade — so this throws on any failure.
 export async function createPod(params: {
   name: string
   imageTag: string
-  apiKey: string
-  gpuTypeId?: string
-}): Promise<{ podId: string }> {
+  env: PodEnv[]
+  gpuTypeId: string
+  cloudType?: string
+  dataCenterIds?: string[]
+}): Promise<{ podId: string; costPerHr?: number }> {
   const registryAuthId = process.env.RUNPOD_REGISTRY_AUTH_ID
 
   const pod = await request<RunPodPod>('POST', '/pods', {
     name: params.name,
     imageName: params.imageTag,
-    gpuTypeId: params.gpuTypeId ?? 'NVIDIA GeForce RTX 4090',
-    cloudType: 'SECURE',
-    containerDiskInGb: 10,
+    gpuTypeId: params.gpuTypeId,
+    cloudType: params.cloudType ?? 'COMMUNITY',
+    containerDiskInGb: 15,
     volumeInGb: 0,
     ports: '1935/tcp,8080/tcp',
-    env: [{ key: 'SLIMCAST_API_KEY', value: params.apiKey }],
+    env: params.env,
+    // Restrict to the supplied datacenters (proximity-ordered by the broker).
+    ...(params.dataCenterIds?.length ? { dataCenterIds: params.dataCenterIds } : {}),
     ...(registryAuthId ? { containerRegistryAuthId: registryAuthId } : {}),
   })
-  return { podId: pod.id }
+  return { podId: pod.id, costPerHr: pod.costPerHr }
 }
 
 export async function stopPod(podId: string): Promise<void> {

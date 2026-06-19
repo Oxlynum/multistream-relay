@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { createBrowserClient } from '@/lib/supabase'
 import { DashboardNav } from '@/components/dashboard-nav'
+import { PortraitCropEditor } from '@/components/portrait-crop-editor'
 
 interface PlatformSettings {
   platform: string
@@ -16,10 +17,8 @@ interface PlatformSettings {
 const PLATFORM_META: Record<string, { label: string; minBitrate: number; maxBitrate: number; supportsPortrait: boolean }> = {
   twitch:   { label: 'Twitch',    minBitrate: 2500, maxBitrate: 8000, supportsPortrait: false },
   kick:     { label: 'Kick',      minBitrate: 2500, maxBitrate: 8000, supportsPortrait: false },
-  youtube:  { label: 'YouTube',   minBitrate: 2500, maxBitrate: 9000, supportsPortrait: false },
-  tiktok:   { label: 'TikTok',    minBitrate: 1000, maxBitrate: 4500, supportsPortrait: true  },
-  facebook: { label: 'Facebook',  minBitrate: 1000, maxBitrate: 4000, supportsPortrait: true  },
-}
+  youtube:  { label: 'YouTube',   minBitrate: 2500, maxBitrate: 9000, supportsPortrait: true  },
+  tiktok:   { label: 'TikTok',    minBitrate: 1000, maxBitrate: 4500, supportsPortrait: true  },}
 
 export default function SettingsPage() {
   const router = useRouter()
@@ -91,6 +90,20 @@ export default function SettingsPage() {
           <h1 className="text-lg font-semibold">Stream settings</h1>
           <p className="text-sm text-ink-muted mt-1">Tune quality per platform. Changes apply to your next stream.</p>
         </div>
+
+        {settings.some(s => s.orientation === 'portrait' && PLATFORM_META[s.platform]?.supportsPortrait) && (
+          <div className="bg-surface border border-line rounded-2xl p-6">
+            <div className="mb-4">
+              <span className="font-semibold">Vertical framing</span>
+              <p className="text-xs text-ink-muted mt-1">
+                Your source is 16:9, but portrait platforms need 9:16. Set how the
+                vertical crop is framed — it&apos;s cropped once on the GPU and sent to
+                every portrait platform.
+              </p>
+            </div>
+            <PortraitCropEditor />
+          </div>
+        )}
 
         {settings.map(s => {
           const meta = PLATFORM_META[s.platform]

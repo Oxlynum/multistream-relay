@@ -1,6 +1,7 @@
 import type { NextRequest } from 'next/server'
 import { authenticateAgent } from '@/lib/agent-auth'
 import { createServerClient } from '@/lib/supabase'
+import { buildAgentOutputs, type PlatformRow } from '@/lib/agent-config'
 
 // GPU agent calls this on boot to register its IP and receive initial config.
 export async function POST(request: NextRequest) {
@@ -20,31 +21,27 @@ export async function POST(request: NextRequest) {
     .update({ status: 'running', ip_address: ip ?? null, last_seen_at: new Date().toISOString() })
     .eq('user_id', userId)
 
-  // Return platform config so the agent can start supervisor immediately.
+  // Return platform config + portrait framing so the agent can start immediately.
   const { data: platforms } = await supabase
     .from('platform_connections')
     .select('platform, rtmp_url, stream_key_encrypted, bitrate_kbps, fps, orientation, enabled')
     .eq('user_id', userId)
 
-  return Response.json({ ok: true, config: { outputs: buildOutputs(platforms ?? []) } })
-}
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('portrait_zoom, portrait_pos_x, portrait_pos_y')
+    .eq('id', userId)
+    .single()
 
-function buildOutputs(platforms: Record<string, unknown>[]) {
-  return platforms.map(p => ({
-    name: p.platform,
-    url: p.rtmp_url,
-    key: p.stream_key_encrypted,
-    bitrate_kbps: p.bitrate_kbps ?? defaultBitrate(p.platform as string),
-    fps: p.fps ?? 60,
-    orientation: p.orientation ?? 'landscape',
-    mode: p.platform === 'youtube' ? 'passthrough' : 'transcode',
-    enabled: p.enabled,
-  }))
-}
-
-function defaultBitrate(platform: string): number {
-  const defaults: Record<string, number> = {
-    twitch: 6000, kick: 6000, youtube: 6000, tiktok: 4000, facebook: 4000,
-  }
-  return defaults[platform] ?? 6000
+  return Response.json({
+    ok: true,
+    config: {
+      outputs: buildAgentOutputs((platforms ?? []) as PlatformRow[]),
+      crop: {
+        zoom: profile?.portrait_zoom ?? 1.0,
+        pos_x: profile?.portrait_pos_x ?? 0.5,
+        pos_y: profile?.portrait_pos_y ?? 0.5,
+      },
+    },
+  })
 }

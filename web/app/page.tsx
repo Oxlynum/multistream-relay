@@ -2,7 +2,7 @@ import Link from 'next/link'
 import { SiteNav } from '@/components/site-nav'
 import { SiteFooter } from '@/components/site-footer'
 
-const PLATFORMS = ['Twitch', 'YouTube', 'Kick', 'TikTok', 'Facebook']
+const PLATFORMS = ['Twitch', 'YouTube', 'Kick', 'TikTok']
 
 const STEPS = [
   {
@@ -38,7 +38,7 @@ const FEATURES = [
   },
   {
     title: 'Five platforms at once',
-    body: 'Twitch, YouTube, Kick, TikTok, and Facebook simultaneously from a single OBS output. No second encoder, no second PC.',
+    body: 'Twitch, YouTube, Kick, and TikTok simultaneously from a single OBS output. No second encoder, no second PC.',
   },
   {
     title: 'Per-platform tuning',
@@ -94,7 +94,7 @@ const FAQ = [
   },
   {
     q: 'Which platforms are supported?',
-    a: 'Twitch, YouTube, Kick, TikTok, and Facebook today. TikTok streams in portrait automatically; everything else goes out in landscape at up to 1080p60.',
+    a: 'Twitch, YouTube, Kick, and TikTok today. TikTok streams in portrait automatically; everything else goes out in landscape at up to 1080p60.',
   },
 ]
 
@@ -148,7 +148,7 @@ export default function Home() {
 
             <p className="text-lg text-ink-muted max-w-2xl mx-auto mb-9 leading-relaxed">
               Push a single HEVC stream from OBS. SlimCast transcodes it on a cloud GPU and
-              goes live on Twitch, YouTube, Kick, TikTok, and Facebook at once — no second PC,
+              goes live on Twitch, YouTube, Kick, and TikTok at once — no second PC,
               no config files, no terminal.
             </p>
 
@@ -217,7 +217,7 @@ export default function Home() {
             <div className="flex-1 rounded-xl border border-line bg-surface p-6 text-center">
               <div className="kicker mb-3">Your audience</div>
               <div className="text-lg font-semibold mb-1">5 platforms live</div>
-              <p className="text-sm text-ink-muted">Twitch, YouTube, Kick, TikTok &amp; Facebook — each tuned to its own limits.</p>
+              <p className="text-sm text-ink-muted">Twitch, YouTube, Kick &amp; TikTok — each tuned to its own limits.</p>
             </div>
           </div>
         </section>

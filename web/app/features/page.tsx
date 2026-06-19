@@ -35,9 +35,9 @@ const SECTIONS = [
   {
     kicker: 'Fan-out',
     title: 'Every platform, its own rules',
-    body: 'Twitch wants 8 Mbps landscape. TikTok wants portrait. Facebook caps lower. SlimCast handles each destination independently so every platform gets a stream that fits — without you juggling encoder profiles.',
+    body: 'Twitch wants 8 Mbps landscape. TikTok wants portrait. SlimCast handles each destination independently so every platform gets a stream that fits — without you juggling encoder profiles.',
     points: [
-      'Twitch, YouTube, Kick, TikTok, Facebook',
+      'Twitch, YouTube, Kick, TikTok',
       'Per-platform bitrate, frame rate & orientation',
       'Automatic portrait pillarboxing for TikTok',
       'Toggle platforms on and off per stream',

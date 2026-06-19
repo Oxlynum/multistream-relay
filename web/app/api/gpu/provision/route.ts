@@ -1,6 +1,7 @@
 import { createServerClient } from '@/lib/supabase'
-import { createPod } from '@/lib/runpod'
 import { generateApiKey, hashApiKey } from '@/lib/agent-auth'
+import { provisionGpu } from '@/lib/gpu-broker'
+import { FALLBACK_LAT, FALLBACK_LON } from '@/lib/datacenters'
 
 export async function POST(request: Request) {
   const supabase = createServerClient()
@@ -40,30 +41,60 @@ export async function POST(request: Request) {
     label: 'pod',
   })
 
-  const imageTag = process.env.SLIMCAST_RELAY_IMAGE ?? 'slimcast/relay:latest'
+  // `||` not `??`: an empty-string env var should still fall back to the default.
+  const imageTag = process.env.SLIMCAST_RELAY_IMAGE || 'ghcr.io/oxlynum/multistream-relay:latest'
 
-  const { podId } = await createPod({
+  // Where the pod's agent phones home. Defaults to slimcast.com (not live yet),
+  // so we pass this deployment's URL explicitly.
+  const callbackUrl =
+    process.env.SLIMCAST_AGENT_CALLBACK_URL ?? 'https://slimcast-oxlynum.vercel.app'
+
+  // User location from Vercel's geolocation headers → provision the nearest
+  // available GPU. Falls back to central US when headers are absent (local dev).
+  const lat = Number(request.headers.get('x-vercel-ip-latitude')) || FALLBACK_LAT
+  const lon = Number(request.headers.get('x-vercel-ip-longitude')) || FALLBACK_LON
+
+  const result = await provisionGpu({
+    lat,
+    lon,
     name: `slimcast-${user.id.slice(0, 8)}`,
     imageTag,
-    apiKey: podRawKey,
+    env: [
+      { key: 'SLIMCAST_API_KEY', value: podRawKey },
+      { key: 'SLIMCAST_VERCEL_URL', value: callbackUrl },
+    ],
   })
 
-  if (existing) {
-    await supabase.from('gpu_instances').update({
-      provider_id: podId,
-      pod_key_hash: podKeyHash,
-      status: 'provisioning',
-      ip_address: null,
-      last_seen_at: null,
-    }).eq('user_id', user.id)
-  } else {
-    await supabase.from('gpu_instances').insert({
-      user_id: user.id,
-      provider_id: podId,
-      pod_key_hash: podKeyHash,
-      status: 'provisioning',
-    })
+  if (!result.ok) {
+    // Clean up the unused pod key; tell the client to retry.
+    await supabase.from('agent_api_keys').delete().eq('key_hash', podKeyHash)
+    return Response.json(
+      { error: 'No GPU capacity available right now. Please retry in a moment.', detail: result.error },
+      { status: 503 },
+    )
   }
 
-  return Response.json({ ok: true })
+  const row = {
+    provider_id: result.podId!,
+    pod_key_hash: podKeyHash,
+    status: 'provisioning',
+    ip_address: result.ip ?? null,
+    provider: result.provider,
+    gpu_type: result.gpuKey,
+    datacenter: result.datacenter,
+    last_seen_at: null,
+  }
+
+  if (existing) {
+    await supabase.from('gpu_instances').update(row).eq('user_id', user.id)
+  } else {
+    await supabase.from('gpu_instances').insert({ user_id: user.id, ...row })
+  }
+
+  return Response.json({
+    ok: true,
+    gpu: result.gpuKey,
+    datacenter: result.datacenter,
+    attempts: result.attempts,
+  })
 }

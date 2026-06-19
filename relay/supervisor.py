@@ -1,13 +1,25 @@
 """
-supervisor.py — builds and manages one FFmpeg process per streaming destination.
+supervisor.py — builds and manages FFmpeg processes for streaming fan-out.
 
-Pulls the live HEVC feed from the local MediaMTX ingest (loopback RTSP) and:
-  - YouTube  : copies the HEVC bitstream into HLS (no re-encode)
-  - Twitch   : transcodes to H.264 via NVENC -> RTMP
-  - Kick     : transcodes to H.264 via NVENC -> RTMP(S)
+Architecture (grouped transcode + tee fan-out):
+  Pulls the live HEVC feed from the local MediaMTX SRT loopback and runs at most
+  three kinds of process:
 
-Each output runs in its own thread, captures FFmpeg stderr into a ring buffer,
-and auto-restarts with exponential backoff while it is supposed to be running.
+    1. Landscape group : 1 NVDEC decode -> 1 NVENC H.264 encode -> tee fan-out to
+                         every enabled landscape platform (Twitch/Kick/…).
+    2. Portrait group  : 1 NVDEC decode -> crop (user zoom/position) -> scale 9:16
+                         -> 1 NVENC H.264 encode -> tee fan-out to every enabled
+                         portrait platform (TikTok / YouTube vertical / FB Reels).
+    3. Passthrough     : per-output HEVC copy -> HLS (YouTube landscape only).
+
+  This replaces the old "one full transcode per platform" model. Instead of N
+  decodes + N encodes, we do at most 2 decodes + 2 encodes regardless of how many
+  platforms share each orientation — the encode happens once and the FFmpeg `tee`
+  muxer copies the finished bitstream to each destination (`onfail=ignore` so one
+  platform dropping never disturbs the others).
+
+Each group runs in its own thread, captures FFmpeg stderr into a ring buffer, and
+auto-restarts with exponential backoff while it is supposed to be running.
 """
 
 from __future__ import annotations
@@ -15,7 +27,6 @@ from __future__ import annotations
 import collections
 import json
 import os
-import signal
 import subprocess
 import threading
 import time
@@ -29,6 +40,10 @@ LOCAL_SOURCE = os.environ.get(
     "RELAY_SOURCE", "srt://127.0.0.1:8890?streamid=read:live"
 )
 
+LOG_LINES = 250
+RESTART_MIN = 2.0      # seconds
+RESTART_MAX = 30.0     # seconds
+
 
 def _input_args(source: str) -> list[str]:
     """Per-protocol input flags."""
@@ -38,9 +53,6 @@ def _input_args(source: str) -> list[str]:
         # tolerate brief loopback hiccups without exiting
         return ["-fflags", "+genpts"]
     return []
-LOG_LINES = 250
-RESTART_MIN = 2.0      # seconds
-RESTART_MAX = 30.0     # seconds
 
 
 def load_config(path: str = CONFIG_PATH) -> dict:
@@ -69,93 +81,173 @@ PLATFORM_MAX_BITRATE: dict[str, int] = {
     "kick": 8000,
     "youtube": 9000,
     "tiktok": 4500,
-    "facebook": 4000,
 }
 
-# Source resolution (must match OBS output — used for pillarbox pad calculation).
+# Source resolution (must match OBS output — used for crop math).
 SOURCE_WIDTH = int(os.environ.get("SOURCE_WIDTH", "1920"))
 SOURCE_HEIGHT = int(os.environ.get("SOURCE_HEIGHT", "1080"))
 
+# Portrait output canvas (9:16).
+PORTRAIT_WIDTH = 1080
+PORTRAIT_HEIGHT = 1920
 
-def build_cmd(out: dict, source: str = LOCAL_SOURCE) -> list[str]:
-    """Return an FFmpeg argv list for a single output definition."""
-    mode = out.get("mode", "transcode")
 
-    if mode == "passthrough":
-        # HEVC copy -> HLS TS segments, PUT to YouTube's HLS ingest URL.
-        return [
-            "ffmpeg", "-hide_banner", "-loglevel", "warning",
-            *_input_args(source),
-            "-i", source,
-            "-c", "copy",
-            "-f", "hls",
-            "-method", "PUT",
-            "-hls_time", "2",
-            "-hls_list_size", "5",
-            "-hls_segment_type", "mpegts",
-            "-hls_flags", "delete_segments+omit_endlist+independent_segments",
-            out["url"],
-        ]
+def _even(n: int) -> int:
+    """NVENC requires even dimensions."""
+    n = int(n)
+    return n - (n % 2)
 
-    # transcode mode: NVDEC decode -> H.264 NVENC -> RTMP(S)
-    platform = out.get("name", "")
-    max_bv = PLATFORM_MAX_BITRATE.get(platform, 8000)
-    bv = min(int(out.get("bitrate_kbps", max_bv)), max_bv)
-    fps = int(out.get("fps", 60))
-    gop = str(fps * 2)  # 2-second keyframe interval
-    orientation = out.get("orientation", "landscape")
-    portrait = orientation == "portrait"
 
-    if portrait:
-        # Portrait output (TikTok 9:16): CPU-side pillarbox.
-        # Landscape source → scale down preserving aspect → pad to 1080×1920.
-        # Using CPU (scale + pad) because scale_cuda does not support pad.
-        # Acceptable: portrait outputs are lower bitrate (≤4500 kbps).
-        out_w, out_h = 1080, 1920
-        vf = (
-            f"scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,"
-            f"pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black"
-        )
-        cmd = [
-            "ffmpeg", "-hide_banner", "-loglevel", "warning",
-            *_input_args(source),
-            "-i", source,
-            "-vf", vf,
-        ]
-    else:
-        cmd = [
-            "ffmpeg", "-hide_banner", "-loglevel", "warning",
-            "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
-            *_input_args(source),
-            "-i", source,
-        ]
-        width = out.get("width")
-        height = out.get("height")
-        if width and height:
-            # GPU-side rescale; only added when the output differs from source.
-            cmd += ["-vf", f"scale_cuda={int(width)}:{int(height)}"]
+def portrait_crop_rect(crop: dict | None) -> tuple[int, int, int, int]:
+    """
+    Translate the user's framing controls into an FFmpeg crop rectangle.
 
-    bufsize = str(bv * 2)  # 2x bitrate: headroom for explosion/complexity spikes
-    cmd += [
+    User-facing controls (stored per account on slimcast.com):
+      zoom  >= 1.0  : 1.0 uses the full source height; higher zooms in (tighter).
+      pos_x 0..1    : horizontal position of the crop window (0 left, .5 center, 1 right).
+      pos_y 0..1    : vertical position of the crop window (0 top, .5 center, 1 bottom).
+
+    Returns (w, h, x, y) for FFmpeg `crop=w:h:x:y`, clamped to the source frame and
+    snapped to even pixels. The window is always 9:16 so it scales cleanly to 1080×1920.
+    """
+    crop = crop or {}
+    zoom = max(1.0, float(crop.get("zoom", 1.0)))
+    pos_x = min(1.0, max(0.0, float(crop.get("pos_x", 0.5))))
+    pos_y = min(1.0, max(0.0, float(crop.get("pos_y", 0.5))))
+
+    # Tallest possible 9:16 window at this zoom, bounded by source height.
+    ch = SOURCE_HEIGHT / zoom
+    cw = ch * PORTRAIT_WIDTH / PORTRAIT_HEIGHT  # ch * 9/16
+
+    # If the window is wider than the source, clamp width and re-derive height.
+    if cw > SOURCE_WIDTH:
+        cw = SOURCE_WIDTH
+        ch = cw * PORTRAIT_HEIGHT / PORTRAIT_WIDTH  # cw * 16/9
+
+    cw, ch = _even(cw), _even(ch)
+    cx = _even((SOURCE_WIDTH - cw) * pos_x)
+    cy = _even((SOURCE_HEIGHT - ch) * pos_y)
+    return cw, ch, cx, cy
+
+
+def _encode_flags(bv: int, fps: int) -> list[str]:
+    """Shared NVENC H.264 quality ladder + AAC audio. Do not degrade these."""
+    bufsize = bv * 2  # 2x bitrate: headroom for complexity/explosion spikes
+    gop = fps * 2     # 2-second keyframe interval
+    return [
         "-c:v", "h264_nvenc",
-        "-preset", "p7", "-tune", "hq", "-multipass", "fullres",
+        # p6 (not p7): near-identical quality at 8 Mbps but ~1.5-2x the encode
+        # throughput, so the two NVENC engines have headroom for both the
+        # landscape and portrait encodes (and multi-user packing later).
+        "-preset", "p6", "-tune", "hq", "-multipass", "fullres",
         "-rc", "cbr", "-b:v", f"{bv}k", "-maxrate", f"{bv}k", "-bufsize", f"{bufsize}k",
-        "-profile:v", "high", "-g", gop,
+        "-profile:v", "high", "-g", str(gop),
         "-bf", "3", "-b_ref_mode", "middle", "-rc-lookahead", "32",
         "-spatial-aq", "1", "-temporal-aq", "1", "-aq-strength", "6",
         "-r", str(fps),
         "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
-        "-f", "flv", _full_rtmp_url(out),
     ]
+
+
+def _tee_targets(outputs: list[dict]) -> str:
+    """Build the FFmpeg `tee` output string. onfail=ignore keeps the shared
+    encode alive when a single platform's ingest drops or rejects the stream."""
+    parts = []
+    for o in outputs:
+        url = _full_rtmp_url(o)
+        parts.append(f"[f=flv:onfail=ignore]{url}")
+    return "|".join(parts)
+
+
+def _group_bitrate(outputs: list[dict]) -> int:
+    """A tee group shares one encode, so the bitrate is the smallest platform cap
+    in the group (the largest the weakest platform will accept)."""
+    vals = []
+    for o in outputs:
+        cap = PLATFORM_MAX_BITRATE.get(o.get("name", ""), 8000)
+        vals.append(min(int(o.get("bitrate_kbps", cap)), cap))
+    return min(vals) if vals else 6000
+
+
+def _group_fps(outputs: list[dict]) -> int:
+    return min((int(o.get("fps", 60)) for o in outputs), default=60)
+
+
+def build_passthrough_cmd(out: dict, source: str = LOCAL_SOURCE) -> list[str]:
+    """HEVC copy -> HLS PUT to YouTube's HLS ingest URL (no re-encode).
+
+    YouTube ingests HEVC only over HLS (its RTMP endpoint is H.264-only), and it
+    requires fragmented-MP4 (CMAF) segments for HEVC — MPEG-TS is H.264-only here.
+    `-c copy` passes the source HEVC video + AAC audio straight through untouched,
+    so YouTube gets full source quality with zero GPU encode cost.
+    """
+    return [
+        "ffmpeg", "-hide_banner", "-loglevel", "warning",
+        *_input_args(source),
+        "-i", source,
+        "-c", "copy",
+        "-f", "hls",
+        "-method", "PUT",
+        "-http_persistent", "1",
+        "-hls_time", "2",
+        "-hls_list_size", "5",
+        "-hls_segment_type", "fmp4",
+        "-hls_fmp4_init_filename", "init.mp4",
+        "-hls_flags", "delete_segments+omit_endlist+independent_segments",
+        out["url"],
+    ]
+
+
+def build_group_cmd(
+    outputs: list[dict],
+    orientation: str,
+    crop: dict | None = None,
+    source: str = LOCAL_SOURCE,
+) -> list[str]:
+    """
+    One decode -> one NVENC H.264 encode -> tee fan-out to every output in the group.
+
+    Landscape: stays entirely on the GPU (NVDEC -> NVENC), no filter.
+    Portrait : NVDEC -> hwdownload -> crop (user framing) -> scale 1080×1920 -> NVENC.
+               Crop/scale runs on the CPU (scale_cuda can't crop+pad); it's a single
+               low-cost pass and the portrait group is the lower-bitrate one.
+    """
+    bv = _group_bitrate(outputs)
+    fps = _group_fps(outputs)
+
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "warning",
+        "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
+        *_input_args(source),
+        "-i", source,
+    ]
+
+    cmd += ["-map", "0:v", "-map", "0:a"]
+
+    if orientation == "portrait":
+        cw, ch, cx, cy = portrait_crop_rect(crop)
+        vf = (
+            f"hwdownload,format=nv12,"
+            f"crop={cw}:{ch}:{cx}:{cy},"
+            f"scale={PORTRAIT_WIDTH}:{PORTRAIT_HEIGHT}"
+        )
+        cmd += ["-vf", vf]
+
+    cmd += _encode_flags(bv, fps)
+    cmd += ["-f", "tee", _tee_targets(outputs)]
     return cmd
 
 
 class OutputRunner:
-    """Supervises a single FFmpeg process for one destination."""
+    """Supervises a single FFmpeg process (one passthrough output or one group)."""
 
-    def __init__(self, cfg: dict):
-        self.cfg = cfg
-        self.name = cfg["name"]
+    def __init__(self, key: str, cmd: list[str], platforms: list[str] | None = None,
+                 mode: str = "transcode"):
+        self.key = key
+        self.name = key
+        self.cmd = cmd
+        self.platforms = platforms or []
+        self.mode = mode
         self._proc: subprocess.Popen | None = None
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -192,11 +284,10 @@ class OutputRunner:
     def _run_loop(self) -> None:
         backoff = RESTART_MIN
         while not self._stop.is_set():
-            cmd = build_cmd(self.cfg)
-            self._log(f"$ {' '.join(cmd)}")
+            self._log(f"$ {' '.join(self.cmd)}")
             try:
                 self._proc = subprocess.Popen(
-                    cmd,
+                    self.cmd,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.PIPE,
                     text=True,
@@ -240,8 +331,8 @@ class OutputRunner:
         return {
             "name": self.name,
             "state": self.state,
-            "enabled": bool(self.cfg.get("enabled")),
-            "mode": self.cfg.get("mode", "transcode"),
+            "mode": self.mode,
+            "platforms": self.platforms,
             "restarts": self.restarts,
             "last_exit": self.last_exit,
             "pid": self._proc.pid if self._proc and self._proc.poll() is None else None,
@@ -249,6 +340,50 @@ class OutputRunner:
 
     def logs(self) -> list[str]:
         return list(self._logs)
+
+
+def plan_runners(cfg: dict) -> dict[str, dict]:
+    """
+    Translate a desired config into the set of runners we should have.
+
+    Returns { key: {"cmd", "platforms", "mode"} }. Keys are stable so apply() can
+    diff against currently-running processes:
+      passthrough:<platform>   one HEVC copy per passthrough output
+      group:landscape          shared landscape H.264 encode + tee
+      group:portrait           shared portrait (cropped) H.264 encode + tee
+    """
+    outputs = [o for o in cfg.get("outputs", []) if o.get("enabled")]
+    crop = cfg.get("crop") or {}
+
+    passthrough = [o for o in outputs if o.get("mode") == "passthrough"]
+    transcode = [o for o in outputs if o.get("mode") != "passthrough"]
+    landscape = [o for o in transcode if o.get("orientation", "landscape") != "portrait"]
+    portrait = [o for o in transcode if o.get("orientation") == "portrait"]
+
+    plan: dict[str, dict] = {}
+
+    for o in passthrough:
+        plan[f"passthrough:{o['name']}"] = {
+            "cmd": build_passthrough_cmd(o),
+            "platforms": [o["name"]],
+            "mode": "passthrough",
+        }
+
+    if landscape:
+        plan["group:landscape"] = {
+            "cmd": build_group_cmd(landscape, "landscape", crop),
+            "platforms": [o["name"] for o in landscape],
+            "mode": "landscape",
+        }
+
+    if portrait:
+        plan["group:portrait"] = {
+            "cmd": build_group_cmd(portrait, "portrait", crop),
+            "platforms": [o["name"] for o in portrait],
+            "mode": "portrait",
+        }
+
+    return plan
 
 
 class Supervisor:
@@ -295,31 +430,26 @@ class Supervisor:
             return self._stop_timer is not None
 
     def apply(self, cfg: dict) -> None:
-        """Reconcile running processes with the desired config."""
+        """Reconcile running processes with the desired (grouped) config."""
         with self.lock:
-            desired = {o["name"]: o for o in cfg.get("outputs", [])}
+            desired = plan_runners(cfg)
 
-            # stop & remove runners no longer present
-            for name in list(self.runners):
-                if name not in desired:
-                    self.runners.pop(name).stop()
+            # stop & remove runners no longer wanted
+            for key in list(self.runners):
+                if key not in desired:
+                    self.runners.pop(key).stop()
 
-            for name, out in desired.items():
-                runner = self.runners.get(name)
-                if runner is None:
-                    runner = OutputRunner(out)
-                    self.runners[name] = runner
-                else:
-                    # config changed -> restart with new settings
-                    if runner.cfg != out:
+            for key, spec in desired.items():
+                runner = self.runners.get(key)
+                if runner is None or runner.cmd != spec["cmd"]:
+                    # new group, or its command (platforms/bitrate/crop) changed -> rebuild
+                    if runner is not None:
                         runner.stop()
-                        runner = OutputRunner(out)
-                        self.runners[name] = runner
-
-                if out.get("enabled"):
-                    runner.start()
-                else:
-                    runner.stop()
+                    runner = OutputRunner(
+                        key, spec["cmd"], spec["platforms"], spec["mode"]
+                    )
+                    self.runners[key] = runner
+                runner.start()
 
     def stop_all(self) -> None:
         with self.lock:

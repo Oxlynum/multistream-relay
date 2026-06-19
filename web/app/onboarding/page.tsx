@@ -11,9 +11,7 @@ const PLATFORMS = [
   { id: 'twitch',   label: 'Twitch',   note: '' },
   { id: 'kick',     label: 'Kick',     note: '' },
   { id: 'youtube',  label: 'YouTube',  note: '' },
-  { id: 'tiktok',   label: 'TikTok',   note: 'Requires LIVE access (1000+ followers)' },
-  { id: 'facebook', label: 'Facebook', note: 'Use your Creator Studio stream key' },
-]
+  { id: 'tiktok',   label: 'TikTok',   note: 'Requires LIVE access (1000+ followers)' },]
 
 export default function OnboardingPage() {
   const router = useRouter()

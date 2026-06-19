@@ -1,6 +1,7 @@
 import type { NextRequest } from 'next/server'
 import { authenticateAgent } from '@/lib/agent-auth'
 import { createServerClient } from '@/lib/supabase'
+import { buildAgentOutputs, type PlatformRow } from '@/lib/agent-config'
 
 // Agent polls this every 10s to pick up config changes.
 export async function GET(request: NextRequest) {
@@ -18,32 +19,17 @@ export async function GET(request: NextRequest) {
 
   const { data: profile } = await supabase
     .from('profiles')
-    .select('streaming_credits_seconds')
+    .select('streaming_credits_seconds, portrait_zoom, portrait_pos_x, portrait_pos_y')
     .eq('id', userId)
     .single()
 
   return Response.json({
-    outputs: buildOutputs(platforms ?? []),
+    outputs: buildAgentOutputs((platforms ?? []) as PlatformRow[]),
+    crop: {
+      zoom: profile?.portrait_zoom ?? 1.0,
+      pos_x: profile?.portrait_pos_x ?? 0.5,
+      pos_y: profile?.portrait_pos_y ?? 0.5,
+    },
     credits_seconds: profile?.streaming_credits_seconds ?? 0,
   })
-}
-
-function buildOutputs(platforms: Record<string, unknown>[]) {
-  return platforms.map(p => ({
-    name: p.platform,
-    url: p.rtmp_url,
-    key: p.stream_key_encrypted,
-    bitrate_kbps: p.bitrate_kbps ?? defaultBitrate(p.platform as string),
-    fps: p.fps ?? 60,
-    orientation: p.orientation ?? 'landscape',
-    mode: p.platform === 'youtube' ? 'passthrough' : 'transcode',
-    enabled: p.enabled,
-  }))
-}
-
-function defaultBitrate(platform: string): number {
-  const defaults: Record<string, number> = {
-    twitch: 6000, kick: 6000, youtube: 6000, tiktok: 4000, facebook: 4000,
-  }
-  return defaults[platform] ?? 6000
 }

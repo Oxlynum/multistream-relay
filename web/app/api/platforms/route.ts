@@ -4,9 +4,7 @@ const PLATFORM_DEFAULTS: Record<string, { rtmp_url: string; max_bitrate: number;
   twitch:   { rtmp_url: 'rtmp://live.twitch.tv/app',        max_bitrate: 8000, orientation: 'landscape' },
   kick:     { rtmp_url: 'rtmps://fa723fc1b171.global-contribute.live-video.net/app', max_bitrate: 8000, orientation: 'landscape' },
   youtube:  { rtmp_url: 'rtmp://a.rtmp.youtube.com/live2',  max_bitrate: 9000, orientation: 'landscape' },
-  tiktok:   { rtmp_url: 'rtmp://push.tiktok.com/live',      max_bitrate: 4500, orientation: 'portrait' },
-  facebook: { rtmp_url: 'rtmps://live-api-s.facebook.com:443/rtmp', max_bitrate: 4000, orientation: 'landscape' },
-}
+  tiktok:   { rtmp_url: 'rtmp://push.tiktok.com/live',      max_bitrate: 4500, orientation: 'portrait' },}
 
 export async function POST(request: Request) {
   const supabase = createServerClient()

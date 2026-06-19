@@ -1,5 +1,5 @@
 import { createServerClient } from '@/lib/supabase'
-import { stopPod } from '@/lib/runpod'
+import { getProvider } from '@/lib/providers/runpod'
 
 export async function POST(request: Request) {
   const supabase = createServerClient()
@@ -13,7 +13,7 @@ export async function POST(request: Request) {
 
   const { data: instance } = await supabase
     .from('gpu_instances')
-    .select('provider_id, status')
+    .select('provider_id, status, provider')
     .eq('user_id', user.id)
     .single()
 
@@ -21,7 +21,7 @@ export async function POST(request: Request) {
     return Response.json({ error: 'No streaming server found' }, { status: 404 })
   }
 
-  await stopPod(instance.provider_id)
+  await getProvider(instance.provider).stop(instance.provider_id)
 
   await supabase
     .from('gpu_instances')

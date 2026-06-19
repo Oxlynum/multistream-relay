@@ -1,36 +1,48 @@
 {
+  "crop": {
+    "zoom": 1.0,
+    "pos_x": 0.5,
+    "pos_y": 0.5
+  },
   "outputs": [
-    {
-      "name": "youtube",
-      "enabled": true,
-      "mode": "passthrough",
-      "url": "https://a.upload.youtube.com/http_upload_hls?cid=PASTE_YOUR_HLS_KEY&copy=0&file=stream.m3u8",
-      "key": "",
-      "bitrate_kbps": 12000,
-      "width": 1920,
-      "height": 1080,
-      "fps": 60
-    },
     {
       "name": "twitch",
       "enabled": true,
       "mode": "transcode",
+      "orientation": "landscape",
       "url": "rtmp://live.twitch.tv/app",
       "key": "live_PASTE_YOUR_TWITCH_KEY",
       "bitrate_kbps": 8000,
-      "width": 1920,
-      "height": 1080,
       "fps": 60
     },
     {
       "name": "kick",
       "enabled": true,
       "mode": "transcode",
+      "orientation": "landscape",
       "url": "rtmps://fa723fc1b171.global-contribute.live-video.net/app",
       "key": "sk_PASTE_YOUR_KICK_KEY",
       "bitrate_kbps": 8000,
-      "width": 1920,
-      "height": 1080,
+      "fps": 60
+    },
+    {
+      "name": "facebook",
+      "enabled": true,
+      "mode": "transcode",
+      "orientation": "landscape",
+      "url": "rtmps://live-api-s.facebook.com:443/rtmp",
+      "key": "PASTE_YOUR_FACEBOOK_KEY",
+      "bitrate_kbps": 4000,
+      "fps": 60
+    },
+    {
+      "name": "tiktok",
+      "enabled": true,
+      "mode": "transcode",
+      "orientation": "portrait",
+      "url": "rtmp://push.tiktok.com/live",
+      "key": "PASTE_YOUR_TIKTOK_KEY",
+      "bitrate_kbps": 4500,
       "fps": 60
     }
   ]

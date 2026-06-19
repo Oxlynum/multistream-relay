@@ -123,7 +123,11 @@ def main() -> None:
         sup.apply(initial_config)
         log.info("Applied initial config (%d outputs)", len(build_outputs(initial_config)))
 
-    last_config_hash = json.dumps(initial_config, sort_keys=True)
+    last_config_hash = json.dumps(
+        {"outputs": initial_config.get("outputs", []),
+         "crop": initial_config.get("crop", {})},
+        sort_keys=True,
+    )
 
     def shutdown(sig: int, _frame: object) -> None:
         log.info("Received signal %d — shutting down…", sig)
@@ -147,10 +151,13 @@ def main() -> None:
         cfg_resp = _api("GET", "/api/agent/config")
         if cfg_resp:
             outputs = cfg_resp.get("outputs", [])
-            new_hash = json.dumps(outputs, sort_keys=True)
+            crop = cfg_resp.get("crop", {})
+            # Hash outputs + crop together so a framing change re-applies the
+            # portrait group (crop changes alter the FFmpeg command).
+            new_hash = json.dumps({"outputs": outputs, "crop": crop}, sort_keys=True)
             if new_hash != last_config_hash:
                 log.info("Config changed — reapplying.")
-                sup.apply({"outputs": outputs})
+                sup.apply({"outputs": outputs, "crop": crop})
                 last_config_hash = new_hash
 
             credits_seconds = cfg_resp.get("credits_seconds", 0)

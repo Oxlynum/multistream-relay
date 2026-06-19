@@ -26,7 +26,7 @@ export async function GET(request: Request) {
 
   const { data: instance } = await supabase
     .from('gpu_instances')
-    .select('status, ip_address, last_seen_at')
+    .select('status, ip_address, last_seen_at, burn_rate')
     .eq('user_id', userId)
     .maybeSingle()
 
@@ -42,6 +42,7 @@ export async function GET(request: Request) {
       ip: null,
       rtmp_url: null,
       credits_seconds: profile?.streaming_credits_seconds ?? 0,
+      burn_rate: 0,
     })
   }
 
@@ -55,5 +56,8 @@ export async function GET(request: Request) {
     ip: instance.ip_address ?? null,
     rtmp_url: instance.ip_address ? `rtmp://${instance.ip_address}:1935/live` : null,
     credits_seconds: profile?.streaming_credits_seconds ?? 0,
+    // Zero the meter when the agent is stale/stopped so the UI doesn't show a
+    // burn rate for a stream that isn't actually running.
+    burn_rate: effectiveStatus === 'running' ? (instance.burn_rate ?? 0) : 0,
   })
 }
