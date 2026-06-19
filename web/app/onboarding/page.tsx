@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation'
 import { createBrowserClient } from '@/lib/supabase'
 import { Logo } from '@/components/logo'
 
-const STEPS = ['Connect Platforms', 'Your API Key', 'Install Plugin', "You're Ready"]
+const STEPS = ['Connect Platforms', 'Secure Account', 'Your API Key', 'Install Plugin', "You're Ready"]
 
 const PLATFORMS = [
   { id: 'twitch',   label: 'Twitch',   note: '' },
@@ -22,6 +22,7 @@ export default function OnboardingPage() {
   const [apiKey, setApiKey] = useState<string | null>(null)
   const [apiKeyCopied, setApiKeyCopied] = useState(false)
   const [apiKeyLoading, setApiKeyLoading] = useState(false)
+  const [stripeLoading, setStripeLoading] = useState(false)
 
   useEffect(() => {
     async function init() {
@@ -29,6 +30,12 @@ export default function OnboardingPage() {
       const { data: { session } } = await supabase.auth.getSession()
       if (!session) { router.push('/login'); return }
       setToken(session.access_token)
+
+      const urlParams = new URLSearchParams(window.location.search)
+      if (urlParams.get('setup_success') === '1') {
+        const step = parseInt(urlParams.get('step') ?? '2', 10)
+        setStep(step)
+      }
     }
     init()
   }, [router])
@@ -64,12 +71,24 @@ export default function OnboardingPage() {
         )
     )
     setSaving(false)
-    goToApiKeyStep()
+    setStep(1) // Move to Secure Account
   }
 
   function goToApiKeyStep() {
-    setStep(1)
+    setStep(2)
     if (token && !apiKey) generateKey(token)
+  }
+
+  async function handleSetupPayment() {
+    if (!token) return
+    setStripeLoading(true)
+    const res = await fetch('/api/stripe/setup', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` }
+    })
+    const { url } = await res.json()
+    if (url) window.location.href = url
+    setStripeLoading(false)
   }
 
   function copyKey() {
@@ -130,15 +149,43 @@ export default function OnboardingPage() {
               >
                 {saving ? 'Saving…' : `Continue with ${connectedCount} platform${connectedCount !== 1 ? 's' : ''}`}
               </button>
-              <button onClick={() => goToApiKeyStep()} className="px-4 py-3 text-sm text-ink-faint hover:text-ink transition-colors">
+              <button onClick={() => setStep(1)} className="px-4 py-3 text-sm text-ink-faint hover:text-ink transition-colors">
                 Skip
               </button>
             </div>
           </div>
         )}
 
-        {/* Step 1: API Key */}
+        {/* Step 1: Secure Account */}
         {step === 1 && (
+          <div className="space-y-4">
+            <h1 className="text-xl font-bold mb-2">Secure your account</h1>
+            <p className="text-sm text-ink-muted mb-5">
+              To prevent abuse of our free trial, we require a valid credit card. You will not be charged. You receive 2 free hours immediately.
+            </p>
+
+            <div className="bg-surface border border-line rounded-xl p-6 text-center">
+              <svg viewBox="0 0 24 24" className="w-8 h-8 text-accent mx-auto mb-4" fill="none" stroke="currentColor" strokeWidth="2">
+                <rect x="3" y="5" width="18" height="14" rx="2" ry="2"></rect>
+                <line x1="3" y1="10" x2="21" y2="10"></line>
+              </svg>
+              <h3 className="font-semibold mb-2">Verify Payment Method</h3>
+              <p className="text-sm text-ink-faint mb-6">
+                Redirecting to Stripe to securely save your card. We do not store your card details.
+              </p>
+              <button
+                onClick={handleSetupPayment}
+                disabled={stripeLoading}
+                className="w-full bg-accent hover:bg-accent-strong text-base disabled:opacity-50 py-3 rounded-xl font-semibold transition-colors"
+              >
+                {stripeLoading ? 'Connecting to Stripe…' : 'Add Payment Method'}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Step 2: API Key */}
+        {step === 2 && (
           <div>
             <h1 className="text-xl font-bold mb-2">Your API key</h1>
             <p className="text-sm text-ink-muted mb-6">
@@ -189,7 +236,7 @@ export default function OnboardingPage() {
             </p>
 
             <button
-              onClick={() => setStep(2)}
+              onClick={() => setStep(3)}
               className="w-full bg-accent hover:bg-accent-strong text-base py-3 rounded-xl font-semibold transition-colors"
             >
               I&apos;ve copied it — continue
@@ -197,8 +244,8 @@ export default function OnboardingPage() {
           </div>
         )}
 
-        {/* Step 2: Install Plugin */}
-        {step === 2 && (
+        {/* Step 3: Install Plugin */}
+        {step === 3 && (
           <div>
             <h1 className="text-xl font-bold mb-2">Install the OBS plugin</h1>
             <p className="text-sm text-ink-muted mb-6">
@@ -214,17 +261,17 @@ export default function OnboardingPage() {
                 <div className="text-xs text-ink-faint">.exe installer</div>
               </a>
             </div>
-            <button onClick={() => setStep(3)} className="w-full bg-accent hover:bg-accent-strong text-base py-3 rounded-xl font-semibold transition-colors mb-3">
+            <button onClick={() => setStep(4)} className="w-full bg-accent hover:bg-accent-strong text-base py-3 rounded-xl font-semibold transition-colors mb-3">
               Installed — continue
             </button>
-            <button onClick={() => setStep(3)} className="w-full text-sm text-ink-faint hover:text-ink py-2 transition-colors">
+            <button onClick={() => setStep(4)} className="w-full text-sm text-ink-faint hover:text-ink py-2 transition-colors">
               Skip — I&apos;ll install it later
             </button>
           </div>
         )}
 
-        {/* Step 3: Done */}
-        {step === 3 && (
+        {/* Step 4: Done */}
+        {step === 4 && (
           <div className="text-center">
             <div className="text-5xl mb-4">🎉</div>
             <h1 className="text-2xl font-bold mb-2">You&apos;re ready to stream.</h1>

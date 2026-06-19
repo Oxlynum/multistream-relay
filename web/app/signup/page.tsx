@@ -7,7 +7,7 @@ import { createBrowserClient } from '@/lib/supabase'
 import { Logo } from '@/components/logo'
 
 const PERKS = [
-  '2 free hours — no credit card',
+  '2 free hours upon sign up',
   'All five platforms, full 1080p60',
   'Pay-per-second after that, $2/hr',
 ]

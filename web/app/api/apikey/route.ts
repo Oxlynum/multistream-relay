@@ -31,6 +31,16 @@ export async function POST(request: Request) {
   const { data: { user } } = await supabase.auth.getUser(token ?? '')
   if (!user) return Response.json({ error: 'Unauthorized' }, { status: 401 })
 
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('stripe_payment_method_id')
+    .eq('id', user.id)
+    .single()
+
+  if (!profile?.stripe_payment_method_id) {
+    return Response.json({ error: 'A payment method is required to generate an API key.' }, { status: 403 })
+  }
+
   const rawKey = generateApiKey()
   const keyHash = hashApiKey(rawKey)
 

@@ -41,7 +41,7 @@ const FAQ = [
   },
   {
     q: 'What’s included in the 2 free hours?',
-    a: 'Everything. All five platforms, full 1080p60, every feature — no credit card required to start.',
+    a: 'Everything. All five platforms, full 1080p60, every feature is included in the 2 free hours.',
   },
 ]
 

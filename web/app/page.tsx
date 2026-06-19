@@ -87,7 +87,7 @@ const FAQ = [
   },
   {
     q: 'How does billing work?',
-    a: 'You buy streaming credits and they’re drawn down by the second while you’re live, at $2/hour. There’s no subscription and credits never expire. New accounts get 2 free hours — no credit card required.',
+    a: 'You buy streaming credits and they’re drawn down by the second while you’re live, at $2/hour. There’s no subscription and credits never expire. New accounts get 2 free hours to test it out.',
   },
   {
     q: 'What happens when I run low on credits?',

@@ -34,9 +34,30 @@ export async function POST(req: NextRequest) {
   switch (event.type) {
     case 'checkout.session.completed': {
       const session = event.data.object as Stripe.Checkout.Session
+      const userId = session.metadata?.user_id
+
+      if (session.mode === 'setup') {
+        if (userId && session.customer) {
+          await supabase
+            .from('profiles')
+            .update({ stripe_customer_id: session.customer as string })
+            .eq('id', userId)
+            .is('stripe_customer_id', null)
+        }
+        if (userId && session.setup_intent) {
+          const si = await stripe.setupIntents.retrieve(session.setup_intent as string)
+          if (si.payment_method) {
+            await supabase
+              .from('profiles')
+              .update({ stripe_payment_method_id: si.payment_method as string })
+              .eq('id', userId)
+          }
+        }
+        break
+      }
+
       if (session.mode !== 'payment' || session.payment_status !== 'paid') break
 
-      const userId = session.metadata?.user_id
       const creditsSeconds = parseInt(session.metadata?.credits_seconds ?? '0', 10)
       if (userId && creditsSeconds > 0) {
         await addCredits(userId, creditsSeconds)

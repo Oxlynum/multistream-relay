@@ -133,7 +133,7 @@ export default function FeaturesPage() {
         <section className="border-t border-line bg-surface/40">
           <div className="max-w-2xl mx-auto px-6 py-20 text-center">
             <h2 className="text-3xl font-bold tracking-tight mb-4">Try it with two free hours</h2>
-            <p className="text-ink-muted mb-8">No subscription, no credit card. Spin up your first multistream tonight.</p>
+            <p className="text-ink-muted mb-8">No subscription. Spin up your first multistream tonight.</p>
             <Link
               href="/signup"
               className="inline-block bg-accent hover:bg-accent-strong text-base font-semibold px-8 py-3.5 rounded-lg transition-colors glow-accent"
