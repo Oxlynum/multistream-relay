@@ -26,7 +26,7 @@ export function DashboardNav() {
     <header className="border-b border-line bg-base/80 backdrop-blur-xl sticky top-0 z-40">
       <div className="max-w-5xl mx-auto px-6">
         <div className="flex items-center justify-between h-16">
-          <Logo href="/dashboard" />
+          <Logo href="/" />
           <button
             onClick={signOut}
             className="text-sm text-ink-muted hover:text-ink transition-colors"
