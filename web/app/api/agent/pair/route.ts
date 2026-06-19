@@ -29,14 +29,17 @@ export async function POST(request: NextRequest) {
 
   const { data: profile } = await supabase
     .from('profiles')
-    .select('portrait_zoom, portrait_pos_x, portrait_pos_y')
+    .select('portrait_zoom, portrait_pos_x, portrait_pos_y, landscape_bitrate_kbps, portrait_bitrate_kbps')
     .eq('id', userId)
     .single()
 
   return Response.json({
     ok: true,
     config: {
-      outputs: buildAgentOutputs((platforms ?? []) as PlatformRow[]),
+      outputs: buildAgentOutputs((platforms ?? []) as PlatformRow[], {
+        landscape: profile?.landscape_bitrate_kbps ?? 6000,
+        portrait: profile?.portrait_bitrate_kbps ?? 4000,
+      }),
       crop: {
         zoom: profile?.portrait_zoom ?? 1.0,
         pos_x: profile?.portrait_pos_x ?? 0.5,

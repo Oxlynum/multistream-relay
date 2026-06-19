@@ -2,25 +2,26 @@
 
 /* ── SlimCast design system — infra-grade slate + teal ──────────────────── */
 @theme {
-  /* Surfaces */
-  --color-base: #0a0e14;
-  --color-surface: #10151e;
-  --color-elevated: #161d27;
-  --color-line: #1f2832;
-  --color-line-strong: #2b3744;
+  /* Surfaces - Deep Professional Navy/Blue */
+  --color-base: #020617; /* Very deep blue-black */
+  --color-surface: #0a0f1e; /* Slightly lighter navy */
+  --color-elevated: #111827; /* Elevated navy */
+  --color-line: #1e293b;
+  --color-line-strong: #334155;
 
-  /* Brand accent */
-  --color-accent: #2dd4bf;
-  --color-accent-strong: #14b8a6;
-  --color-accent-soft: #0d3733;
+  /* Brand accent - Digital Green */
+  --color-accent: #10b981; /* Emerald 500 */
+  --color-accent-strong: #059669; /* Emerald 600 */
+  --color-accent-soft: rgba(16, 185, 129, 0.15); /* Soft emerald */
+  --color-accent-glow: rgba(16, 185, 129, 0.4);
 
   /* Text */
-  --color-ink: #e6edf3;
-  --color-ink-muted: #8b97a8;
-  --color-ink-faint: #5a6675;
+  --color-ink: #f8fafc;
+  --color-ink-muted: #94a3b8;
+  --color-ink-faint: #475569;
 
-  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
-  --font-mono: var(--font-geist-mono), ui-monospace, "SF Mono", monospace;
+  --font-sans: var(--font-geist-sans), "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), "Fira Code", ui-monospace, "SF Mono", monospace;
 }
 
 @layer base {
@@ -55,6 +56,39 @@
       linear-gradient(to right, rgba(139, 151, 168, 0.06) 1px, transparent 1px),
       linear-gradient(to bottom, rgba(139, 151, 168, 0.06) 1px, transparent 1px);
     background-size: 60px 60px;
+    animation: grid-drift 30s ease-in-out infinite alternate;
+  }
+
+  @keyframes grid-drift {
+    0% {
+      background-position: 0px 0px;
+    }
+    25% {
+      background-position: 40px 20px;
+    }
+    50% {
+      background-position: 80px 0px;
+    }
+    75% {
+      background-position: 40px -20px;
+    }
+    100% {
+      background-position: 0px 0px;
+    }
+  }
+
+  /* Floating animation for images */
+  .animate-float {
+    animation: float 6s ease-in-out infinite;
+  }
+  .animate-float-delayed {
+    animation: float 6s ease-in-out 3s infinite;
+  }
+
+  @keyframes float {
+    0% { transform: translateY(0px); }
+    50% { transform: translateY(-15px); }
+    100% { transform: translateY(0px); }
   }
 
   /* Radial fade mask for grid/glow sections */
@@ -64,14 +98,35 @@
   }
 
   .text-gradient {
-    background: linear-gradient(180deg, #ffffff 0%, #9fb0c0 100%);
+    background: linear-gradient(135deg, #ffffff 0%, #94a3b8 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  .text-gradient-accent {
+    background: linear-gradient(135deg, #10b981 0%, #34d399 100%);
     -webkit-background-clip: text;
     background-clip: text;
     color: transparent;
   }
 
   .glow-accent {
-    box-shadow: 0 0 0 1px rgba(45, 212, 191, 0.2), 0 0 40px -8px rgba(45, 212, 191, 0.35);
+    box-shadow: 0 0 0 1px rgba(16, 185, 129, 0.3), 0 0 40px -8px rgba(16, 185, 129, 0.4);
+    transition: box-shadow 0.3s ease, transform 0.3s ease;
+  }
+
+  .glow-accent:hover {
+    box-shadow: 0 0 0 1px rgba(16, 185, 129, 0.5), 0 0 60px -8px rgba(16, 185, 129, 0.6);
+    transform: translateY(-2px);
+  }
+
+  /* Glassmorphism utility */
+  .glass {
+    background: rgba(10, 15, 30, 0.6);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(255, 255, 255, 0.05);
   }
 
   /* Animated live pulse dot */
@@ -82,10 +137,10 @@
     border-radius: 9999px;
     background-color: currentColor;
     opacity: 0.55;
-    animation: pulse-ring 1.8s cubic-bezier(0, 0, 0.2, 1) infinite;
+    animation: pulse-ring 2s cubic-bezier(0, 0, 0.2, 1) infinite;
   }
   @keyframes pulse-ring {
-    0% { transform: scale(1); opacity: 0.55; }
-    100% { transform: scale(2.6); opacity: 0; }
+    0% { transform: scale(1); opacity: 0.7; }
+    100% { transform: scale(3); opacity: 0; }
   }
 }

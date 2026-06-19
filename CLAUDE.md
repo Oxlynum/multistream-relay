@@ -19,12 +19,17 @@ billed in seconds; +0.2 token/hr per extra transcoded platform. No subscription.
   automatically by the availability broker (see Architecture #7) — never picked by
   hand. Hard $1/hr price ceiling.
 - Web app (Next.js) in `web/` — Supabase + Stripe wired, deploys to Vercel.
-- OBS plugin in `slimcast-obs/` — complete v2.0.0 C++ plugin with .pkg/.exe
-  installer and CI/CD. Needs to be updated for the new Vercel-agent architecture.
+- OBS plugin in `slimcast-obs/` — v2.1.0 C++ plugin, rebuilt for the agent
+  architecture: single scrollable dock, API-key-only auth, OBS-driven GPU
+  lifecycle (Start Streaming → provision nearest GPU; Stop → destroy pod, no idle
+  billing — NO manual GPU controls). Dock controls stream config (channel on/off,
+  group bitrate caps) synced to the same Supabase rows as the website; res/fps
+  shown read-only from OBS. cloud-provider/provider-presets removed. Builds +
+  installs clean locally (CMake/Ninja); .pkg/.exe via CI.
 - **Most of the self-serve SaaS is built** (agent, broker, billing, dashboard,
-  crop editor). Remaining gaps: stream_sessions not yet recorded (stats/history
-  show empty); OBS plugin not yet rebuilt for the agent architecture; end-to-end
-  RunPod provision not yet verified live (gpuTypeId / dataCenterIds unconfirmed).
+  crop editor, OBS plugin). Remaining gaps: stream_sessions not yet recorded
+  (stats/history show empty); end-to-end RunPod provision not yet verified live
+  (gpuTypeId / dataCenterIds unconfirmed).
   Plan: `/Users/danielaltom/.claude/plans/alright-lets-plan-this-eventual-clover.md`
 
 ## Layout
@@ -131,16 +136,41 @@ They just aren't the brand. The brand is "stream everywhere, no setup."
   YouTube HLS passthrough URL from the stream key).
 - `app/api/agent/*` — pair, config, status (billing clock), control.
 - `app/api/gpu/*` — provision (geo → broker), stop, destroy (via provider registry).
-- `app/api/platforms/`, `app/api/credits/*`, `app/api/portrait-crop/` — built.
+  All accept `authenticateUserOrAgent` (dashboard session OR OBS API key) so the
+  dock can drive the GPU lifecycle.
+- `app/api/encode/` — GET+PATCH the per-group bitrate caps (authenticateUserOrAgent;
+  shared by dashboard settings + OBS dock).
+- `app/api/platforms/` — GET + PATCH accept agent keys too (dock toggles channels);
+  POST/DELETE stay session-only (need stream key). `credits/*`, `portrait-crop/` built.
+- `lib/agent-auth.ts` — `authenticateUserOrAgent()`: agent key first, then Supabase
+  JWT. The shared resolver for routes both the dock and dashboard call.
 - `app/dashboard/` — stats panel + live CostMeter + API key; `/platforms`,
-  `/settings` (per-platform quality + portrait crop editor), `/credits`.
+  `/settings` (group bitrate caps + orientation + portrait crop; fps/res are
+  OBS-owned, not editable), `/credits`.
 - `app/onboarding/`, `app/obs-dock/` (shows live cost meter), `middleware.ts` — built.
 - `components/cost-meter.tsx`, `components/portrait-crop-editor.tsx`.
 
 ### slimcast-obs/
-- Complete v1.0.0 C++ plugin. Has 3 tabs, CI/CD, .pkg/.exe installer.
-- Needs: API key input replacing server IP; relay-api pointing to slimcast.com;
-  cloud-provider.cpp removed; credit balance display. (NOT yet rebuilt for agent arch.)
+- v2.1.0 C++ plugin, rebuilt for the agent architecture. CI/CD, .pkg/.exe.
+- `relay-api.cpp/hpp` — all calls to slimcast.com with Bearer API key. GpuInfo
+  carries status/ip/rtmpUrl/credits/burnRate/streaming + per-platform states
+  (flattened from grouped `outputs`). Methods: fetchGpuStatus, provisionGpu,
+  destroyGpu (DELETE /api/gpu — no idle billing).
+- `relay-dock.cpp/hpp` — single status-first QStackedWidget dock (setup page →
+  active page). **No manual start/stop, no tabs:** lifecycle is 100% OBS-driven
+  (STREAMING_STARTING → provision + wait + set ingest URL + resume; STREAMING_STOPPED
+  → destroy). **No manual GPU controls of any kind** — GPU start/stop is
+  exclusively OBS-driven (product rule). The dock IS a control panel for stream
+  config though: per-channel on/off toggles (PATCH enabled; applies mid-stream
+  in ≤10s), a channel-lock that auto-engages on stream start, per-encode-group
+  bitrate cap sliders (PATCH /api/encode), live per-platform dots, faint
+  per-channel + total token-rate fine print. Resolution/fps are read-only,
+  pulled from OBS via obs_get_video_info (never editable — OBS owns them).
+  Everything the dock changes is the same Supabase config the website edits, so
+  dock ↔ slimcast.com stay in sync.
+- OBS-driven flow depends on the MediaMTX ingest hook to start outputs once OBS
+  pushes RTMP — the plugin no longer sends start/stop control commands (those
+  remain for the dashboard via /api/agent/control).
 
 ## Platforms supported
 | Platform | Protocol | Max kbps | Orientation | Encode |
@@ -158,9 +188,14 @@ bitrate-tiered landscape grouping if wanted.
 ## Supabase schema
 Tables: profiles, agent_api_keys, platform_connections, gpu_instances,
 stream_sessions, achievements, agent_commands.
-profiles cols: streaming_credits_seconds (default 7200), portrait_zoom/pos_x/pos_y.
-gpu_instances cols: provider, gpu_type, datacenter, burn_rate, ip_address, status.
-Migrations through `20260618000005_burn_rate.sql`. stream_sessions are NOT yet
+profiles cols: streaming_credits_seconds (default 7200), portrait_zoom/pos_x/pos_y,
+landscape_bitrate_kbps (default 6000), portrait_bitrate_kbps (default 4000) — the
+per-encode-group bitrate caps (NOT per-platform; the GPU encodes once per
+orientation, so agent-config writes the group cap onto every member output).
+gpu_instances cols: provider, gpu_type, datacenter, burn_rate, ip_address, status,
+outputs (jsonb), streaming (bool). The pod heartbeat persists outputs+streaming so
+`/api/gpu/status` can feed the dashboard + OBS plugin per-platform dots.
+Migrations through `20260619000002_group_bitrate.sql`. stream_sessions are NOT yet
 written by anything (stats/history empty until session recording is wired).
 
 ## Codec roadmap

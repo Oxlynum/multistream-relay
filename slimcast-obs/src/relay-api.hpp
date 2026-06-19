@@ -3,17 +3,42 @@
 #include <QNetworkAccessManager>
 #include <QJsonObject>
 #include <QJsonArray>
+#include <QMap>
+#include <QList>
 #include <functional>
 
 struct GpuInfo {
-    QString status;       // "provisioning" | "running" | "stopped" | "error"
-    QString ip;           // populated when running
-    QString rtmpUrl;      // rtmp://{ip}:1935/live
+    QString status;            // "provisioning" | "running" | "stopped"
+    QString ip;                // populated when running
+    QString rtmpUrl;           // rtmp://{ip}:1935/live
     int     creditsSeconds = 0;
+    double  burnRate       = 0; // tokens/hr (== credit-seconds/sec); $2/token
+    bool    streaming      = false;
+    // platform id ("twitch","kick","youtube","tiktok") -> output state
+    // ("running","restarting","error",…). Absent = idle.
+    QMap<QString, QString> platformStates;
 };
 
-// All communication with slimcast.com. Base URL is compiled in; API key is
-// set once by the user and persisted in QSettings.
+// A user's connected channel. Stream keys/URLs never leave the server — the dock
+// only sees which channels exist, their orientation, and whether they're on.
+struct PlatformConfig {
+    QString platform;
+    QString orientation = "landscape";
+    bool    enabled     = false;
+};
+
+// Per-encode-group bitrate caps + the rails the UI clamps to.
+struct EncodeConfig {
+    int landscape    = 6000;
+    int portrait     = 4000;
+    int landscapeMin = 2500, landscapeMax = 8000;
+    int portraitMin  = 1000, portraitMax  = 4500;
+};
+
+// All communication with slimcast.com. Base URL is compiled in; the API key is
+// set once by the user and persisted in QSettings. GPU lifecycle is OBS-driven
+// (provision on Start Streaming, destroy on Stop). Channel toggles + bitrate caps
+// write the same Supabase rows the website does, so dock and web stay in sync.
 class RelayApi : public QObject {
     Q_OBJECT
 
@@ -23,18 +48,23 @@ public:
     void setApiKey(const QString &key);
     bool hasApiKey() const { return !m_apiKey.isEmpty(); }
 
+    // GPU lifecycle.
     void fetchGpuStatus();
     void provisionGpu();
-    void stopGpu();
-    void sendControl(const QString &command);   // "start" | "stop"
-    void fetchCredits();
+    void destroyGpu();
+
+    // Channel + encode config (shared with the website).
+    void fetchPlatforms();
+    void setPlatformEnabled(const QString &platform, bool enabled);
+    void fetchEncode();
+    void setEncode(int landscapeKbps, int portraitKbps);
 
 signals:
     void gpuStatusUpdated(GpuInfo info);
     void gpuProvisioned();
-    void gpuStopped();
-    void controlSent(QString command);
-    void creditsUpdated(int seconds);
+    void gpuDestroyed();
+    void platformsUpdated(QList<PlatformConfig> platforms);
+    void encodeUpdated(EncodeConfig encode);
     void networkError(QString message);
 
 private:
@@ -44,4 +74,6 @@ private:
     QNetworkRequest makeRequest(const QString &path) const;
     void dispatch(QNetworkReply *reply,
                   std::function<void(const QByteArray &)> onSuccess);
+    void send(const QByteArray &verb, const QString &path, const QJsonObject &body,
+              std::function<void()> onOk);
 };

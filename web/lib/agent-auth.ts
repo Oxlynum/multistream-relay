@@ -43,3 +43,21 @@ export async function authenticateAgentDetailed(
   if (!data?.user_id) return null
   return { userId: data.user_id, label: data.label ?? 'user' }
 }
+
+/**
+ * Resolve a user from either an agent API key (OBS plugin) or a Supabase
+ * session JWT (dashboard) — both arrive in the Authorization: Bearer header.
+ * Used by the GPU lifecycle + credit routes that both surfaces call.
+ */
+export async function authenticateUserOrAgent(request: Request): Promise<string | null> {
+  // OBS plugin: raw agent key hashed against agent_api_keys.
+  const agentUserId = await authenticateAgent(request)
+  if (agentUserId) return agentUserId
+
+  // Dashboard: Supabase JWT.
+  const token = request.headers.get('authorization')?.replace('Bearer ', '')
+  if (!token) return null
+  const supabase = createServerClient()
+  const { data: { user } } = await supabase.auth.getUser(token)
+  return user?.id ?? null
+}

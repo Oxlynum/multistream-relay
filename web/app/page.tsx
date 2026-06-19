@@ -1,4 +1,5 @@
 import Link from 'next/link'
+import Image from 'next/image'
 import { SiteNav } from '@/components/site-nav'
 import { SiteFooter } from '@/components/site-footer'
 
@@ -128,22 +129,23 @@ export default function Home() {
       <main className="flex-1">
         {/* ── Hero ─────────────────────────────────────────────── */}
         <section className="relative overflow-hidden">
-          <div className="absolute inset-0 bg-grid mask-fade pointer-events-none" />
-          <div className="absolute -top-40 left-1/2 -translate-x-1/2 w-[600px] h-[600px] bg-accent/10 rounded-full blur-[120px] pointer-events-none" />
+          <div className="absolute inset-0 bg-grid mask-fade pointer-events-none opacity-40" />
+          <div className="absolute -top-40 left-1/2 -translate-x-1/2 w-[800px] h-[600px] bg-accent-soft/40 rounded-full blur-[140px] pointer-events-none" />
+          <div className="absolute top-20 left-1/2 -translate-x-1/2 w-[400px] h-[400px] bg-accent/20 rounded-full blur-[100px] pointer-events-none mix-blend-screen" />
 
           <div className="relative max-w-4xl mx-auto px-6 pt-24 pb-20 text-center">
-            <div className="inline-flex items-center gap-2 rounded-full border border-line bg-surface/60 px-3 py-1 text-xs text-ink-muted mb-7">
-              <span className="relative inline-flex w-1.5 h-1.5 text-accent">
+            <div className="inline-flex items-center gap-2 rounded-full border border-line bg-surface/80 glass px-4 py-1.5 text-xs font-medium text-ink-muted mb-8 shadow-sm">
+              <span className="relative inline-flex w-2 h-2 text-accent">
                 <span className="pulse-dot" />
-                <span className="relative w-1.5 h-1.5 rounded-full bg-accent" />
+                <span className="relative w-2 h-2 rounded-full bg-accent" />
               </span>
-              Multistream infrastructure for creators
+              <span className="text-ink">Next-gen infrastructure</span> <span className="opacity-50">|</span> <span>Multistream relay</span>
             </div>
 
-            <h1 className="text-5xl md:text-6xl font-extrabold tracking-tight leading-[1.05] mb-6">
+            <h1 className="text-5xl md:text-7xl font-extrabold tracking-tight leading-[1.1] mb-6">
               <span className="text-gradient">One stream in.</span>
               <br />
-              <span className="text-ink">Every platform live.</span>
+              <span className="text-gradient-accent">Every platform live.</span>
             </h1>
 
             <p className="text-lg text-ink-muted max-w-2xl mx-auto mb-9 leading-relaxed">
@@ -152,16 +154,17 @@ export default function Home() {
               no config files, no terminal.
             </p>
 
-            <div className="flex flex-wrap gap-3 justify-center">
+            <div className="flex flex-wrap gap-4 justify-center mt-4">
               <Link
                 href="/signup"
-                className="bg-accent hover:bg-accent-strong text-base font-semibold px-7 py-3 rounded-lg transition-colors glow-accent"
+                className="bg-accent text-base text-base font-semibold px-8 py-3.5 rounded-lg transition-all glow-accent flex items-center gap-2"
               >
                 Start free — 2 hours included
+                <span className="font-mono text-sm opacity-80">→</span>
               </Link>
               <a
                 href="#how"
-                className="border border-line-strong hover:border-ink-faint text-ink px-7 py-3 rounded-lg font-semibold transition-colors"
+                className="glass border border-line-strong hover:border-accent hover:text-accent hover:bg-surface/50 text-ink px-8 py-3.5 rounded-lg font-semibold transition-all"
               >
                 See how it works
               </a>
@@ -172,10 +175,24 @@ export default function Home() {
             </div>
 
             {/* platform strip */}
-            <div className="mt-14 flex flex-wrap items-center justify-center gap-x-8 gap-y-3">
+            <div className="mt-14 flex flex-wrap items-center justify-center gap-x-8 gap-y-3 mb-16">
               {PLATFORMS.map(p => (
-                <span key={p} className="text-sm font-medium text-ink-faint">{p}</span>
+                <span key={p} className="text-sm font-medium text-ink-faint uppercase tracking-wider">{p}</span>
               ))}
+            </div>
+
+            <div className="relative max-w-5xl mx-auto mt-16 animate-float z-10">
+              <div className="absolute inset-0 bg-accent/20 blur-[100px] -z-10 rounded-full" />
+              <div className="rounded-2xl border border-line/50 shadow-2xl shadow-accent/10 glass overflow-hidden p-2 bg-surface/50">
+                <Image 
+                  src="/dashboard-preview.jpg" 
+                  alt="SlimCast Dashboard Preview" 
+                  width={1920} 
+                  height={1080} 
+                  className="rounded-xl w-full h-auto object-cover opacity-90 hover:opacity-100 transition-opacity duration-500"
+                  priority
+                />
+              </div>
             </div>
           </div>
         </section>
@@ -190,33 +207,35 @@ export default function Home() {
             </p>
           </div>
 
-          <div className="flex flex-col md:flex-row items-stretch justify-center gap-4">
+          <div className="flex flex-col md:flex-row items-stretch justify-center gap-6 mt-8 relative">
+            <div className="absolute top-1/2 left-0 w-full h-px bg-gradient-to-r from-transparent via-accent/30 to-transparent -translate-y-1/2 hidden md:block" />
+            
             {/* OBS */}
-            <div className="flex-1 rounded-xl border border-line bg-surface p-6 text-center">
-              <div className="kicker mb-3">You</div>
-              <div className="text-lg font-semibold mb-1">OBS on your PC</div>
+            <div className="flex-1 rounded-2xl glass border border-line/50 p-8 text-center relative z-10 transition-transform duration-300 hover:-translate-y-1 hover:shadow-xl hover:shadow-accent/5">
+              <div className="kicker mb-4">You</div>
+              <div className="text-xl font-semibold mb-2 text-ink">OBS on your PC</div>
               <p className="text-sm text-ink-muted">One HEVC stream out. Same effort as streaming to a single platform.</p>
             </div>
 
-            <div className="flex items-center justify-center text-accent md:px-1">
-              <span className="font-mono text-sm">→</span>
+            <div className="flex items-center justify-center text-accent/50 md:px-2 relative z-10 hidden md:flex">
+              <span className="font-mono text-xl animate-pulse">→</span>
             </div>
 
             {/* SlimCast GPU */}
-            <div className="flex-1 rounded-xl border border-accent/40 bg-accent-soft/30 p-6 text-center glow-accent">
-              <div className="kicker mb-3">SlimCast</div>
-              <div className="text-lg font-semibold mb-1">Cloud GPU transcode</div>
+            <div className="flex-1 rounded-2xl glass border border-accent/40 bg-accent-soft p-8 text-center glow-accent relative z-10 scale-105">
+              <div className="kicker mb-4">SlimCast</div>
+              <div className="text-xl font-semibold mb-2 text-ink">Cloud GPU transcode</div>
               <p className="text-sm text-ink-muted">Hardware NVENC decodes HEVC and re-encodes H.264 per platform, in parallel.</p>
             </div>
 
-            <div className="flex items-center justify-center text-accent md:px-1">
-              <span className="font-mono text-sm">→</span>
+            <div className="flex items-center justify-center text-accent/50 md:px-2 relative z-10 hidden md:flex">
+              <span className="font-mono text-xl animate-pulse">→</span>
             </div>
 
             {/* Platforms */}
-            <div className="flex-1 rounded-xl border border-line bg-surface p-6 text-center">
-              <div className="kicker mb-3">Your audience</div>
-              <div className="text-lg font-semibold mb-1">5 platforms live</div>
+            <div className="flex-1 rounded-2xl glass border border-line/50 p-8 text-center relative z-10 transition-transform duration-300 hover:-translate-y-1 hover:shadow-xl hover:shadow-accent/5">
+              <div className="kicker mb-4">Your audience</div>
+              <div className="text-xl font-semibold mb-2 text-ink">5 platforms live</div>
               <p className="text-sm text-ink-muted">Twitch, YouTube, Kick &amp; TikTok — each tuned to its own limits.</p>
             </div>
           </div>
@@ -231,11 +250,12 @@ export default function Home() {
               <p className="text-ink-muted mt-3">From signup to streaming everywhere — no documentation required.</p>
             </div>
 
-            <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-5">
-              {STEPS.map(s => (
-                <div key={s.n} className="rounded-xl border border-line bg-base p-6">
-                  <div className="font-mono text-accent text-sm mb-4">{s.n}</div>
-                  <div className="font-semibold mb-2">{s.title}</div>
+            <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-6">
+              {STEPS.map((s, i) => (
+                <div key={s.n} className="rounded-2xl glass border border-line/50 p-8 transition-all duration-300 hover:border-accent/30 hover:-translate-y-1 hover:shadow-lg hover:shadow-accent/5 relative overflow-hidden group">
+                  <div className="absolute top-0 right-0 p-6 opacity-5 text-8xl font-bold font-mono group-hover:opacity-10 transition-opacity -mr-4 -mt-4 text-accent">{s.n}</div>
+                  <div className="font-mono text-accent text-sm mb-5 opacity-80">{s.n} / 04</div>
+                  <div className="text-lg font-semibold mb-3 text-ink">{s.title}</div>
                   <p className="text-sm text-ink-muted leading-relaxed">{s.body}</p>
                 </div>
               ))}
@@ -253,10 +273,13 @@ export default function Home() {
             </p>
           </div>
 
-          <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-5">
+          <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
             {FEATURES.map(f => (
-              <div key={f.title} className="rounded-xl border border-line bg-surface p-6 hover:border-line-strong transition-colors">
-                <div className="font-semibold mb-2">{f.title}</div>
+              <div key={f.title} className="rounded-2xl glass border border-line/50 p-8 transition-all duration-300 hover:border-accent/40 hover:-translate-y-1 hover:shadow-xl hover:shadow-accent/10">
+                <div className="text-lg font-semibold mb-3 text-ink flex items-center gap-3">
+                  <span className="w-1.5 h-1.5 rounded-full bg-accent inline-block"></span>
+                  {f.title}
+                </div>
                 <p className="text-sm text-ink-muted leading-relaxed">{f.body}</p>
               </div>
             ))}
@@ -292,13 +315,28 @@ export default function Home() {
                 </ul>
               </div>
 
-              <div className="grid grid-cols-2 gap-4">
-                {TRUST.map(t => (
-                  <div key={t.label} className="rounded-xl border border-line bg-base p-6">
-                    <div className="text-3xl font-bold text-ink mb-1 font-mono">{t.stat}</div>
-                    <div className="text-xs text-ink-muted leading-snug">{t.label}</div>
+              <div className="space-y-12">
+                <div className="grid grid-cols-2 gap-5">
+                  {TRUST.map(t => (
+                    <div key={t.label} className="rounded-2xl glass border border-line/50 p-8 transition-all duration-300 hover:border-accent/20">
+                      <div className="text-4xl font-bold text-gradient-accent mb-2 font-mono tracking-tight">{t.stat}</div>
+                      <div className="text-sm text-ink-muted leading-relaxed">{t.label}</div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="relative animate-float-delayed z-10 hidden md:block">
+                  <div className="absolute inset-0 bg-accent/10 blur-[80px] -z-10 rounded-full" />
+                  <div className="rounded-2xl border border-line/50 shadow-2xl shadow-accent/5 glass overflow-hidden p-2 bg-surface/50">
+                    <Image 
+                      src="/obs-plugin-preview.jpg" 
+                      alt="SlimCast OBS Plugin" 
+                      width={1200} 
+                      height={900} 
+                      className="rounded-xl w-full h-auto object-cover opacity-90 hover:opacity-100 transition-opacity duration-500"
+                    />
                   </div>
-                ))}
+                </div>
               </div>
             </div>
           </div>
@@ -315,11 +353,11 @@ export default function Home() {
           <div className="overflow-x-auto rounded-xl border border-line">
             <table className="w-full text-left min-w-[640px]">
               <thead>
-                <tr className="border-b border-line bg-surface">
-                  <th className="px-5 py-4 text-sm font-medium text-ink-muted">Feature</th>
-                  <th className="px-5 py-4 text-sm font-semibold text-accent">SlimCast</th>
-                  <th className="px-5 py-4 text-sm font-medium text-ink-muted">Restream</th>
-                  <th className="px-5 py-4 text-sm font-medium text-ink-muted">Streamlabs</th>
+                <tr className="border-b border-line bg-surface/50">
+                  <th className="px-6 py-5 text-sm font-medium text-ink-muted uppercase tracking-wider">Feature</th>
+                  <th className="px-6 py-5 text-sm font-semibold text-accent uppercase tracking-wider">SlimCast</th>
+                  <th className="px-6 py-5 text-sm font-medium text-ink-muted uppercase tracking-wider">Restream</th>
+                  <th className="px-6 py-5 text-sm font-medium text-ink-muted uppercase tracking-wider">Streamlabs</th>
                 </tr>
               </thead>
               <tbody>
@@ -363,20 +401,21 @@ export default function Home() {
 
         {/* ── Final CTA ────────────────────────────────────────── */}
         <section className="relative overflow-hidden">
-          <div className="absolute inset-0 bg-grid mask-fade pointer-events-none opacity-60" />
-          <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[500px] h-[400px] bg-accent/10 rounded-full blur-[120px] pointer-events-none" />
-          <div className="relative max-w-2xl mx-auto px-6 py-24 text-center">
-            <h2 className="text-4xl font-extrabold tracking-tight mb-4">
+          <div className="absolute inset-0 bg-grid mask-fade pointer-events-none opacity-20" />
+          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[500px] bg-accent/10 rounded-full blur-[140px] pointer-events-none" />
+          <div className="relative max-w-2xl mx-auto px-6 py-28 text-center glass rounded-3xl border border-line/50 m-6 mb-12 shadow-2xl shadow-base">
+            <h2 className="text-4xl md:text-5xl font-extrabold tracking-tight mb-6 text-gradient">
               Go live everywhere tonight.
             </h2>
-            <p className="text-ink-muted text-lg mb-8">
+            <p className="text-ink-muted text-lg mb-10 max-w-xl mx-auto">
               Two free hours are waiting in your account. No card, no setup, no terminal.
             </p>
             <Link
               href="/signup"
-              className="inline-block bg-accent hover:bg-accent-strong text-base font-semibold px-8 py-3.5 rounded-lg transition-colors glow-accent"
+              className="inline-flex items-center gap-3 bg-accent text-base font-semibold px-10 py-4 rounded-xl transition-all glow-accent"
             >
               Create your account
+              <span className="font-mono text-sm opacity-80">→</span>
             </Link>
           </div>
         </section>

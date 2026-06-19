@@ -1,8 +1,9 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import Link from 'next/link'
 import { Logo } from './logo'
+import { createBrowserClient } from '@/lib/supabase'
 
 const LINKS = [
   { href: '/#how', label: 'How it works' },
@@ -14,6 +15,23 @@ const LINKS = [
 
 export function SiteNav() {
   const [open, setOpen] = useState(false)
+  const [isLoggedIn, setIsLoggedIn] = useState(false)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    const supabase = createBrowserClient()
+    
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setIsLoggedIn(!!session)
+      setLoading(false)
+    })
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setIsLoggedIn(!!session)
+    })
+
+    return () => subscription.unsubscribe()
+  }, [])
 
   return (
     <header className="sticky top-0 z-50 border-b border-line/70 bg-base/80 backdrop-blur-xl">
@@ -28,16 +46,27 @@ export function SiteNav() {
           ))}
         </div>
 
-        <div className="hidden md:flex items-center gap-3 text-sm">
-          <Link href="/login" className="text-ink-muted hover:text-ink transition-colors px-3 py-1.5">
-            Log in
-          </Link>
-          <Link
-            href="/signup"
-            className="bg-accent hover:bg-accent-strong text-base font-semibold px-4 py-1.5 rounded-md transition-colors"
-          >
-            Get started
-          </Link>
+        <div className="hidden md:flex items-center gap-3 text-sm min-w-[180px] justify-end">
+          {loading ? null : isLoggedIn ? (
+            <Link
+              href="/dashboard"
+              className="bg-surface border border-line-strong hover:border-accent hover:text-accent text-ink px-5 py-2 rounded-lg font-medium transition-all"
+            >
+              Dashboard
+            </Link>
+          ) : (
+            <>
+              <Link href="/login" className="text-ink-muted hover:text-ink transition-colors px-3 py-1.5 font-medium">
+                Log in
+              </Link>
+              <Link
+                href="/signup"
+                className="bg-accent hover:bg-accent-strong text-base font-semibold px-5 py-2 rounded-lg transition-all glow-accent"
+              >
+                Get started
+              </Link>
+            </>
+          )}
         </div>
 
         <button
@@ -64,12 +93,20 @@ export function SiteNav() {
             </a>
           ))}
           <div className="flex gap-3 pt-2">
-            <Link href="/login" className="flex-1 text-center border border-line-strong rounded-md py-2 text-sm">
-              Log in
-            </Link>
-            <Link href="/signup" className="flex-1 text-center bg-accent text-base font-semibold rounded-md py-2 text-sm">
-              Get started
-            </Link>
+            {loading ? null : isLoggedIn ? (
+              <Link href="/dashboard" className="flex-1 text-center border border-line-strong hover:bg-surface hover:text-accent rounded-lg py-2.5 text-sm font-medium transition-colors">
+                Go to Dashboard
+              </Link>
+            ) : (
+              <>
+                <Link href="/login" className="flex-1 text-center border border-line-strong hover:bg-surface rounded-lg py-2.5 text-sm font-medium transition-colors">
+                  Log in
+                </Link>
+                <Link href="/signup" className="flex-1 text-center bg-accent text-base font-semibold rounded-lg py-2.5 text-sm glow-accent transition-all">
+                  Get started
+                </Link>
+              </>
+            )}
           </div>
         </div>
       )}

@@ -18,14 +18,23 @@ export function youtubeHlsUrl(streamKey: string): string {
   return `https://a.upload.youtube.com/http_upload_hls?cid=${encodeURIComponent(streamKey)}&copy=0&file=stream.m3u8`
 }
 
-export function buildAgentOutputs(platforms: PlatformRow[]) {
+export interface GroupBitrates {
+  landscape: number
+  portrait: number
+}
+
+export function buildAgentOutputs(platforms: PlatformRow[], groups?: GroupBitrates) {
+  const landscapeCap = groups?.landscape ?? 6000
+  const portraitCap  = groups?.portrait ?? 4000
+
   return platforms.map(p => {
     const orientation = p.orientation ?? 'landscape'
 
     // YouTube landscape → HEVC passthrough (no re-encode, best quality). The
     // source HEVC is copied straight into HLS and PUT to YouTube's HLS ingest.
-    // Portrait YouTube can't be passthrough (it's the cropped 9:16 feed), so it
-    // falls through to a normal transcode and joins the portrait encode group.
+    // Bitrate is irrelevant here (no encode). Portrait YouTube can't be
+    // passthrough (it's the cropped 9:16 feed), so it falls through to a normal
+    // transcode and joins the portrait encode group.
     if (p.platform === 'youtube' && orientation === 'landscape') {
       return {
         name: p.platform,
@@ -39,11 +48,14 @@ export function buildAgentOutputs(platforms: PlatformRow[]) {
       }
     }
 
+    // Transcoded outputs inherit their orientation group's bitrate cap. The
+    // supervisor still floors this at each platform's hard max (e.g. TikTok
+    // 4500) when it computes the shared group bitrate.
     return {
       name: p.platform,
       url: p.rtmp_url,
       key: p.stream_key_encrypted,
-      bitrate_kbps: p.bitrate_kbps ?? defaultBitrate(p.platform),
+      bitrate_kbps: orientation === 'portrait' ? portraitCap : landscapeCap,
       fps: p.fps ?? 60,
       orientation,
       mode: 'transcode',

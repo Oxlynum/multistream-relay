@@ -1,20 +1,19 @@
 import { createServerClient } from '@/lib/supabase'
 import { getProvider } from '@/lib/providers/runpod'
+import { authenticateUserOrAgent } from '@/lib/agent-auth'
 
 export async function POST(request: Request) {
   const supabase = createServerClient()
 
-  const authHeader = request.headers.get('authorization')
-  const token = authHeader?.replace('Bearer ', '')
-  const { data: { user } } = await supabase.auth.getUser(token ?? '')
-  if (!user) {
+  const userId = await authenticateUserOrAgent(request)
+  if (!userId) {
     return Response.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
   const { data: instance } = await supabase
     .from('gpu_instances')
     .select('provider_id, status, provider')
-    .eq('user_id', user.id)
+    .eq('user_id', userId)
     .single()
 
   if (!instance) {
@@ -26,7 +25,7 @@ export async function POST(request: Request) {
   await supabase
     .from('gpu_instances')
     .update({ status: 'stopped' })
-    .eq('user_id', user.id)
+    .eq('user_id', userId)
 
   return Response.json({ ok: true })
 }

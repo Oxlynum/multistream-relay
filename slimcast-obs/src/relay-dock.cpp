@@ -1,55 +1,59 @@
 #include "relay-dock.hpp"
 
+#include <obs.h>
 #include <obs-module.h>
 #include <obs-frontend-api.h>
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QFormLayout>
-#include <QTabWidget>
 #include <QFrame>
-#include <QGroupBox>
+#include <QPushButton>
 #include <QScrollArea>
 #include <QSettings>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <cmath>
 
-// ── helpers ───────────────────────────────────────────────────────────────────
+// ── palette ─────────────────────────────────────────────────────────────────
+static const QString C_LIVE = QStringLiteral("#37d67a");
+static const QString C_WARN = QStringLiteral("#ffb020");
+static const QString C_ERR  = QStringLiteral("#ff5470");
+static const QString C_IDLE = QStringLiteral("#555e6e");
+static const QString C_MUTE = QStringLiteral("#8a93a3");
+static const QString C_FAINT = QStringLiteral("#6b7280");
+
+// Landscape tee group, portrait tee group, YouTube passthrough — every platform
+// SlimCast fans out to. (Facebook was dropped: its low cap dragged the shared
+// landscape encode down.)
+static const QStringList PLATFORM_NAMES = {"twitch", "kick", "youtube", "tiktok"};
+static const QMap<QString, QString> PLATFORM_LABELS = {
+    {"twitch",  "Twitch"}, {"kick", "Kick"}, {"youtube", "YouTube"}, {"tiktok", "TikTok"},
+};
+
+// ── helpers ─────────────────────────────────────────────────────────────────
 
 static QString formatCredits(int seconds)
 {
     if (seconds <= 0) return QStringLiteral("0m");
     int h = seconds / 3600;
     int m = (seconds % 3600) / 60;
-    if (h > 0)
-        return QString("%1h %2m").arg(h).arg(m);
+    if (h > 0) return QString("%1h %2m").arg(h).arg(m);
     return QString("%1m").arg(m);
 }
 
-static QString dotColor(const QString &state)
+// A channel is a free HEVC passthrough only when it's YouTube in landscape.
+static bool isPassthrough(const PlatformConfig &p)
 {
-    if (state == "running")    return QStringLiteral("#37d67a");
-    if (state == "restarting") return QStringLiteral("#ffb020");
-    if (state == "error")      return QStringLiteral("#ff5470");
-    return QStringLiteral("#555e6e");
+    return p.platform == "youtube" && p.orientation == "landscape";
 }
 
-static const QStringList PLATFORM_NAMES = {"twitch", "kick", "youtube", "tiktok", "facebook"};
-static const QMap<QString, QString> PLATFORM_LABELS = {
-    {"twitch",   "Twitch"},
-    {"kick",     "Kick"},
-    {"youtube",  "YouTube"},
-    {"tiktok",   "TikTok"},
-    {"facebook", "Facebook"},
-};
-
-// ── ctor ─────────────────────────────────────────────────────────────────────
+// ── ctor ──────────────────────────────────────────────────────────────────────
 
 RelayDock::RelayDock(QWidget *parent)
     : QDockWidget(parent)
     , m_api(new RelayApi(this))
-    , m_launchPollTimer(new QTimer(this))
-    , m_statusPollTimer(new QTimer(this))
+    , m_pollTimer(new QTimer(this))
 {
     setObjectName("SlimCastDock");
     setWindowTitle("SlimCast");
@@ -59,140 +63,226 @@ RelayDock::RelayDock(QWidget *parent)
 
     connect(m_api, &RelayApi::gpuStatusUpdated, this, &RelayDock::onGpuStatusUpdated);
     connect(m_api, &RelayApi::gpuProvisioned,   this, &RelayDock::onGpuProvisioned);
+    connect(m_api, &RelayApi::gpuDestroyed,     this, &RelayDock::onGpuDestroyed);
+    connect(m_api, &RelayApi::platformsUpdated, this, &RelayDock::onPlatformsUpdated);
+    connect(m_api, &RelayApi::encodeUpdated,    this, &RelayDock::onEncodeUpdated);
     connect(m_api, &RelayApi::networkError,     this, &RelayDock::onNetworkError);
-    connect(m_api, &RelayApi::creditsUpdated, this, [this](int s) { setCreditsLabel(s); });
 
-    m_launchPollTimer->setInterval(5000);
-    connect(m_launchPollTimer, &QTimer::timeout, this, &RelayDock::onLaunchPollTick);
-
-    m_statusPollTimer->setInterval(5000);
-    connect(m_statusPollTimer, &QTimer::timeout, this, &RelayDock::onStatusPollTick);
+    m_pollTimer->setInterval(5000);
+    connect(m_pollTimer, &QTimer::timeout, this, &RelayDock::onPollTick);
 
     if (m_api->hasApiKey()) {
-        m_statusPollTimer->start();
+        showSetup(false);
+        m_pollTimer->start();
         m_api->fetchGpuStatus();
+        m_api->fetchPlatforms();
+        m_api->fetchEncode();
+    } else {
+        showSetup(true);
     }
 }
 
-// ── UI ────────────────────────────────────────────────────────────────────────
+// ── UI ──────────────────────────────────────────────────────────────────────
 
 void RelayDock::buildUi()
 {
-    auto *root   = new QWidget(this);
-    auto *rootLy = new QVBoxLayout(root);
-    rootLy->setContentsMargins(6, 6, 6, 6);
-    rootLy->setSpacing(4);
+    m_pages = new QStackedWidget(this);
+    m_pages->addWidget(buildSetupPage());   // index 0
+    m_pages->addWidget(buildActivePage());  // index 1
+    setWidget(m_pages);
+}
 
-    auto *tabs = new QTabWidget(root);
+QWidget *RelayDock::buildSetupPage()
+{
+    auto *w  = new QWidget;
+    auto *ly = new QVBoxLayout(w);
+    ly->setContentsMargins(14, 18, 14, 14);
+    ly->setSpacing(8);
 
-    // ── Account tab ──────────────────────────────────────────────────────────
-    {
-        auto *w  = new QWidget;
-        auto *fl = new QFormLayout(w);
-        fl->setContentsMargins(8, 8, 8, 8);
-        fl->setSpacing(8);
+    auto *title = new QLabel("stream everywhere,\nno setup");
+    title->setStyleSheet("font-size:15px; font-weight:600; color:#e7ebf2");
+    ly->addWidget(title);
 
-        m_apiKeyEdit = new QLineEdit;
-        m_apiKeyEdit->setEchoMode(QLineEdit::Password);
-        m_apiKeyEdit->setPlaceholderText("Paste your SlimCast API key");
-        fl->addRow("API key", m_apiKeyEdit);
+    auto *sub = new QLabel("Paste your SlimCast API key to connect OBS.");
+    sub->setWordWrap(true);
+    sub->setStyleSheet(QString("color:%1; font-size:11px").arg(C_MUTE));
+    ly->addWidget(sub);
 
-        auto *saveBtn = new QPushButton("Save");
-        fl->addRow(saveBtn);
-        connect(saveBtn, &QPushButton::clicked, this, &RelayDock::onSaveApiKey);
+    ly->addSpacing(6);
 
-        auto *sep = new QFrame;
-        sep->setFrameShape(QFrame::HLine);
-        sep->setStyleSheet("color:#3a3f4b");
-        fl->addRow(sep);
+    m_apiKeyEdit = new QLineEdit;
+    m_apiKeyEdit->setEchoMode(QLineEdit::Password);
+    m_apiKeyEdit->setPlaceholderText("SlimCast API key");
+    ly->addWidget(m_apiKeyEdit);
 
-        m_serverStatus = new QLabel("● Offline");
-        m_serverStatus->setStyleSheet("color:gray");
-        fl->addRow("Server", m_serverStatus);
+    auto *saveBtn = new QPushButton("Connect");
+    ly->addWidget(saveBtn);
+    connect(saveBtn, &QPushButton::clicked, this, &RelayDock::onSaveApiKey);
 
-        m_creditsLabel = new QLabel("—");
-        m_creditsLabel->setStyleSheet("color:gray");
-        fl->addRow("Credits", m_creditsLabel);
+    auto *link = new QLabel(
+        "<a href='https://slimcast.com/dashboard' style='color:#4d8ef0'>Get your API key →</a>");
+    link->setOpenExternalLinks(true);
+    link->setStyleSheet("font-size:11px");
+    ly->addWidget(link);
 
-        auto *keyNote = new QLabel(
-            "<a href='https://slimcast.com/dashboard' style='color:#4d8ef0'>Get your API key →</a>"
-        );
-        keyNote->setOpenExternalLinks(true);
-        fl->addRow(keyNote);
+    ly->addStretch();
+    return w;
+}
 
-        tabs->addTab(w, "Account");
+static QFrame *makeSep()
+{
+    auto *f = new QFrame;
+    f->setFrameShape(QFrame::HLine);
+    f->setStyleSheet("color:#2a2f3a");
+    return f;
+}
+
+QWidget *RelayDock::buildActivePage()
+{
+    // Scrollable: the control panel is taller than a docked panel often is.
+    auto *scroll = new QScrollArea;
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+
+    auto *w  = new QWidget;
+    auto *ly = new QVBoxLayout(w);
+    ly->setContentsMargins(14, 14, 14, 12);
+    ly->setSpacing(10);
+
+    // ── Status header ───────────────────────────────────────────────────────
+    auto *headRow = new QHBoxLayout;
+    headRow->setSpacing(6);
+    m_statusDot = new QLabel("●");
+    m_statusDot->setStyleSheet(QString("color:%1; font-size:13px").arg(C_IDLE));
+    m_statusLabel = new QLabel("Idle");
+    m_statusLabel->setStyleSheet("font-size:14px; font-weight:600; color:#e7ebf2");
+    headRow->addWidget(m_statusDot);
+    headRow->addWidget(m_statusLabel);
+    headRow->addStretch();
+    m_creditsLabel = new QLabel("—");
+    m_creditsLabel->setStyleSheet(QString("color:%1; font-size:13px; font-weight:600").arg(C_LIVE));
+    headRow->addWidget(m_creditsLabel);
+    ly->addLayout(headRow);
+
+    m_ingestLabel = new QLabel("—");
+    m_ingestLabel->setStyleSheet(QString("color:%1; font-size:11px").arg(C_FAINT));
+    ly->addWidget(m_ingestLabel);
+
+    ly->addWidget(makeSep());
+
+    // ── Channels ──────────────────────────────────────────────────────────────
+    for (const QString &id : PLATFORM_NAMES) {
+        auto *container = new QWidget;
+        auto *cly = new QVBoxLayout(container);
+        cly->setContentsMargins(0, 0, 0, 0);
+        cly->setSpacing(0);
+
+        auto *top = new QHBoxLayout;
+        top->setSpacing(8);
+        auto *dot = new QLabel("●");
+        dot->setFixedWidth(12);
+        dot->setStyleSheet(QString("color:%1").arg(C_IDLE));
+        auto *name = new QLabel(PLATFORM_LABELS.value(id, id));
+        name->setStyleSheet("color:#cbd2dd; font-size:12px");
+        auto *toggle = new QCheckBox;
+        top->addWidget(dot);
+        top->addWidget(name);
+        top->addStretch();
+        top->addWidget(toggle);
+        cly->addLayout(top);
+
+        auto *sub = new QLabel("off");
+        sub->setContentsMargins(20, 0, 0, 0);
+        sub->setStyleSheet(QString("color:%1; font-size:10px").arg(C_FAINT));
+        cly->addWidget(sub);
+
+        ly->addWidget(container);
+        m_channels[id] = {container, dot, name, sub, toggle};
+        container->setVisible(false);  // shown once we know the user has this channel
+
+        connect(toggle, &QCheckBox::toggled, this, [this, id](bool on) {
+            onChannelToggled(id, on);
+        });
     }
 
-    // ── Status tab ───────────────────────────────────────────────────────────
-    {
-        auto *w  = new QWidget;
-        auto *ly = new QVBoxLayout(w);
-        ly->setContentsMargins(8, 8, 8, 8);
-        ly->setSpacing(6);
+    // ── Lock ────────────────────────────────────────────────────────────────
+    m_lockCheck = new QCheckBox("Lock channel toggles");
+    m_lockCheck->setStyleSheet(QString("color:%1; font-size:11px").arg(C_MUTE));
+    m_lockCheck->setToolTip("Prevents accidental on/off changes. Engages automatically when a stream starts.");
+    connect(m_lockCheck, &QCheckBox::toggled, this, &RelayDock::onLockToggled);
+    ly->addWidget(m_lockCheck);
 
-        auto *platBox = new QGroupBox("Platforms");
-        auto *platLy  = new QVBoxLayout(platBox);
-        platLy->setSpacing(4);
+    ly->addWidget(makeSep());
 
-        for (const QString &id : PLATFORM_NAMES) {
-            auto *row  = new QWidget;
-            auto *rowL = new QHBoxLayout(row);
-            rowL->setContentsMargins(0, 0, 0, 0);
-            rowL->setSpacing(6);
+    // ── Bitrate caps (per encode group) ───────────────────────────────────────
+    auto *capTitle = new QLabel("Bitrate cap");
+    capTitle->setStyleSheet("color:#cbd2dd; font-size:12px; font-weight:600");
+    ly->addWidget(capTitle);
+    auto *capNote = new QLabel("Per encode group — shared by every channel in it.");
+    capNote->setStyleSheet(QString("color:%1; font-size:10px").arg(C_FAINT));
+    ly->addWidget(capNote);
 
-            auto *dot   = new QLabel("●");
-            dot->setFixedWidth(14);
-            dot->setStyleSheet("color:#555e6e");
-            auto *label = new QLabel(PLATFORM_LABELS.value(id, id));
+    auto addCap = [&](const QString &label, QSlider *&slider, QLabel *&val) {
+        auto *row = new QHBoxLayout;
+        row->setSpacing(8);
+        auto *l = new QLabel(label);
+        l->setStyleSheet(QString("color:%1; font-size:11px").arg(C_MUTE));
+        l->setFixedWidth(64);
+        slider = new QSlider(Qt::Horizontal);
+        val = new QLabel("—");
+        val->setStyleSheet("color:#cbd2dd; font-size:11px; font-family:monospace");
+        val->setFixedWidth(64);
+        val->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        row->addWidget(l);
+        row->addWidget(slider, 1);
+        row->addWidget(val);
+        ly->addLayout(row);
+    };
+    addCap("Landscape", m_landscapeSlider, m_landscapeVal);
+    addCap("Portrait",  m_portraitSlider,  m_portraitVal);
 
-            rowL->addWidget(dot);
-            rowL->addWidget(label);
-            rowL->addStretch();
+    m_landscapeSlider->setRange(m_encode.landscapeMin, m_encode.landscapeMax);
+    m_portraitSlider->setRange(m_encode.portraitMin, m_encode.portraitMax);
+    m_landscapeSlider->setSingleStep(250);
+    m_portraitSlider->setSingleStep(250);
 
-            platLy->addWidget(row);
-            m_platformRows[id] = {dot, label};
-        }
+    connect(m_landscapeSlider, &QSlider::valueChanged, this, [this](int v) {
+        m_landscapeVal->setText(QString("%1k").arg(v));
+    });
+    connect(m_portraitSlider, &QSlider::valueChanged, this, [this](int v) {
+        m_portraitVal->setText(QString("%1k").arg(v));
+    });
+    connect(m_landscapeSlider, &QSlider::sliderReleased, this, &RelayDock::onBitrateReleased);
+    connect(m_portraitSlider,  &QSlider::sliderReleased, this, &RelayDock::onBitrateReleased);
 
-        ly->addWidget(platBox);
+    ly->addWidget(makeSep());
 
-        m_streamingLabel = new QLabel("Not streaming");
-        m_streamingLabel->setAlignment(Qt::AlignCenter);
-        m_streamingLabel->setStyleSheet("color:gray; font-size: 11px;");
-        ly->addWidget(m_streamingLabel);
+    // ── Totals + footer ───────────────────────────────────────────────────────
+    m_totalLabel = new QLabel("—");
+    m_totalLabel->setStyleSheet(QString("color:%1; font-size:11px").arg(C_MUTE));
+    ly->addWidget(m_totalLabel);
 
-        ly->addStretch();
-        tabs->addTab(w, "Status");
-    }
+    m_helperLabel = new QLabel("$2 / token · base 1 tkn/hr + 0.2 per extra channel.");
+    m_helperLabel->setWordWrap(true);
+    m_helperLabel->setStyleSheet(QString("color:%1; font-size:10px").arg(C_FAINT));
+    ly->addWidget(m_helperLabel);
 
-    rootLy->addWidget(tabs, 1);
+    auto *manage = new QLabel(
+        "<a href='https://slimcast.com/dashboard' style='color:#4d8ef0'>Manage at slimcast.com ↗</a>");
+    manage->setOpenExternalLinks(true);
+    manage->setStyleSheet("font-size:11px");
+    ly->addWidget(manage);
 
-    // ── Separator ────────────────────────────────────────────────────────────
-    auto *sep = new QFrame;
-    sep->setFrameShape(QFrame::HLine);
-    sep->setStyleSheet("color:#3a3f4b");
-    rootLy->addWidget(sep);
+    ly->addStretch();
 
-    // ── Controls ─────────────────────────────────────────────────────────────
-    auto *btnRow = new QHBoxLayout;
-    m_startBtn = new QPushButton("▶ Start");
-    m_stopBtn  = new QPushButton("⏹ Stop");
-    btnRow->addWidget(m_startBtn);
-    btnRow->addWidget(m_stopBtn);
-    rootLy->addLayout(btnRow);
+    scroll->setWidget(w);
+    return scroll;
+}
 
-    m_autoLaunch = new QCheckBox("Auto-start server when I stream");
-    m_autoLaunch->setChecked(true);
-    rootLy->addWidget(m_autoLaunch);
-
-    m_statusBar = new QLabel("—");
-    m_statusBar->setAlignment(Qt::AlignCenter);
-    m_statusBar->setStyleSheet("color:gray; font-size: 10px;");
-    rootLy->addWidget(m_statusBar);
-
-    setWidget(root);
-
-    connect(m_startBtn, &QPushButton::clicked, this, &RelayDock::onStartRelay);
-    connect(m_stopBtn,  &QPushButton::clicked, this, &RelayDock::onStopRelay);
+void RelayDock::showSetup(bool setup)
+{
+    m_pages->setCurrentIndex(setup ? 0 : 1);
 }
 
 // ── Settings ──────────────────────────────────────────────────────────────────
@@ -205,17 +295,13 @@ void RelayDock::loadSettings()
         m_apiKeyEdit->setText(key);
         m_api->setApiKey(key);
     }
-    m_autoLaunch->setChecked(s.value("autoLaunch", true).toBool());
 }
 
 void RelayDock::saveSettings()
 {
     QSettings s("SlimCast", "obs-plugin");
-    s.setValue("apiKey",     m_apiKeyEdit->text().trimmed());
-    s.setValue("autoLaunch", m_autoLaunch->isChecked());
+    s.setValue("apiKey", m_apiKeyEdit->text().trimmed());
 }
-
-// ── Account tab slots ─────────────────────────────────────────────────────────
 
 void RelayDock::onSaveApiKey()
 {
@@ -224,147 +310,235 @@ void RelayDock::onSaveApiKey()
 
     m_api->setApiKey(key);
     saveSettings();
-    setServerStatus("Connecting…", "gray");
-    m_statusPollTimer->start();
+    showSetup(false);
+    setStatus("Connecting…", C_WARN);
+    m_pollTimer->start();
     m_api->fetchGpuStatus();
-    m_api->fetchCredits();
+    m_api->fetchPlatforms();
+    m_api->fetchEncode();
 }
 
-// ── Manual relay controls ─────────────────────────────────────────────────────
-
-void RelayDock::onStartRelay()
-{
-    if (!m_api->hasApiKey()) {
-        m_statusBar->setText("Enter your API key first.");
-        return;
-    }
-    // If GPU isn't running, provision it first.
-    if (m_lastGpuInfo.status != "running") {
-        m_statusBar->setText("Starting server…");
-        m_autoLaunching = true;
-        m_api->provisionGpu();
-        m_launchPollTimer->start();
-        return;
-    }
-    m_api->sendControl("start");
-    m_statusBar->setText("Start command sent.");
-}
-
-void RelayDock::onStopRelay()
-{
-    if (!m_api->hasApiKey()) return;
-    m_api->stopGpu();
-    setServerStatus("● Offline", "gray");
-    m_statusBar->setText("Server shut down.");
-}
-
-// ── OBS stream event handlers ─────────────────────────────────────────────────
+// ── OBS stream lifecycle (the only GPU triggers) ───────────────────────────────
 
 void RelayDock::onObsStreamingStarting()
 {
-    if (!m_api->hasApiKey()) return;
+    if (!m_api->hasApiKey()) {
+        m_totalLabel->setText("Connect your SlimCast API key first.");
+        return;
+    }
     if (m_resumingStream) {
-        // This is our own programmatic restart after GPU came online.
         m_resumingStream = false;
-        m_api->sendControl("start");
         return;
     }
-    if (m_autoLaunching) return; // already handling a launch
+    if (m_autoLaunching) return;
 
-    if (!m_autoLaunch->isChecked()) {
-        // Manual mode: just send start to an already-running GPU.
-        if (!m_lastGpuInfo.rtmpUrl.isEmpty())
-            applyObsStreamUrl(m_lastGpuInfo.rtmpUrl);
-        m_api->sendControl("start");
-        return;
-    }
-
-    // Auto-launch mode: check current GPU status first.
     if (m_lastGpuInfo.status == "running" && !m_lastGpuInfo.rtmpUrl.isEmpty()) {
-        // GPU already up — just configure OBS URL and send start.
         applyObsStreamUrl(m_lastGpuInfo.rtmpUrl);
-        m_api->sendControl("start");
-    } else {
-        // GPU not ready. Cancel this stream attempt and boot the GPU.
-        obs_frontend_streaming_stop();         // fires STREAMING_STOPPED — handled below
-        m_autoLaunching = true;
-        setServerStatus("Starting…", "#ffb020");
-        m_statusBar->setText("Starting streaming server (~45s)…");
-        m_api->provisionGpu();
-        m_launchPollTimer->start();
+        return;
     }
+
+    obs_frontend_streaming_stop();
+    m_autoLaunching = true;
+    setStatus("Starting…", C_WARN);
+    m_api->provisionGpu();
 }
 
 void RelayDock::onObsStreamingStopped()
 {
-    if (m_autoLaunching) {
-        // We triggered this stop ourselves to wait for GPU provisioning.
-        // Don't relay the stop signal to the server.
-        return;
-    }
-    // Destroy the pod entirely — no idle billing between streams.
-    m_api->stopGpu();
-    setServerStatus("● Offline", "gray");
-    m_statusBar->setText("Stream stopped. Server shut down.");
+    if (m_autoLaunching) return;
+    m_api->destroyGpu();
+    setStatus("Stopping…", C_MUTE);
 }
 
-// ── GPU status & launch polling ───────────────────────────────────────────────
+// ── Status rendering ──────────────────────────────────────────────────────────
 
 void RelayDock::onGpuStatusUpdated(GpuInfo info)
 {
     m_lastGpuInfo = info;
+    render(info);
 
-    // Update server status label.
-    if (info.status == "running")
-        setServerStatus("● Online", "#37d67a");
-    else if (info.status == "provisioning")
-        setServerStatus("● Starting…", "#ffb020");
-    else
-        setServerStatus("● Offline", "gray");
-
-    setCreditsLabel(info.creditsSeconds);
-
-    // If we're in auto-launch mode and the GPU just came online, finish the launch.
     if (m_autoLaunching && info.status == "running" && !info.rtmpUrl.isEmpty()) {
-        m_launchPollTimer->stop();
         m_autoLaunching  = false;
         m_resumingStream = true;
         applyObsStreamUrl(info.rtmpUrl);
-        m_statusBar->setText("Server online — starting stream.");
         obs_frontend_streaming_start();
     }
 }
 
-void RelayDock::onGpuProvisioned()
+void RelayDock::render(const GpuInfo &info)
 {
-    // Provision call succeeded — GPU is now starting up.
-    // launchPollTimer is already running; it will call fetchGpuStatus every 5s
-    // until status == "running".
-    m_statusBar->setText("Server starting… (~45 seconds)");
+    if (info.status == "provisioning")
+        setStatus("Starting…", C_WARN);
+    else if (info.status == "running")
+        setStatus(info.streaming ? "Live" : "Ready", C_LIVE);
+    else
+        setStatus("Idle", C_IDLE);
+
+    m_creditsLabel->setText(formatCredits(info.creditsSeconds));
+    const QString cColor = info.creditsSeconds <= 0 ? C_ERR
+                         : info.creditsSeconds < 1800 ? C_WARN : C_LIVE;
+    m_creditsLabel->setStyleSheet(QString("color:%1; font-size:13px; font-weight:600").arg(cColor));
+
+    // Auto-engage the channel lock the moment a stream begins.
+    if (info.streaming && !m_wasStreaming && m_lockCheck && !m_lockCheck->isChecked())
+        m_lockCheck->setChecked(true);
+    m_wasStreaming = info.streaming;
+
+    updateIngestLabel();
+    renderChannels();
+    updateTotals();
 }
 
-void RelayDock::onLaunchPollTick()
+void RelayDock::updateIngestLabel()
 {
-    m_api->fetchGpuStatus();
-}
-
-void RelayDock::onStatusPollTick()
-{
-    if (!m_api->hasApiKey()) return;
-    m_api->fetchGpuStatus();
-}
-
-// ── Error handling ────────────────────────────────────────────────────────────
-
-void RelayDock::onNetworkError(QString message)
-{
-    m_statusBar->setText("Network error: " + message);
-    if (m_autoLaunching) {
-        // Don't get stuck — retry on next poll tick.
+    obs_video_info ovi;
+    if (obs_get_video_info(&ovi) && ovi.fps_den > 0) {
+        int fps = (int)std::lround((double)ovi.fps_num / (double)ovi.fps_den);
+        m_ingestLabel->setText(QString("%1×%2 · %3 fps")
+            .arg(ovi.output_width).arg(ovi.output_height).arg(fps));
+    } else {
+        m_ingestLabel->setText("Resolution set in OBS");
     }
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+void RelayDock::renderChannels()
+{
+    const bool locked = m_lockCheck && m_lockCheck->isChecked();
+
+    for (const QString &id : PLATFORM_NAMES) {
+        ChannelRow &row = m_channels[id];
+        const bool present = m_platforms.contains(id);
+        row.container->setVisible(present);
+        if (!present) continue;
+
+        const PlatformConfig &p = m_platforms[id];
+
+        // Toggle reflects enabled (without re-emitting our own signal).
+        row.toggle->blockSignals(true);
+        row.toggle->setChecked(p.enabled);
+        row.toggle->setEnabled(!locked);
+        row.toggle->blockSignals(false);
+
+        // Live dot from the actual runner state.
+        const QString st = m_lastGpuInfo.platformStates.value(id);
+        QString dotColor, liveText;
+        if (st == "running")         { dotColor = C_LIVE; liveText = "live"; }
+        else if (st == "restarting") { dotColor = C_WARN; liveText = "restarting"; }
+        else if (st == "error")      { dotColor = C_ERR;  liveText = "error"; }
+        else                         { dotColor = C_IDLE; liveText = "idle"; }
+        row.dot->setStyleSheet(QString("color:%1").arg(dotColor));
+
+        // Cost sub-line.
+        if (!p.enabled) {
+            row.sub->setText("off");
+        } else if (isPassthrough(p)) {
+            row.sub->setText(liveText + " · free (passthrough)");
+        } else {
+            row.sub->setText(liveText + " · +0.2 tkn/hr");
+        }
+    }
+}
+
+void RelayDock::updateTotals()
+{
+    int transcodedEnabled = 0;
+    bool anyEnabled = false;
+    for (const QString &id : PLATFORM_NAMES) {
+        if (!m_platforms.contains(id)) continue;
+        const PlatformConfig &p = m_platforms[id];
+        if (!p.enabled) continue;
+        anyEnabled = true;
+        if (!isPassthrough(p)) transcodedEnabled++;
+    }
+
+    double projected = anyEnabled ? 1.0 + 0.2 * std::max(0, transcodedEnabled - 1) : 0.0;
+    // While live the server reports the real rate; offline we show the projection.
+    double rate = (m_lastGpuInfo.streaming && m_lastGpuInfo.burnRate > 0)
+        ? m_lastGpuInfo.burnRate : projected;
+
+    if (rate <= 0) {
+        m_totalLabel->setText("No channels enabled.");
+    } else {
+        m_totalLabel->setText(QString("≈ %1 tkn/hr while live · $%2/hr")
+            .arg(rate, 0, 'f', 1)
+            .arg(rate * 2.0, 0, 'f', 2));
+    }
+}
+
+void RelayDock::onPlatformsUpdated(QList<PlatformConfig> platforms)
+{
+    m_platforms.clear();
+    for (const PlatformConfig &p : platforms)
+        m_platforms[p.platform] = p;
+    renderChannels();
+    updateTotals();
+}
+
+void RelayDock::onEncodeUpdated(EncodeConfig encode)
+{
+    m_encode = encode;
+    m_haveEncode = true;
+
+    m_landscapeSlider->setRange(encode.landscapeMin, encode.landscapeMax);
+    m_portraitSlider->setRange(encode.portraitMin, encode.portraitMax);
+
+    // Don't fight the user mid-drag.
+    if (!m_landscapeSlider->isSliderDown()) {
+        m_landscapeSlider->setValue(encode.landscape);
+        m_landscapeVal->setText(QString("%1k").arg(encode.landscape));
+    }
+    if (!m_portraitSlider->isSliderDown()) {
+        m_portraitSlider->setValue(encode.portrait);
+        m_portraitVal->setText(QString("%1k").arg(encode.portrait));
+    }
+}
+
+void RelayDock::onChannelToggled(const QString &platform, bool enabled)
+{
+    if (!m_platforms.contains(platform)) return;
+    m_platforms[platform].enabled = enabled;  // optimistic
+    renderChannels();
+    updateTotals();
+    m_api->setPlatformEnabled(platform, enabled);
+}
+
+void RelayDock::onLockToggled(bool /*locked*/)
+{
+    renderChannels();  // enables/disables the toggles
+}
+
+void RelayDock::onBitrateReleased()
+{
+    if (!m_haveEncode) return;
+    m_api->setEncode(m_landscapeSlider->value(), m_portraitSlider->value());
+}
+
+void RelayDock::onGpuProvisioned()
+{
+    m_totalLabel->setText("Server starting… (~45 seconds)");
+}
+
+void RelayDock::onGpuDestroyed()
+{
+    GpuInfo blank;
+    m_lastGpuInfo = blank;
+    render(blank);
+}
+
+void RelayDock::onPollTick()
+{
+    if (!m_api->hasApiKey()) return;
+    m_api->fetchGpuStatus();
+    m_api->fetchPlatforms();
+    if (!m_haveEncode) m_api->fetchEncode();
+}
+
+void RelayDock::onNetworkError(QString message)
+{
+    m_totalLabel->setText("Network error: " + message);
+}
+
+// ── helpers ───────────────────────────────────────────────────────────────────
 
 void RelayDock::applyObsStreamUrl(const QString &rtmpUrl)
 {
@@ -382,30 +556,8 @@ void RelayDock::applyObsStreamUrl(const QString &rtmpUrl)
     obs_frontend_save_streaming_service();
 }
 
-void RelayDock::setServerStatus(const QString &text, const QString &color)
+void RelayDock::setStatus(const QString &text, const QString &color)
 {
-    m_serverStatus->setText(text);
-    m_serverStatus->setStyleSheet("color:" + color);
-}
-
-void RelayDock::setCreditsLabel(int seconds)
-{
-    QString text = formatCredits(seconds);
-    m_creditsLabel->setText(text);
-    if (seconds <= 0)
-        m_creditsLabel->setStyleSheet("color:#ff5470; font-weight:bold");
-    else if (seconds < 1800)
-        m_creditsLabel->setStyleSheet("color:#ffb020; font-weight:bold");
-    else
-        m_creditsLabel->setStyleSheet("color:#37d67a");
-
-    if (seconds < 1800 && seconds > 0) {
-        m_statusBar->setText(
-            QString("⚠ Less than %1 of streaming time remaining").arg(formatCredits(seconds))
-        );
-        m_statusBar->setStyleSheet("color:#ffb020; font-size:10px");
-    } else if (seconds <= 0) {
-        m_statusBar->setText("⚠ No credits — streaming will stop");
-        m_statusBar->setStyleSheet("color:#ff5470; font-size:10px");
-    }
+    m_statusDot->setStyleSheet(QString("color:%1; font-size:13px").arg(color));
+    m_statusLabel->setText(text);
 }

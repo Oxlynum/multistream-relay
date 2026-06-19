@@ -1,4 +1,5 @@
 import { createServerClient } from '@/lib/supabase'
+import { authenticateUserOrAgent } from '@/lib/agent-auth'
 
 const PLATFORM_DEFAULTS: Record<string, { rtmp_url: string; max_bitrate: number; orientation: string }> = {
   twitch:   { rtmp_url: 'rtmp://live.twitch.tv/app',        max_bitrate: 8000, orientation: 'landscape' },
@@ -61,17 +62,15 @@ export async function POST(request: Request) {
 export async function GET(request: Request) {
   const supabase = createServerClient()
 
-  const authHeader = request.headers.get('authorization')
-  const token = authHeader?.replace('Bearer ', '')
-  const { data: { user } } = await supabase.auth.getUser(token ?? '')
-  if (!user) {
+  const userId = await authenticateUserOrAgent(request)
+  if (!userId) {
     return Response.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
   const { data, error } = await supabase
     .from('platform_connections')
     .select('platform, rtmp_url, bitrate_kbps, fps, orientation, enabled, created_at')
-    .eq('user_id', user.id)
+    .eq('user_id', userId)
     .order('platform')
 
   if (error) return Response.json({ error: error.message }, { status: 500 })

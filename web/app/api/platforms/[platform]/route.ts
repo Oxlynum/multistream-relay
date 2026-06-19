@@ -1,4 +1,5 @@
 import { createServerClient } from '@/lib/supabase'
+import { authenticateUserOrAgent } from '@/lib/agent-auth'
 
 export async function DELETE(
   request: Request,
@@ -32,10 +33,8 @@ export async function PATCH(
 ) {
   const supabase = createServerClient()
 
-  const authHeader = request.headers.get('authorization')
-  const token = authHeader?.replace('Bearer ', '')
-  const { data: { user } } = await supabase.auth.getUser(token ?? '')
-  if (!user) {
+  const userId = await authenticateUserOrAgent(request)
+  if (!userId) {
     return Response.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
@@ -55,7 +54,7 @@ export async function PATCH(
   const { error } = await supabase
     .from('platform_connections')
     .update(updates)
-    .eq('user_id', user.id)
+    .eq('user_id', userId)
     .eq('platform', platform)
 
   if (error) return Response.json({ error: error.message }, { status: 500 })

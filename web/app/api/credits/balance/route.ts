@@ -1,19 +1,18 @@
 import { createServerClient } from '@/lib/supabase'
+import { authenticateUserOrAgent } from '@/lib/agent-auth'
 
 export async function GET(request: Request) {
   const supabase = createServerClient()
 
-  const authHeader = request.headers.get('authorization')
-  const token = authHeader?.replace('Bearer ', '')
-  const { data: { user } } = await supabase.auth.getUser(token ?? '')
-  if (!user) {
+  const userId = await authenticateUserOrAgent(request)
+  if (!userId) {
     return Response.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
   const { data: profile } = await supabase
     .from('profiles')
     .select('streaming_credits_seconds')
-    .eq('id', user.id)
+    .eq('id', userId)
     .single()
 
   const seconds = profile?.streaming_credits_seconds ?? 0
