@@ -8,7 +8,6 @@ const COLUMNS = [
       { href: '/features', label: 'Features' },
       { href: '/pricing', label: 'Pricing' },
       { href: '/#how', label: 'How it works' },
-      { href: '/#compare', label: 'Compare' },
     ],
   },
   {
@@ -22,7 +21,7 @@ const COLUMNS = [
   {
     title: 'Resources',
     links: [
-      { href: '/#faq', label: 'FAQ' },
+      { href: '/faq', label: 'FAQ' },
       { href: '/#trust', label: 'How it’s built' },
     ],
   },

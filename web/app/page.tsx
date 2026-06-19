@@ -62,42 +62,7 @@ const TRUST = [
   { stat: '0', label: 'Terminal commands, configs, or RTMP URLs' },
 ]
 
-const COMPARE = [
-  { feature: 'Pricing model', slimcast: 'Pay-per-second · $2/hr', restream: 'Monthly subscription', streamlabs: 'Monthly subscription' },
-  { feature: 'HEVC uplink (low upload)', slimcast: true, restream: false, streamlabs: false },
-  { feature: '1080p60 to all platforms', slimcast: true, restream: 'Higher tiers only', streamlabs: 'Higher tiers only' },
-  { feature: 'Hardware GPU transcode', slimcast: true, restream: true, streamlabs: true },
-  { feature: 'No idle billing', slimcast: true, restream: false, streamlabs: false },
-  { feature: 'Controlled entirely from OBS', slimcast: true, restream: false, streamlabs: 'Partial' },
-  { feature: 'Free trial', slimcast: '2 hours, no card', restream: 'Limited', streamlabs: 'Limited' },
-]
 
-const FAQ = [
-  {
-    q: 'Do I need a powerful PC?',
-    a: 'No. The heavy lifting — transcoding to five platforms — happens on a cloud GPU. Your machine only encodes one stream out of OBS, exactly like streaming to a single platform.',
-  },
-  {
-    q: 'What upload speed do I need?',
-    a: 'Just enough for one stream. Because you push a single HEVC feed (not five H.264 streams), a typical 1080p60 upload of ~8–10 Mbps is plenty. SlimCast fans it out from the cloud, not your connection.',
-  },
-  {
-    q: 'Are my stream keys safe?',
-    a: 'Yes. Keys are stored encrypted in our database and injected into the GPU only at stream time — never baked into an image or exposed to the OBS plugin. The plugin authenticates with a per-account API key you can rotate anytime.',
-  },
-  {
-    q: 'How does billing work?',
-    a: 'You buy streaming credits and they’re drawn down by the second while you’re live, at $2/hour. There’s no subscription and credits never expire. New accounts get 2 free hours to test it out.',
-  },
-  {
-    q: 'What happens when I run low on credits?',
-    a: 'The OBS plugin warns you at 30 minutes remaining and again as you approach zero. You can enable auto-refill to top up automatically, or the stream stops cleanly when the balance hits zero.',
-  },
-  {
-    q: 'Which platforms are supported?',
-    a: 'Twitch, YouTube, Kick, and TikTok today. TikTok streams in portrait automatically; everything else goes out in landscape at up to 1080p60.',
-  },
-]
 
 function Check() {
   return (
@@ -171,7 +136,7 @@ export default function Home() {
             </div>
 
             <div className="mt-8 text-xs text-ink-faint">
-              No credit card required · Cancel anytime — there’s nothing to cancel
+              Account verification required · Cancel anytime
             </div>
 
             {/* platform strip */}
@@ -197,13 +162,13 @@ export default function Home() {
           </div>
         </section>
 
-        {/* ── What it actually does ────────────────────────────── */}
+        {/* ── Core Infrastructure ────────────────────────────── */}
         <section className="max-w-5xl mx-auto px-6 py-20">
           <div className="text-center mb-12">
-            <div className="kicker mb-3">The pipeline</div>
-            <h2 className="text-3xl font-bold tracking-tight">What SlimCast actually does</h2>
+            <div className="kicker mb-3">Core Infrastructure</div>
+            <h2 className="text-3xl font-bold tracking-tight">Hardware-accelerated multiplexing</h2>
             <p className="text-ink-muted mt-3 max-w-2xl mx-auto">
-              You send one feed. We do the expensive part in the cloud and split it five ways.
+              Transmit a single source feed. Our infrastructure manages concurrent transcoding and distribution.
             </p>
           </div>
 
@@ -292,13 +257,13 @@ export default function Home() {
             <div className="grid lg:grid-cols-2 gap-12 items-center">
               <div>
                 <div className="kicker mb-3">Under the hood</div>
-                <h2 className="text-3xl font-bold tracking-tight mb-4">Real infrastructure, not a hack</h2>
+                <h2 className="text-3xl font-bold tracking-tight mb-4">Enterprise-grade distribution</h2>
                 <p className="text-ink-muted leading-relaxed mb-6">
-                  SlimCast runs on dedicated cloud GPUs with hardware NVENC encoding — the same
-                  silicon broadcasters use. Your HEVC feed is decoded and re-encoded per platform
-                  with quality-tuned settings, then watched by a supervisor that restarts any
-                  output that drops. Stream keys stay encrypted and are only handed to the GPU
-                  at the moment you go live.
+                  SlimCast operates on dedicated cloud GPUs utilizing hardware NVENC encoding. Your 
+                  source HEVC feed is decoded and concurrently re-encoded per platform using 
+                  optimized settings. The supervisor service monitors outputs and seamlessly reconnects 
+                  dropped endpoints. Stream keys remain encrypted at rest and are injected securely 
+                  only during active broadcasts.
                 </p>
                 <ul className="space-y-3 text-sm">
                   {[
@@ -342,62 +307,7 @@ export default function Home() {
           </div>
         </section>
 
-        {/* ── Comparison ───────────────────────────────────────── */}
-        <section id="compare" className="max-w-5xl mx-auto px-6 py-20">
-          <div className="text-center mb-12">
-            <div className="kicker mb-3">Compare</div>
-            <h2 className="text-3xl font-bold tracking-tight">Why creators switch to SlimCast</h2>
-            <p className="text-ink-muted mt-3">Pay for what you stream. Push less. Go live everywhere.</p>
-          </div>
 
-          <div className="overflow-x-auto rounded-xl border border-line">
-            <table className="w-full text-left min-w-[640px]">
-              <thead>
-                <tr className="border-b border-line bg-surface/50">
-                  <th className="px-6 py-5 text-sm font-medium text-ink-muted uppercase tracking-wider">Feature</th>
-                  <th className="px-6 py-5 text-sm font-semibold text-accent uppercase tracking-wider">SlimCast</th>
-                  <th className="px-6 py-5 text-sm font-medium text-ink-muted uppercase tracking-wider">Restream</th>
-                  <th className="px-6 py-5 text-sm font-medium text-ink-muted uppercase tracking-wider">Streamlabs</th>
-                </tr>
-              </thead>
-              <tbody>
-                {COMPARE.map((row, i) => (
-                  <tr key={row.feature} className={i % 2 ? 'bg-surface/40' : ''}>
-                    <td className="px-5 py-4 text-sm text-ink">{row.feature}</td>
-                    <td className="px-5 py-4"><Cell value={row.slimcast} /></td>
-                    <td className="px-5 py-4"><Cell value={row.restream} /></td>
-                    <td className="px-5 py-4"><Cell value={row.streamlabs} /></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <p className="text-xs text-ink-faint mt-3 text-center">
-            Comparison reflects publicly advertised plans. Competitor features vary by tier.
-          </p>
-        </section>
-
-        {/* ── FAQ ──────────────────────────────────────────────── */}
-        <section id="faq" className="border-t border-line bg-surface/40">
-          <div className="max-w-3xl mx-auto px-6 py-20">
-            <div className="text-center mb-12">
-              <div className="kicker mb-3">Questions</div>
-              <h2 className="text-3xl font-bold tracking-tight">Frequently asked</h2>
-            </div>
-
-            <div className="space-y-3">
-              {FAQ.map(item => (
-                <details key={item.q} className="group rounded-xl border border-line bg-base px-5 open:border-line-strong">
-                  <summary className="flex items-center justify-between cursor-pointer py-4 text-sm font-medium text-ink list-none">
-                    {item.q}
-                    <span className="text-ink-faint group-open:rotate-45 transition-transform text-lg leading-none">+</span>
-                  </summary>
-                  <p className="text-sm text-ink-muted leading-relaxed pb-5 -mt-1">{item.a}</p>
-                </details>
-              ))}
-            </div>
-          </div>
-        </section>
 
         {/* ── Final CTA ────────────────────────────────────────── */}
         <section className="relative overflow-hidden">
@@ -408,7 +318,7 @@ export default function Home() {
               Go live everywhere tonight.
             </h2>
             <p className="text-ink-muted text-lg mb-10 max-w-xl mx-auto">
-              Two free hours are waiting in your account. No card, no setup, no terminal.
+              Two free hours are waiting in your account. Set up your streaming infrastructure in minutes.
             </p>
             <Link
               href="/signup"
