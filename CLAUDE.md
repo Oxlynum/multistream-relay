@@ -127,23 +127,27 @@ They just aren't the brand. The brand is "stream everywhere, no setup."
       a provider error never strands the row).
 
 11. **Stream keys must never reach the public — secret-handling rules.**
-    - Stored in `platform_connections.stream_key_encrypted` (note: currently
-      **plaintext** despite the name — encryption-at-rest is a TODO; see below).
+    - **Encrypted at rest** in `platform_connections.stream_key_encrypted` via
+      `lib/crypto.ts` (AES-256-GCM, format `v1:iv:tag:ciphertext`). The key lives
+      only in `STREAM_KEY_SECRET` (Vercel env) — a different trust domain than
+      Supabase, so a DB dump alone is ciphertext. `POST /api/platforms` encrypts
+      on write; `agent-config.ts` `decryptSecret()`s right before handing keys to
+      the agent. `decryptSecret` passes non-`v1:` values through unchanged
+      (legacy-plaintext fallback for rows written before encryption). **Losing
+      `STREAM_KEY_SECRET` makes all stored keys unrecoverable** — back it up.
     - Only `/api/agent/{pair,config}` ever return keys, and only to an
       authenticated agent (pod/user key) over HTTPS. The dashboard GET routes and
       all browser queries select **everything except** the key column — keys never
       reach the client after the one-time POST that sets them.
     - Env split: only `NEXT_PUBLIC_{SUPABASE_URL,SUPABASE_ANON_KEY,APP_URL}` are
-      public; service-role + Stripe secret are server-only; `.env*` is gitignored.
+      public; service-role + Stripe secret + `STREAM_KEY_SECRET` are server-only;
+      `.env*` is gitignored.
     - Relay: stream keys get embedded in the FFmpeg command + FFmpeg's stderr
       banner, so `supervisor._redact()` literal-scrubs every known key from the
       log ring buffer (refreshed each `apply()` via `_register_secrets`). The
       FastAPI debug panel (`app.py`, key-bearing `/api/logs`) is **not** exposed
       publicly — RunPod pods open `1935/tcp` only (see `runpod.ts`), and the panel
       fails closed without `RELAY_PASSWORD`.
-    - **TODO (not yet done):** encrypt keys at rest (envelope w/ a server-only
-      `STREAM_KEY_SECRET`); decrypt only in agent-config. Needs the prod secret +
-      a legacy-plaintext fallback during migration.
 
 ## Key files
 ### relay/

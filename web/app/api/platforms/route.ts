@@ -1,5 +1,6 @@
 import { createServerClient } from '@/lib/supabase'
 import { authenticateUserOrAgent } from '@/lib/agent-auth'
+import { encryptSecret } from '@/lib/crypto'
 
 const PLATFORM_DEFAULTS: Record<string, { rtmp_url: string; max_bitrate: number; orientation: string }> = {
   twitch:   { rtmp_url: 'rtmp://live.twitch.tv/app',        max_bitrate: 8000, orientation: 'landscape' },
@@ -45,7 +46,7 @@ export async function POST(request: Request) {
     user_id: user.id,
     platform,
     rtmp_url: rtmp_url ?? defaults.rtmp_url,
-    stream_key_encrypted: stream_key.trim(),
+    stream_key_encrypted: encryptSecret(stream_key.trim()),
     bitrate_kbps: effectiveBitrate,
     fps: fps ?? 60,
     orientation: orientation ?? defaults.orientation,

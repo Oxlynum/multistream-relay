@@ -1,6 +1,8 @@
 // Builds the output list the GPU agent consumes, shared by the agent/config
 // (polled) and agent/pair (boot) routes so they never drift apart.
 
+import { decryptSecret } from '@/lib/crypto'
+
 export interface PlatformRow {
   platform: string
   rtmp_url: string
@@ -29,6 +31,9 @@ export function buildAgentOutputs(platforms: PlatformRow[], groups?: GroupBitrat
 
   return platforms.map(p => {
     const orientation = p.orientation ?? 'landscape'
+    // Decrypt the at-rest secret right before it goes to the agent. Legacy
+    // plaintext rows pass through unchanged (see decryptSecret fallback).
+    const streamKey = decryptSecret(p.stream_key_encrypted)
 
     // YouTube landscape → HEVC passthrough (no re-encode, best quality). The
     // source HEVC is copied straight into HLS and PUT to YouTube's HLS ingest.
@@ -38,7 +43,7 @@ export function buildAgentOutputs(platforms: PlatformRow[], groups?: GroupBitrat
     if (p.platform === 'youtube' && orientation === 'landscape') {
       return {
         name: p.platform,
-        url: youtubeHlsUrl(p.stream_key_encrypted),
+        url: youtubeHlsUrl(streamKey),
         key: '',
         bitrate_kbps: p.bitrate_kbps ?? defaultBitrate(p.platform),
         fps: p.fps ?? 60,
@@ -54,7 +59,7 @@ export function buildAgentOutputs(platforms: PlatformRow[], groups?: GroupBitrat
     return {
       name: p.platform,
       url: p.rtmp_url,
-      key: p.stream_key_encrypted,
+      key: streamKey,
       bitrate_kbps: orientation === 'portrait' ? portraitCap : landscapeCap,
       fps: p.fps ?? 60,
       orientation,
