@@ -42,8 +42,9 @@ MEDIAMTX_CONFIG = os.environ.get("MEDIAMTX_CONFIG", "mediamtx.yml")
 HEARTBEAT_FAIL_LIMIT = int(os.environ.get("AGENT_HB_FAIL_LIMIT", "6"))   # ~60s
 # No active outputs this long → abandoned; ask Vercel to destroy this pod.
 IDLE_LIMIT_S = int(os.environ.get("AGENT_IDLE_LIMIT_S", str(5 * 60)))
-# Absolute ceiling on a single pod's life, no matter what.
-MAX_SESSION_S = int(os.environ.get("AGENT_MAX_SESSION_S", str(12 * 60 * 60)))
+# NOTE: the 12h session cap is now a confirmable deadline owned by the server
+# (heartbeat returns command:'stop' at the deadline unless the user confirmed),
+# so the agent intentionally no longer self-terminates on elapsed session time.
 
 if not API_KEY:
     log.error("SLIMCAST_API_KEY is not set — cannot authenticate with Vercel.")
@@ -75,8 +76,9 @@ def _api(method: str, path: str, body: dict | None = None, timeout: int = 10) ->
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read())
     except urllib.error.HTTPError as e:
-        body_text = e.read().decode()[:200]
-        log.warning("API %s %s → %d: %s", method, path, e.code, body_text)
+        # Log status only — never the response body. Config/pair responses carry
+        # stream keys, and we don't want any of that reaching pod logs.
+        log.warning("API %s %s → %d", method, path, e.code)
         return None
     except Exception as exc:
         log.warning("API %s %s error: %s", method, path, exc)
@@ -222,10 +224,12 @@ def main() -> None:
             sup.stop_all()
             _api("POST", "/api/agent/terminate", {"reason": "idle"})
 
-        if time.time() - start_time > MAX_SESSION_S:
-            log.warning("Max session reached — requesting termination.")
-            sup.stop_all()
-            _api("POST", "/api/agent/terminate", {"reason": "max_session"})
+        # The 12h session cap is now a *confirmable* deadline owned by the server:
+        # the heartbeat returns command:'stop' at the deadline if the user didn't
+        # confirm, and lets a confirmed stream continue. We deliberately do NOT
+        # self-terminate on elapsed time here, so a confirmed long stream isn't
+        # cut off. If the control plane goes silent, the heartbeat-fail watchdog
+        # above already stops outputs and the Vercel reaper destroys the pod.
 
         time.sleep(POLL_INTERVAL)
 

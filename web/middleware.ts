@@ -4,11 +4,6 @@ import { type NextRequest, NextResponse } from 'next/server'
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl
 
-  // /obs-dock handles its own auth via ?key= query param — let it through.
-  if (pathname.startsWith('/obs-dock')) {
-    return NextResponse.next()
-  }
-
   // Protect all dashboard and onboarding routes.
   if (pathname.startsWith('/dashboard') || pathname.startsWith('/onboarding')) {
     let response = NextResponse.next({ request })
@@ -49,5 +44,5 @@ export async function middleware(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ['/dashboard/:path*', '/onboarding/:path*', '/obs-dock/:path*'],
+  matcher: ['/dashboard/:path*', '/onboarding/:path*'],
 }

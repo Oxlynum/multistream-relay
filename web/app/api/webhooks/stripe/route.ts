@@ -1,22 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { stripe, hoursToSeconds } from '@/lib/stripe'
+import { stripe } from '@/lib/stripe'
 import { createServerClient } from '@/lib/supabase'
+import { creditPaymentOnce } from '@/lib/billing'
 import Stripe from 'stripe'
-
-async function addCredits(userId: string, seconds: number) {
-  const supabase = createServerClient()
-  const { data: profile } = await supabase
-    .from('profiles')
-    .select('streaming_credits_seconds')
-    .eq('id', userId)
-    .single()
-  if (!profile) return
-
-  await supabase
-    .from('profiles')
-    .update({ streaming_credits_seconds: (profile.streaming_credits_seconds ?? 0) + seconds })
-    .eq('id', userId)
-}
 
 export async function POST(req: NextRequest) {
   const body = await req.text()
@@ -59,8 +45,11 @@ export async function POST(req: NextRequest) {
       if (session.mode !== 'payment' || session.payment_status !== 'paid') break
 
       const creditsSeconds = parseInt(session.metadata?.credits_seconds ?? '0', 10)
+      // Idempotent on the payment_intent id: a Stripe webhook retry (or the
+      // session firing twice) can never double-credit.
+      const payId = (session.payment_intent as string) ?? session.id
       if (userId && creditsSeconds > 0) {
-        await addCredits(userId, creditsSeconds)
+        await creditPaymentOnce(payId, userId, creditsSeconds)
       }
 
       // Persist stripe_customer_id.
@@ -93,10 +82,10 @@ export async function POST(req: NextRequest) {
 
       const userId = pi.metadata?.user_id
       const creditsSeconds = parseInt(pi.metadata?.credits_seconds ?? '0', 10)
-      // addCredits is safe to call again — auto-refill route already added them
-      // optimistically, but if that failed this webhook is the backstop.
+      // Keyed on the payment_intent id, so this is a no-op if the auto-refill
+      // path already credited it — and the backstop if that path failed.
       if (userId && creditsSeconds > 0) {
-        await addCredits(userId, creditsSeconds)
+        await creditPaymentOnce(pi.id, userId, creditsSeconds)
       }
       break
     }

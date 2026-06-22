@@ -10,10 +10,11 @@ import { transcodeCount, burnRatePerSec, type OutputStatus } from '@/lib/billing
 const MAX_BILL_INTERVAL_S = 60
 
 // ── Safety caps (the pod tears itself down when any of these trips) ───────────
-// A streaming session can never outlive this, no matter what.
-const MAX_SESSION_S = 12 * 60 * 60      // 12h
 // A pod that's up but not streaming this long is abandoned → destroy it.
 const IDLE_GRACE_S = 5 * 60             // 5m
+// The 12h session cap is now a confirmable deadline (max_session_at). The dock
+// surfaces a "still streaming?" prompt during its final 30m via /api/gpu/status;
+// the heartbeat below only hard-kills once max_session_at has actually passed.
 
 // Agent posts heartbeats here every 10s with live stream status.
 export async function POST(request: NextRequest) {
@@ -34,7 +35,7 @@ export async function POST(request: NextRequest) {
 
   const { data: instance } = await supabase
     .from('gpu_instances')
-    .select('last_seen_at, burn_rate, created_at, idle_since, session_id')
+    .select('last_seen_at, burn_rate, created_at, idle_since, session_id, max_session_at')
     .eq('user_id', userId)
     .maybeSingle()
 
@@ -150,13 +151,15 @@ export async function POST(request: NextRequest) {
     }
 
     // ── SAFETY: destroy the pod (don't just stop) on any hard condition ──────
-    const createdAt = instance?.created_at ? new Date(instance.created_at).getTime() : now
-    const sessionAge = (now - createdAt) / 1000
     const idleFor = idleSince ? (now - new Date(idleSince).getTime()) / 1000 : 0
+    // The 12h cap is now a confirmable deadline: we only kill once it's actually
+    // passed. The "still streaming?" prompt during the final 30m is surfaced by
+    // /api/gpu/status (what the dock polls); confirming pushes max_session_at out.
+    const maxSessionAt = instance?.max_session_at ? new Date(instance.max_session_at).getTime() : null
 
     let killReason = ''
     if (creditsSeconds <= 0) killReason = 'credits_exhausted'
-    else if (sessionAge > MAX_SESSION_S) killReason = 'max_session'
+    else if (maxSessionAt && now >= maxSessionAt) killReason = 'session_expired'
     else if (!streaming && idleFor > IDLE_GRACE_S) killReason = 'idle_timeout'
 
     if (killReason) {

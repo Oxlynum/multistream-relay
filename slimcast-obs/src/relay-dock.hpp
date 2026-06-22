@@ -8,6 +8,7 @@
 #include <QTimer>
 #include <QMap>
 #include <QWidget>
+#include <QPushButton>
 #include "relay-api.hpp"
 
 // One channel control row: live dot + name + cost sub-line + on/off toggle.
@@ -47,6 +48,7 @@ private slots:
     void onChannelToggled(const QString &platform, bool enabled);
     void onLockToggled(bool locked);
     void onBitrateReleased();
+    void onConfirmClicked();
 
 private:
     void buildUi();
@@ -56,6 +58,7 @@ private:
     void saveSettings();
     void applyObsStreamUrl(const QString &rtmpUrl);
     void render(const GpuInfo &info);
+    void renderConfirm(const GpuInfo &info);
     void renderChannels();
     void updateIngestLabel();
     void updateTotals();
@@ -79,6 +82,9 @@ private:
     QLabel         *m_portraitVal     = nullptr;
     QLabel         *m_totalLabel   = nullptr;
     QLabel         *m_helperLabel  = nullptr;
+    QWidget        *m_confirmBanner = nullptr;
+    QLabel         *m_confirmLabel  = nullptr;
+    QPushButton    *m_confirmBtn    = nullptr;
 
     // ── Internal state ─────────────────────────────────────────────────────
     RelayApi *m_api;

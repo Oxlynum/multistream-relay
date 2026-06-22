@@ -26,7 +26,7 @@ export async function GET(request: Request) {
 
   const { data: instance } = await supabase
     .from('gpu_instances')
-    .select('status, ip_address, last_seen_at, burn_rate, outputs, streaming')
+    .select('status, ip_address, last_seen_at, burn_rate, outputs, streaming, max_session_at')
     .eq('user_id', userId)
     .maybeSingle()
 
@@ -45,8 +45,21 @@ export async function GET(request: Request) {
       burn_rate: 0,
       streaming: false,
       outputs: [],
+      confirm_required: false,
+      confirm_deadline: null,
     })
   }
+
+  // "Still streaming?" prompt: within the final 30m before max_session_at, ask
+  // the dock to confirm. Confirming (POST /api/agent/confirm-session) pushes the
+  // deadline out; ignoring it lets the heartbeat hard-kill at the deadline.
+  const CONFIRM_WINDOW_MS = 30 * 60 * 1000
+  const maxSessionAt = instance.max_session_at ? new Date(instance.max_session_at).getTime() : null
+  const confirmRequired =
+    instance.status === 'running' &&
+    (instance.streaming ?? false) &&
+    !!maxSessionAt &&
+    maxSessionAt - Date.now() <= CONFIRM_WINDOW_MS
 
   // Consider the agent stale if it hasn't checked in for 30s.
   const lastSeen = instance.last_seen_at ? new Date(instance.last_seen_at) : null
@@ -64,5 +77,8 @@ export async function GET(request: Request) {
     // Per-platform live state for status dots. Stale/stopped pods aren't live.
     streaming: effectiveStatus === 'running' ? (instance.streaming ?? false) : false,
     outputs: effectiveStatus === 'running' ? (instance.outputs ?? []) : [],
+    // The dock shows a countdown + "Yes, still streaming" button when this is set.
+    confirm_required: confirmRequired,
+    confirm_deadline: instance.max_session_at ?? null,
   })
 }

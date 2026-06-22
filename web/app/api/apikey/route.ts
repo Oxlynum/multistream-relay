@@ -1,5 +1,6 @@
 import { createServerClient } from '@/lib/supabase'
 import { generateApiKey, hashApiKey } from '@/lib/agent-auth'
+import { checkRateLimit } from '@/lib/rate-limit'
 
 // GET  — check whether a user API key exists
 // POST — generate (or regenerate) a user API key; returns the raw key ONCE
@@ -30,6 +31,10 @@ export async function POST(request: Request) {
   const token = authHeader?.replace('Bearer ', '')
   const { data: { user } } = await supabase.auth.getUser(token ?? '')
   if (!user) return Response.json({ error: 'Unauthorized' }, { status: 401 })
+
+  if (!(await checkRateLimit(`apikey:${user.id}`, 5, 60))) {
+    return Response.json({ error: 'Too many requests. Slow down.' }, { status: 429 })
+  }
 
   const { data: profile } = await supabase
     .from('profiles')

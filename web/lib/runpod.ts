@@ -71,6 +71,13 @@ export async function destroyPod(podId: string): Promise<void> {
   await request('DELETE', `/pods/${podId}`)
 }
 
+// List all pods on the account (used by the reaper to find orphans — pods that
+// exist at RunPod but have no gpu_instances row, which no other path can see).
+export async function listPods(): Promise<Array<{ id: string; name: string }>> {
+  const pods = await request<RunPodPod[]>('GET', '/pods')
+  return (pods ?? []).map(p => ({ id: p.id, name: p.name }))
+}
+
 export async function getPodStatus(podId: string): Promise<{ status: string; ip: string | null }> {
   const pod = await request<RunPodPod>('GET', `/pods/${podId}`)
   const publicPort = pod.runtime?.ports?.find(p => p.isIpPublic && p.privatePort === 1935)

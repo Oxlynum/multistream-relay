@@ -108,23 +108,30 @@ They just aren't the brand. The brand is "stream everywhere, no setup."
 10. **Pod safety is defense-in-depth — a rogue pod is the #1 financial risk.**
     A running pod bills RunPod 24/7, so destruction (not just stopping outputs)
     must happen on every failure path. Layers, each independent:
+    - **Atomic provision claim** (`/api/gpu/provision`): the row is reserved
+      (insert-as-lock on `unique(user_id)`) BEFORE the pod is created. A second
+      concurrent/retried call conflicts → 409, no pod made. Prevents the
+      orphan-pod race (pod created but never row-recorded → unreapable). Provision
+      also requires a saved card AND (credits>0 or auto-refill) — **no pod ever
+      runs without a way to pay**, and the card is the anti-multi-account signal.
     - **Plugin**: OBS Stop → destroy; orphan auto-destroy (pod up + OBS not
       streaming for ~10s → destroy, catches reopened-after-crash).
     - **Heartbeat self-destruct** (`/api/agent/status`, pod only): tears the pod
-      down on credits<=0, idle>5m (tracked via `idle_since`), or session>12h.
+      down on credits<=0, idle>5m (tracked via `idle_since`), or past the
+      confirmable session deadline `max_session_at` (see #12).
     - **Agent watchdogs** (`relay/agent.py`): stop outputs after ~60s of failed
-      heartbeats (unsupervised); self-request `/api/agent/terminate` on idle>5m or
-      session>12h.
+      heartbeats (unsupervised); self-request `/api/agent/terminate` on idle>5m.
+      (No local max-session kill — the server owns the confirmable deadline.)
     - **Cron reaper** (`/api/cron/reap`, daily via `web/vercel.json`): the backstop
       for pods that stop phoning home — destroys on stale heartbeat (>150s),
-      never-paired (>180s), max-session, or idle. **Daily because Vercel Hobby
-      caps crons at once/day** (every-minute schedules fail the build). Optional
-      `CRON_SECRET` protects it. For minute-level reaping of dead-agent pods, go
-      Pro or point an external pinger at the endpoint — the live-agent self-destruct
-      already covers the common cases within seconds.
+      never-paired (>180s), past-deadline, or idle. **Also reconciles against the
+      provider**: lists real RunPod pods and destroys any `slimcast-*` with no
+      gpu_instances row (the only path that can see a true orphan; safe vs. the
+      provisioning window because the row is reserved first). **Daily because
+      Vercel Hobby caps crons at once/day.** Optional `CRON_SECRET` protects it.
     - All teardown goes through `lib/pod-teardown.ts` `teardownInstance()`
-      (idempotent: provider destroy + revoke pod key + delete row; best-effort so
-      a provider error never strands the row).
+      (idempotent: provider destroy + revoke pod key + delete row; also closes any
+      open stream_session; best-effort so a provider error never strands the row).
 
 11. **Stream keys must never reach the public — secret-handling rules.**
     - **Encrypted at rest** in `platform_connections.stream_key_encrypted` via
@@ -148,6 +155,25 @@ They just aren't the brand. The brand is "stream everywhere, no setup."
       FastAPI debug panel (`app.py`, key-bearing `/api/logs`) is **not** exposed
       publicly — RunPod pods open `1935/tcp` only (see `runpod.ts`), and the panel
       fails closed without `RELAY_PASSWORD`.
+
+12. **The 12h cap is a confirmable deadline, not a hard kill.** Each pod has
+    `gpu_instances.max_session_at` (set to now+12h at provision). Within its final
+    30m, `/api/gpu/status` returns `confirm_required:true` + `confirm_deadline`, and
+    the OBS dock shows a countdown banner with a "Yes, keep streaming" button.
+    Confirming → `POST /api/agent/confirm-session` pushes `max_session_at` out
+    another 12h. If the deadline passes unconfirmed, the heartbeat hard-kills
+    (`session_expired`) and the reaper backstops it. The relay agent no longer
+    self-terminates on elapsed time — the server owns this so confirmed streams run
+    indefinitely.
+
+13. **Money paths are idempotent + rate-limited.** Every credit grant goes through
+    `credit_payment_once(payment_id,…)` (`lib/billing.ts` → a single-transaction
+    Postgres fn, deduped by the Stripe payment id in `credited_payments`), so a
+    webhook retry or the auto-refill-vs-webhook double can never double-credit.
+    Sensitive routes (provision, apikey, checkout) call `checkRateLimit()`
+    (`lib/rate-limit.ts`, Supabase-backed fixed window via `rate_limit_hit` RPC;
+    fails open). Checkout price is server-side (`HOURLY_PRICE_ID`), never trusted
+    from the client.
 
 ## Key files
 ### relay/
@@ -236,20 +262,25 @@ bitrate-tiered landscape grouping if wanted.
 
 ## Supabase schema
 Tables: profiles, agent_api_keys, platform_connections, gpu_instances,
-stream_sessions, achievements, agent_commands.
+stream_sessions, achievements, agent_commands, credited_payments (Stripe
+payment-id dedup for idempotent crediting), rate_limits (fixed-window counters).
 profiles cols: streaming_credits_seconds (default 7200), portrait_zoom/pos_x/pos_y,
 landscape_bitrate_kbps (default 6000), portrait_bitrate_kbps (default 4000) — the
 per-encode-group bitrate caps (NOT per-platform; the GPU encodes once per
 orientation, so agent-config writes the group cap onto every member output).
 gpu_instances cols: provider, gpu_type, datacenter, burn_rate, ip_address, status,
 outputs (jsonb), streaming (bool), idle_since (timestamptz), session_id (uuid →
-stream_sessions, the pod's currently-open session). The pod heartbeat persists
-outputs+streaming so `/api/gpu/status` can feed the dashboard + OBS plugin
-per-platform dots.
+stream_sessions, the pod's currently-open session), max_session_at (timestamptz,
+the confirmable 12h deadline). The pod heartbeat persists outputs+streaming so
+`/api/gpu/status` can feed the dashboard + OBS plugin per-platform dots.
 stream_sessions are written by the heartbeat (`/api/agent/status`, pod only):
 opened on the first streaming beat, duration/credits_deducted/platforms
 accumulated each beat, closed (ended_at) when streaming stops or on
-teardownInstance. Migrations through `20260622000001_session_recording.sql`.
+teardownInstance.
+Postgres fns: credit_payment_once (atomic idempotent credit), rate_limit_hit
+(fixed-window limiter). agent_api_keys has NO client SELECT policy (service-role
+only — hashes never reach the browser). Migrations through
+`20260622000002_security_hardening.sql`.
 
 ## Codec roadmap
 - HEVC ingest now; YouTube already gets HEVC passthrough. AV1 output later

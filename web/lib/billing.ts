@@ -40,6 +40,32 @@ export function secondsRemaining(creditsSeconds: number, burnRate: number): numb
   return Math.floor(creditsSeconds / burnRate)
 }
 
+/**
+ * Credit a user for a Stripe payment exactly once. Idempotent on paymentId via
+ * a single-transaction Postgres function (credit_payment_once): inserts a
+ * credited_payments row + bumps the balance together, deduped by PK. Safe to
+ * call from both the webhook and the auto-refill path for the same payment.
+ * Returns true if it credited now, false if already credited.
+ */
+export async function creditPaymentOnce(
+  paymentId: string,
+  userId: string,
+  seconds: number,
+): Promise<boolean> {
+  const { createServerClient } = await import('@/lib/supabase')
+  const supabase = createServerClient()
+  const { data, error } = await supabase.rpc('credit_payment_once', {
+    p_payment_id: paymentId,
+    p_user_id: userId,
+    p_seconds: seconds,
+  })
+  if (error) {
+    console.error('[billing] credit_payment_once failed:', error.message)
+    return false
+  }
+  return data === true
+}
+
 export function formatDuration(seconds: number): string {
   if (seconds <= 0) return '0m'
   const h = Math.floor(seconds / 3600)

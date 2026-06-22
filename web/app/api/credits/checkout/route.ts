@@ -1,5 +1,6 @@
 import { createServerClient } from '@/lib/supabase'
 import { stripe, HOURLY_PRICE_ID, hoursToSeconds } from '@/lib/stripe'
+import { checkRateLimit } from '@/lib/rate-limit'
 
 export async function POST(request: Request) {
   const supabase = createServerClient()
@@ -9,6 +10,10 @@ export async function POST(request: Request) {
   const { data: { user } } = await supabase.auth.getUser(token ?? '')
   if (!user) {
     return Response.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
+  if (!(await checkRateLimit(`checkout:${user.id}`, 10, 60))) {
+    return Response.json({ error: 'Too many requests. Slow down.' }, { status: 429 })
   }
 
   const body = await request.json().catch(() => ({}))

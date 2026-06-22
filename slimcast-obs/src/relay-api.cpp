@@ -2,6 +2,7 @@
 #include <QNetworkRequest>
 #include <QNetworkReply>
 #include <QJsonDocument>
+#include <QDateTime>
 #include <QUrl>
 
 // The base URL is the only deployment-time constant. Everything else is
@@ -66,6 +67,11 @@ void RelayApi::fetchGpuStatus()
         info.creditsSeconds = obj["credits_seconds"].toInt(0);
         info.burnRate       = obj["burn_rate"].toDouble(0);
         info.streaming      = obj["streaming"].toBool(false);
+        info.confirmRequired = obj["confirm_required"].toBool(false);
+        const QString deadline = obj["confirm_deadline"].toString();
+        info.confirmDeadlineMs = deadline.isEmpty()
+            ? 0
+            : QDateTime::fromString(deadline, Qt::ISODateWithMs).toMSecsSinceEpoch();
 
         for (const QJsonValue &v : obj["outputs"].toArray()) {
             auto o = v.toObject();
@@ -89,6 +95,12 @@ void RelayApi::destroyGpu()
     // DELETE tears the pod down entirely — no idle billing between streams.
     dispatch(m_nam->deleteResource(makeRequest("/api/gpu")),
         [this](const QByteArray &) { emit gpuDestroyed(); });
+}
+
+void RelayApi::confirmSession()
+{
+    // "Yes, still streaming" — pushes the 12h session deadline out another 12h.
+    send("POST", "/api/agent/confirm-session", {}, [this] { fetchGpuStatus(); });
 }
 
 // ── Channel + encode config ───────────────────────────────────────────────────

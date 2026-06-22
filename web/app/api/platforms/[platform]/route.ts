@@ -41,10 +41,17 @@ export async function PATCH(
   const { platform } = await params
   const body = await request.json().catch(() => ({}))
 
-  const allowed = ['enabled', 'bitrate_kbps', 'fps', 'orientation']
   const updates: Record<string, unknown> = {}
-  for (const key of allowed) {
-    if (key in body) updates[key] = body[key]
+  if ('enabled' in body) updates.enabled = !!body.enabled
+  if ('bitrate_kbps' in body) {
+    updates.bitrate_kbps = Math.max(500, Math.min(8000, Math.round(Number(body.bitrate_kbps)) || 0))
+  }
+  if ('fps' in body) {
+    const fps = Math.round(Number(body.fps))
+    updates.fps = [30, 60].includes(fps) ? fps : 60
+  }
+  if ('orientation' in body && (body.orientation === 'landscape' || body.orientation === 'portrait')) {
+    updates.orientation = body.orientation
   }
 
   if (Object.keys(updates).length === 0) {

@@ -14,6 +14,9 @@ struct GpuInfo {
     int     creditsSeconds = 0;
     double  burnRate       = 0; // tokens/hr (== credit-seconds/sec); $2/token
     bool    streaming      = false;
+    // "Still streaming?" prompt: set in the final 30m of the 12h session cap.
+    bool    confirmRequired = false;
+    qint64  confirmDeadlineMs = 0; // epoch ms of max_session_at (0 = none)
     // platform id ("twitch","kick","youtube","tiktok") -> output state
     // ("running","restarting","error",…). Absent = idle.
     QMap<QString, QString> platformStates;
@@ -52,6 +55,7 @@ public:
     void fetchGpuStatus();
     void provisionGpu();
     void destroyGpu();
+    void confirmSession();   // "Yes, still streaming" — extends the 12h deadline
 
     // Channel + encode config (shared with the website).
     void fetchPlatforms();

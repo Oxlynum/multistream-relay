@@ -1,5 +1,6 @@
 import { createServerClient } from '@/lib/supabase'
 import { stripe, HOURLY_PRICE_ID, hoursToSeconds } from '@/lib/stripe'
+import { creditPaymentOnce } from '@/lib/billing'
 
 // GET — return current auto-refill settings + whether a payment method is saved.
 export async function GET(request: Request) {
@@ -101,13 +102,10 @@ export async function triggerAutoRefill(userId: string): Promise<boolean> {
     })
 
     if (paymentIntent.status === 'succeeded') {
-      // Add credits immediately (webhook will also fire but addCredits is idempotent via payment_intent_id).
-      await supabase
-        .from('profiles')
-        .update({
-          streaming_credits_seconds: (profile.streaming_credits_seconds ?? 0) + hoursToSeconds(hours),
-        })
-        .eq('id', userId)
+      // Credit immediately so the live stream isn't killed waiting on the
+      // webhook. Keyed on the payment_intent id, so the webhook's later
+      // payment_intent.succeeded for the same charge is a no-op (no double).
+      await creditPaymentOnce(paymentIntent.id, userId, hoursToSeconds(hours))
       return true
     }
   } catch {

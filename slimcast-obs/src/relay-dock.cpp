@@ -13,7 +13,9 @@
 #include <QSettings>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QDateTime>
 #include <cmath>
+#include <algorithm>
 
 // ── palette ─────────────────────────────────────────────────────────────────
 static const QString C_LIVE = QStringLiteral("#37d67a");
@@ -168,6 +170,29 @@ QWidget *RelayDock::buildActivePage()
     m_ingestLabel = new QLabel("—");
     m_ingestLabel->setStyleSheet(QString("color:%1; font-size:11px").arg(C_FAINT));
     ly->addWidget(m_ingestLabel);
+
+    // ── "Still streaming?" confirmation banner (hidden until the 12h window) ──
+    m_confirmBanner = new QWidget;
+    m_confirmBanner->setStyleSheet(
+        "background:#3a2a12; border:1px solid #b9821f; border-radius:8px;");
+    {
+        auto *cb = new QVBoxLayout(m_confirmBanner);
+        cb->setContentsMargins(12, 10, 12, 10);
+        cb->setSpacing(8);
+        m_confirmLabel = new QLabel("Still streaming?");
+        m_confirmLabel->setWordWrap(true);
+        m_confirmLabel->setStyleSheet("color:#f3d39a; font-size:12px; font-weight:600; background:transparent; border:none;");
+        cb->addWidget(m_confirmLabel);
+        m_confirmBtn = new QPushButton("Yes, keep streaming");
+        m_confirmBtn->setStyleSheet(
+            "QPushButton{background:#b9821f; color:#1a1206; font-weight:700; "
+            "border:none; border-radius:6px; padding:7px;}"
+            "QPushButton:hover{background:#d49a2c;}");
+        cb->addWidget(m_confirmBtn);
+        connect(m_confirmBtn, &QPushButton::clicked, this, &RelayDock::onConfirmClicked);
+    }
+    m_confirmBanner->setVisible(false);
+    ly->addWidget(m_confirmBanner);
 
     ly->addWidget(makeSep());
 
@@ -400,8 +425,33 @@ void RelayDock::render(const GpuInfo &info)
     m_wasStreaming = info.streaming;
 
     updateIngestLabel();
+    renderConfirm(info);
     renderChannels();
     updateTotals();
+}
+
+void RelayDock::renderConfirm(const GpuInfo &info)
+{
+    if (!m_confirmBanner) return;
+
+    if (!info.confirmRequired) {
+        m_confirmBanner->setVisible(false);
+        return;
+    }
+
+    // Minutes left until the pod auto-ends if the user doesn't confirm.
+    qint64 msLeft = info.confirmDeadlineMs - QDateTime::currentMSecsSinceEpoch();
+    int minLeft = (int)std::max((qint64)0, msLeft / 60000);
+    m_confirmLabel->setText(
+        QString("You've been streaming 12 hours. The stream will end "
+                "automatically in %1 min unless you confirm.").arg(minLeft));
+    m_confirmBanner->setVisible(true);
+}
+
+void RelayDock::onConfirmClicked()
+{
+    if (m_api) m_api->confirmSession();
+    if (m_confirmBanner) m_confirmBanner->setVisible(false);
 }
 
 void RelayDock::updateIngestLabel()
