@@ -69,6 +69,8 @@ RelayDock::RelayDock(QWidget *parent)
     connect(m_api, &RelayApi::platformsUpdated, this, &RelayDock::onPlatformsUpdated);
     connect(m_api, &RelayApi::encodeUpdated,    this, &RelayDock::onEncodeUpdated);
     connect(m_api, &RelayApi::networkError,     this, &RelayDock::onNetworkError);
+    connect(m_api, &RelayApi::deviceLinked,     this, &RelayDock::onDeviceLinked);
+    connect(m_api, &RelayApi::deviceLinkFailed, this, &RelayDock::onDeviceLinkFailed);
 
     m_pollTimer->setInterval(5000);
     connect(m_pollTimer, &QTimer::timeout, this, &RelayDock::onPollTick);
@@ -105,27 +107,45 @@ QWidget *RelayDock::buildSetupPage()
     title->setStyleSheet("font-size:15px; font-weight:600; color:#e7ebf2");
     ly->addWidget(title);
 
-    auto *sub = new QLabel("Paste your SlimCast API key to connect OBS.");
+    auto *sub = new QLabel("Connect OBS to your SlimCast account in one click — "
+                           "your browser will open to authorize this computer.");
     sub->setWordWrap(true);
     sub->setStyleSheet(QString("color:%1; font-size:11px").arg(C_MUTE));
     ly->addWidget(sub);
 
-    ly->addSpacing(6);
+    ly->addSpacing(8);
+
+    // Primary path: browser-based PKCE link. No key to copy or paste.
+    auto *connectBtn = new QPushButton("Connect with SlimCast");
+    connectBtn->setStyleSheet(
+        "QPushButton{background:#4d8ef0; color:#0b0e14; font-weight:700; "
+        "border:none; border-radius:6px; padding:9px;}"
+        "QPushButton:hover{background:#6aa3f4;}");
+    ly->addWidget(connectBtn);
+    connect(connectBtn, &QPushButton::clicked, this, &RelayDock::onConnectClicked);
+
+    m_setupHint = new QLabel("");
+    m_setupHint->setWordWrap(true);
+    m_setupHint->setStyleSheet(QString("color:%1; font-size:11px").arg(C_MUTE));
+    m_setupHint->setVisible(false);
+    ly->addWidget(m_setupHint);
+
+    ly->addSpacing(10);
+
+    // Fallback: paste a key manually (collapsible-ish; kept small/quiet).
+    auto *fallback = new QLabel("Or paste an API key manually:");
+    fallback->setStyleSheet(QString("color:%1; font-size:10px").arg(C_FAINT));
+    ly->addWidget(fallback);
 
     m_apiKeyEdit = new QLineEdit;
     m_apiKeyEdit->setEchoMode(QLineEdit::Password);
     m_apiKeyEdit->setPlaceholderText("SlimCast API key");
     ly->addWidget(m_apiKeyEdit);
 
-    auto *saveBtn = new QPushButton("Connect");
+    auto *saveBtn = new QPushButton("Use key");
+    saveBtn->setStyleSheet("padding:6px;");
     ly->addWidget(saveBtn);
     connect(saveBtn, &QPushButton::clicked, this, &RelayDock::onSaveApiKey);
-
-    auto *link = new QLabel(
-        "<a href='https://slimcast-oxlynum.vercel.app/dashboard' style='color:#4d8ef0'>Get your API key →</a>");
-    link->setOpenExternalLinks(true);
-    link->setStyleSheet("font-size:11px");
-    ly->addWidget(link);
 
     ly->addStretch();
     return w;
@@ -335,12 +355,44 @@ void RelayDock::onSaveApiKey()
 
     m_api->setApiKey(key);
     saveSettings();
+    enterActive();
+}
+
+void RelayDock::enterActive()
+{
     showSetup(false);
     setStatus("Connecting…", C_WARN);
     m_pollTimer->start();
     m_api->fetchGpuStatus();
     m_api->fetchPlatforms();
     m_api->fetchEncode();
+}
+
+void RelayDock::onConnectClicked()
+{
+    if (m_setupHint) {
+        m_setupHint->setStyleSheet(QString("color:%1; font-size:11px").arg(C_MUTE));
+        m_setupHint->setText("Opening your browser to authorize…");
+        m_setupHint->setVisible(true);
+    }
+    m_api->beginDeviceLink();
+}
+
+void RelayDock::onDeviceLinked(QString apiKey)
+{
+    // The key arrives via the PKCE exchange — persist it and go active.
+    m_apiKeyEdit->setText(apiKey);
+    saveSettings();
+    enterActive();
+}
+
+void RelayDock::onDeviceLinkFailed(QString message)
+{
+    if (m_setupHint) {
+        m_setupHint->setStyleSheet(QString("color:%1; font-size:11px").arg(C_ERR));
+        m_setupHint->setText(message);
+        m_setupHint->setVisible(true);
+    }
 }
 
 // ── OBS stream lifecycle (the only GPU triggers) ───────────────────────────────

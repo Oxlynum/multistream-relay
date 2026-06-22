@@ -38,6 +38,9 @@ public slots:
 
 private slots:
     void onSaveApiKey();
+    void onConnectClicked();
+    void onDeviceLinked(QString apiKey);
+    void onDeviceLinkFailed(QString message);
     void onGpuStatusUpdated(GpuInfo info);
     void onGpuProvisioned();
     void onGpuDestroyed();
@@ -56,6 +59,7 @@ private:
     QWidget *buildActivePage();
     void loadSettings();
     void saveSettings();
+    void enterActive();   // switch to the active page + start polling
     void applyObsStreamUrl(const QString &rtmpUrl);
     void render(const GpuInfo &info);
     void renderConfirm(const GpuInfo &info);
@@ -67,6 +71,7 @@ private:
 
     // ── Setup page ─────────────────────────────────────────────────────────
     QLineEdit *m_apiKeyEdit = nullptr;
+    QLabel    *m_setupHint  = nullptr;   // link status / error under the buttons
 
     // ── Active page ────────────────────────────────────────────────────────
     QStackedWidget *m_pages        = nullptr;

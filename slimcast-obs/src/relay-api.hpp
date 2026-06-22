@@ -7,6 +7,9 @@
 #include <QList>
 #include <functional>
 
+class QTcpServer;
+class QTimer;
+
 struct GpuInfo {
     QString status;            // "provisioning" | "running" | "stopped"
     QString ip;                // populated when running
@@ -51,6 +54,11 @@ public:
     void setApiKey(const QString &key);
     bool hasApiKey() const { return !m_apiKey.isEmpty(); }
 
+    // Browser-based device linking (OAuth Authorization Code + PKCE). Opens the
+    // system browser to /link and listens on a 127.0.0.1 loopback for the code,
+    // then exchanges it for a per-device key — no key is ever pasted.
+    void beginDeviceLink();
+
     // GPU lifecycle.
     void fetchGpuStatus();
     void provisionGpu();
@@ -70,10 +78,20 @@ signals:
     void platformsUpdated(QList<PlatformConfig> platforms);
     void encodeUpdated(EncodeConfig encode);
     void networkError(QString message);
+    void deviceLinked(QString apiKey);     // device link succeeded → raw key
+    void deviceLinkFailed(QString message);
 
 private:
     QNetworkAccessManager *m_nam;
     QString m_apiKey;
+
+    // ── Device-link (PKCE) state ──────────────────────────────────────────────
+    QTcpServer *m_linkServer = nullptr;
+    QTimer     *m_linkTimeout = nullptr;
+    QString     m_pkceVerifier;
+    QString     m_linkState;
+    void cleanupLink();
+    void exchangeDeviceCode(const QString &code);
 
     QNetworkRequest makeRequest(const QString &path) const;
     void dispatch(QNetworkReply *reply,

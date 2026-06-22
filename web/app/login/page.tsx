@@ -1,13 +1,21 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, Suspense } from 'react'
 import Link from 'next/link'
-import { useRouter } from 'next/navigation'
+import { useRouter, useSearchParams } from 'next/navigation'
 import { createBrowserClient } from '@/lib/supabase'
 import { Logo } from '@/components/logo'
 
-export default function LoginPage() {
+// Only allow same-origin relative paths as a post-login destination (no open
+// redirect to external hosts).
+function safeNext(next: string | null): string {
+  if (next && next.startsWith('/') && !next.startsWith('//')) return next
+  return '/dashboard'
+}
+
+function LoginInner() {
   const router = useRouter()
+  const searchParams = useSearchParams()
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
@@ -26,7 +34,7 @@ export default function LoginPage() {
       return
     }
 
-    router.push('/dashboard')
+    router.push(safeNext(searchParams.get('next')))
   }
 
   return (
@@ -83,5 +91,13 @@ export default function LoginPage() {
         </p>
       </div>
     </main>
+  )
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense>
+      <LoginInner />
+    </Suspense>
   )
 }

@@ -279,8 +279,26 @@ accumulated each beat, closed (ended_at) when streaming stops or on
 teardownInstance.
 Postgres fns: credit_payment_once (atomic idempotent credit), rate_limit_hit
 (fixed-window limiter). agent_api_keys has NO client SELECT policy (service-role
-only — hashes never reach the browser). Migrations through
-`20260622000002_security_hardening.sql`.
+only — hashes never reach the browser); label is now ('user','pod','device') with
+optional device_name/last_used_at. device_link_codes holds short-lived PKCE
+auth codes for browser-based device linking. Migrations through
+`20260622000003_device_link.sql`.
+
+## How the OBS plugin links to an account
+Two ways, both ending in a Bearer agent key the dock sends on every request
+(`authenticateUserOrAgent`/`authenticateAgent` resolve key → user_id):
+- **Connect button (preferred, no paste): OAuth Authorization Code + PKCE,
+  brokered by our app.** Plugin makes a PKCE verifier/challenge, starts a
+  `127.0.0.1` loopback, opens the browser to `/link`. The logged-in user clicks
+  Authorize → `POST /api/link/authorize` mints a one-time code (bound to user +
+  challenge, 2-min TTL, in `device_link_codes`) → browser redirects to the
+  loopback → plugin redeems it at `POST /api/link/token` with the verifier
+  (PKCE-verified, single-use) → server issues a **per-device** key (label
+  'device', individually revocable). No key is ever displayed or pasted.
+  (`relay-api.cpp beginDeviceLink/exchangeDeviceCode`, `app/link/page.tsx`.)
+- **Manual paste (fallback):** the dashboard 'user' key pasted into the dock.
+Keys still live in QSettings on disk — moving them to the OS keychain is the next
+hardening (TODO).
 
 ## Codec roadmap
 - HEVC ingest now; YouTube already gets HEVC passthrough. AV1 output later
