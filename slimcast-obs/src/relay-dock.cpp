@@ -15,6 +15,10 @@
 #include <QJsonObject>
 #include <QDateTime>
 #include <QMessageBox>
+#include <QToolTip>
+#include <QGraphicsOpacityEffect>
+#include <QPropertyAnimation>
+#include <QCursor>
 #include <cmath>
 #include <algorithm>
 #include <cstring>
@@ -183,12 +187,20 @@ QWidget *RelayDock::buildActivePage()
     m_statusLabel->setStyleSheet("font-size:14px; font-weight:600; color:#e7ebf2");
     headRow->addWidget(m_statusDot);
     headRow->addWidget(m_statusLabel);
-    // Compact warning: a red "!" that reveals the OBS-config issue on hover,
-    // instead of a full-width banner. Hidden when everything's pointed correctly.
-    m_serviceWarn = new QLabel("⚠");
-    m_serviceWarn->setStyleSheet("color:#ff6b6b; font-size:14px; font-weight:700;");
-    m_serviceWarn->setCursor(Qt::WhatsThisCursor);
+    // Compact warning: a red "⚠" that reveals the OBS-config issue on hover or
+    // click (a flat button shows tooltips reliably, unlike a bare QLabel).
+    m_serviceWarn = new QPushButton("⚠");
+    m_serviceWarn->setFlat(true);
+    m_serviceWarn->setCursor(Qt::PointingHandCursor);
+    m_serviceWarn->setStyleSheet(
+        "QPushButton{color:#ff6b6b; font-size:15px; font-weight:700; border:none; "
+        "padding:0 4px; background:transparent;}");
     m_serviceWarn->setVisible(false);
+    connect(m_serviceWarn, &QPushButton::clicked, this, [this]() {
+        const QString issue = obsServiceIssue();
+        if (!issue.isEmpty())
+            QToolTip::showText(QCursor::pos(), issue, m_serviceWarn);
+    });
     headRow->addWidget(m_serviceWarn);
     headRow->addStretch();
     m_creditsLabel = new QLabel("—");
@@ -210,6 +222,13 @@ QWidget *RelayDock::buildActivePage()
         "QPushButton:disabled{color:#5b6577; border-color:#2a2f3a;}");
     ly->addWidget(m_pointObsBtn);
     connect(m_pointObsBtn, &QPushButton::clicked, this, &RelayDock::onPointObsClicked);
+
+    // Fading "✓" shown briefly after the button is pressed.
+    m_pointObsCheck = new QLabel("✓ Pointed at SlimCast");
+    m_pointObsCheck->setAlignment(Qt::AlignCenter);
+    m_pointObsCheck->setStyleSheet("color:#5fd28a; font-size:11px; font-weight:600;");
+    m_pointObsCheck->setVisible(false);
+    ly->addWidget(m_pointObsCheck);
 
     // ── "Still streaming?" confirmation banner (hidden until the 12h window) ──
     m_confirmBanner = new QWidget;
@@ -828,8 +847,28 @@ void RelayDock::onPointObsClicked()
     } else {
         ensureCustomService();                       // flip to Custom; server fills on Start
     }
-    // The warning "!" clears itself if the issue is resolved.
+    // The warning "⚠" clears itself if the issue is resolved.
     renderServiceBanner();
+    flashPointedFeedback();
+}
+
+void RelayDock::flashPointedFeedback()
+{
+    if (!m_pointObsCheck) return;
+    m_pointObsCheck->setVisible(true);
+
+    auto *fx = new QGraphicsOpacityEffect(m_pointObsCheck);
+    m_pointObsCheck->setGraphicsEffect(fx);
+    auto *anim = new QPropertyAnimation(fx, "opacity", this);
+    anim->setDuration(1500);
+    anim->setKeyValueAt(0.0, 1.0);
+    anim->setKeyValueAt(0.5, 1.0);   // hold briefly, then fade
+    anim->setKeyValueAt(1.0, 0.0);
+    connect(anim, &QPropertyAnimation::finished, m_pointObsCheck, [this]() {
+        m_pointObsCheck->setVisible(false);
+        m_pointObsCheck->setGraphicsEffect(nullptr);
+    });
+    anim->start(QAbstractAnimation::DeleteWhenStopped);
 }
 
 void RelayDock::setStatus(const QString &text, const QString &color)

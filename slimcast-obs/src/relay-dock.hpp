@@ -69,6 +69,7 @@ private:
     void renderConfirm(const GpuInfo &info);
     void renderServiceBanner();
     QString obsServiceIssue();
+    void flashPointedFeedback();   // fading ✓ after Point-OBS
     void renderChannels();
     void updateIngestLabel();
     void updateTotals();
@@ -96,8 +97,9 @@ private:
     QWidget        *m_confirmBanner = nullptr;
     QLabel         *m_confirmLabel  = nullptr;
     QPushButton    *m_confirmBtn    = nullptr;
-    QLabel         *m_serviceWarn   = nullptr;   // red "!" (hover): OBS not pointed at SlimCast
+    QPushButton    *m_serviceWarn   = nullptr;   // red "⚠" (hover/click): OBS not pointed at SlimCast
     QPushButton    *m_pointObsBtn   = nullptr;   // manual "point OBS at SlimCast"
+    QLabel         *m_pointObsCheck = nullptr;   // fading "✓" confirmation
 
     // ── Internal state ─────────────────────────────────────────────────────
     RelayApi *m_api;
