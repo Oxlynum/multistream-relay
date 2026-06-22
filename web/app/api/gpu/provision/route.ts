@@ -8,6 +8,10 @@ import { FALLBACK_LAT, FALLBACK_LON } from '@/lib/datacenters'
 // A running pod is considered live (not reclaimable) only if it has heartbeat
 // within this window. Past it the agent is presumed dead and the slot is free.
 const FRESH_HEARTBEAT_MS = 150_000
+// A provisioning row younger than this means another request is mid-boot; don't
+// reclaim it (it would strand the in-flight pod). The boot/readiness gate is
+// well under this, so a genuinely stuck claim is reclaimable after it.
+const PROVISION_LOCK_MS = 3 * 60 * 1000
 // Force-confirm window: a session is hard-killed at created_at + this.
 const MAX_SESSION_MS = 12 * 60 * 60 * 1000
 
@@ -55,7 +59,7 @@ export async function POST(request: Request) {
   // row FIRST. The unique(user_id) constraint makes the insert the lock.
   const { data: existing } = await supabase
     .from('gpu_instances')
-    .select('status, last_seen_at')
+    .select('status, last_seen_at, created_at')
     .eq('user_id', userId)
     .maybeSingle()
 
@@ -65,6 +69,15 @@ export async function POST(request: Request) {
       Date.now() - new Date(existing.last_seen_at).getTime() < FRESH_HEARTBEAT_MS
     if (existing.status === 'running' && fresh) {
       return Response.json({ error: 'Streaming server is already running' }, { status: 409 })
+    }
+    // A recently-created provisioning row = another request is mid-boot. Don't
+    // reclaim it (that could strand its in-flight pod) — tell the caller to wait.
+    const provisioningRecently =
+      existing.status === 'provisioning' &&
+      existing.created_at &&
+      Date.now() - new Date(existing.created_at).getTime() < PROVISION_LOCK_MS
+    if (provisioningRecently) {
+      return Response.json({ error: 'Streaming server is already starting' }, { status: 409 })
     }
     // Stale / stopped / errored row: destroy any old pod and free the slot so
     // the claim insert below can take it (never overwrite a row that still
