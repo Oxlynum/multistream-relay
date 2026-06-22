@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  metadataBase: new URL("https://slimcast.com"),
+  metadataBase: new URL("https://slimcast-oxlynum.vercel.app"),
   title: {
     default: "SlimCast — One stream in. Every platform live.",
     template: "%s · SlimCast",
@@ -28,7 +28,7 @@ export const metadata: Metadata = {
     title: "SlimCast — One stream in. Every platform live.",
     description:
       "Multistream infrastructure for creators. One HEVC feed from OBS, live everywhere, billed by the second.",
-    url: "https://slimcast.com",
+    url: "https://slimcast-oxlynum.vercel.app",
     siteName: "SlimCast",
     type: "website",
   },

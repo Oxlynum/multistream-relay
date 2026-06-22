@@ -31,7 +31,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [agent] %(message)s"
 log = logging.getLogger("agent")
 
 API_KEY = os.environ.get("SLIMCAST_API_KEY", "")
-VERCEL_URL = os.environ.get("SLIMCAST_VERCEL_URL", "https://slimcast.com")
+# Temporary dev/test domain — slimcast.com isn't owned yet. Provision passes the
+# real callback URL via SLIMCAST_VERCEL_URL; this default is only a fallback.
+VERCEL_URL = os.environ.get("SLIMCAST_VERCEL_URL", "https://slimcast-oxlynum.vercel.app")
 POLL_INTERVAL = int(os.environ.get("AGENT_POLL_INTERVAL", "10"))
 MEDIAMTX_CONFIG = os.environ.get("MEDIAMTX_CONFIG", "mediamtx.yml")
 

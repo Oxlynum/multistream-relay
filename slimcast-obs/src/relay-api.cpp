@@ -7,7 +7,9 @@
 
 // The base URL is the only deployment-time constant. Everything else is
 // driven by the user's API key. No server IPs, no tokens, no provider config.
-static const QString BASE_URL = QStringLiteral("https://slimcast.com");
+// NOTE: temporary dev/test domain — slimcast.com isn't owned yet. Switch back
+// to https://slimcast.com once the domain is live.
+static const QString BASE_URL = QStringLiteral("https://slimcast-oxlynum.vercel.app");
 
 RelayApi::RelayApi(QObject *parent)
     : QObject(parent)

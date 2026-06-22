@@ -122,7 +122,7 @@ QWidget *RelayDock::buildSetupPage()
     connect(saveBtn, &QPushButton::clicked, this, &RelayDock::onSaveApiKey);
 
     auto *link = new QLabel(
-        "<a href='https://slimcast.com/dashboard' style='color:#4d8ef0'>Get your API key →</a>");
+        "<a href='https://slimcast-oxlynum.vercel.app/dashboard' style='color:#4d8ef0'>Get your API key →</a>");
     link->setOpenExternalLinks(true);
     link->setStyleSheet("font-size:11px");
     ly->addWidget(link);
@@ -294,7 +294,7 @@ QWidget *RelayDock::buildActivePage()
     ly->addWidget(m_helperLabel);
 
     auto *manage = new QLabel(
-        "<a href='https://slimcast.com/dashboard' style='color:#4d8ef0'>Manage at slimcast.com ↗</a>");
+        "<a href='https://slimcast-oxlynum.vercel.app/dashboard' style='color:#4d8ef0'>Manage account ↗</a>");
     manage->setOpenExternalLinks(true);
     manage->setStyleSheet("font-size:11px");
     ly->addWidget(manage);

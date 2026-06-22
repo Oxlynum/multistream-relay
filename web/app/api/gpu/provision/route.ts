@@ -128,8 +128,8 @@ export async function POST(request: Request) {
   // `||` not `??`: an empty-string env var should still fall back to the default.
   const imageTag = process.env.SLIMCAST_RELAY_IMAGE || 'ghcr.io/oxlynum/multistream-relay:latest'
 
-  // Where the pod's agent phones home. Defaults to slimcast.com (not live yet),
-  // so we pass this deployment's URL explicitly.
+  // Where the pod's agent phones home. slimcast.com isn't owned yet, so this
+  // deployment's vercel.app URL is passed explicitly.
   const callbackUrl =
     process.env.SLIMCAST_AGENT_CALLBACK_URL ?? 'https://slimcast-oxlynum.vercel.app'
 
