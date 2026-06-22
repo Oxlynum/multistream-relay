@@ -63,6 +63,8 @@ private:
     void saveSettings();
     void enterActive();   // switch to the active page + start polling
     void applyObsStreamUrl(const QString &rtmpUrl);
+    void setSlimcastService(const QString &server, const QString &key);
+    void ensureCustomService();
     void render(const GpuInfo &info);
     void renderConfirm(const GpuInfo &info);
     void renderServiceBanner();
@@ -94,7 +96,7 @@ private:
     QWidget        *m_confirmBanner = nullptr;
     QLabel         *m_confirmLabel  = nullptr;
     QPushButton    *m_confirmBtn    = nullptr;
-    QLabel         *m_serviceBanner = nullptr;   // red: OBS not pointed at SlimCast
+    QLabel         *m_serviceWarn   = nullptr;   // red "!" (hover): OBS not pointed at SlimCast
     QPushButton    *m_pointObsBtn   = nullptr;   // manual "point OBS at SlimCast"
 
     // ── Internal state ─────────────────────────────────────────────────────

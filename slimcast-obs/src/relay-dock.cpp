@@ -183,6 +183,13 @@ QWidget *RelayDock::buildActivePage()
     m_statusLabel->setStyleSheet("font-size:14px; font-weight:600; color:#e7ebf2");
     headRow->addWidget(m_statusDot);
     headRow->addWidget(m_statusLabel);
+    // Compact warning: a red "!" that reveals the OBS-config issue on hover,
+    // instead of a full-width banner. Hidden when everything's pointed correctly.
+    m_serviceWarn = new QLabel("⚠");
+    m_serviceWarn->setStyleSheet("color:#ff6b6b; font-size:14px; font-weight:700;");
+    m_serviceWarn->setCursor(Qt::WhatsThisCursor);
+    m_serviceWarn->setVisible(false);
+    headRow->addWidget(m_serviceWarn);
     headRow->addStretch();
     m_creditsLabel = new QLabel("—");
     m_creditsLabel->setStyleSheet(QString("color:%1; font-size:13px; font-weight:600").arg(C_LIVE));
@@ -192,15 +199,6 @@ QWidget *RelayDock::buildActivePage()
     m_ingestLabel = new QLabel("—");
     m_ingestLabel->setStyleSheet(QString("color:%1; font-size:11px").arg(C_FAINT));
     ly->addWidget(m_ingestLabel);
-
-    // ── OBS output config: red banner if OBS isn't pointed at SlimCast ────────
-    m_serviceBanner = new QLabel("");
-    m_serviceBanner->setWordWrap(true);
-    m_serviceBanner->setStyleSheet(
-        "background:#3a1414; border:1px solid #b94a4a; border-radius:8px; "
-        "color:#f3b0b0; font-size:11px; padding:9px;");
-    m_serviceBanner->setVisible(false);
-    ly->addWidget(m_serviceBanner);
 
     // Manual trigger: point OBS's stream output at SlimCast on demand (it also
     // happens automatically on Start Streaming).
@@ -543,11 +541,6 @@ void RelayDock::render(const GpuInfo &info)
     updateIngestLabel();
     renderConfirm(info);
     renderServiceBanner();
-    if (m_pointObsBtn) {
-        const bool podLive = info.status == "running" && !info.rtmpUrl.isEmpty();
-        m_pointObsBtn->setEnabled(podLive);
-        m_pointObsBtn->setToolTip(podLive ? "" : "Available once your streaming server is running.");
-    }
     renderChannels();
     updateTotals();
 }
@@ -741,14 +734,11 @@ static void splitIngest(const QString &rtmpUrl, QString &server, QString &key)
     }
 }
 
-void RelayDock::applyObsStreamUrl(const QString &rtmpUrl)
+// Core: make OBS's streaming service a Custom RTMP service pointed at the given
+// server/key. Forces the service type to rtmp_custom (so a Twitch/YouTube preset
+// is replaced). Borrowed service ref — do NOT release it.
+void RelayDock::setSlimcastService(const QString &server, const QString &key)
 {
-    if (rtmpUrl.isEmpty()) return;
-
-    QString server, key;
-    splitIngest(rtmpUrl, server, key);
-
-    // Borrowed ref — do NOT release (the old code over-released this).
     obs_service_t *svc = obs_frontend_get_streaming_service();
     const char *type = svc ? obs_service_get_type(svc) : nullptr;
 
@@ -757,19 +747,36 @@ void RelayDock::applyObsStreamUrl(const QString &rtmpUrl)
     obs_data_set_string(settings, "key", key.toUtf8().constData());
 
     if (!type || strcmp(type, "rtmp_custom") != 0) {
-        // Force a Custom service so OBS points at SlimCast even if it was on a
-        // Twitch/YouTube preset. The frontend takes its own ref on set.
         obs_service_t *custom =
             obs_service_create("rtmp_custom", "SlimCast", settings, nullptr);
         obs_frontend_set_streaming_service(custom);
-        obs_service_release(custom);
+        obs_service_release(custom);   // frontend holds its own ref now
     } else {
         obs_service_update(svc, settings);
     }
 
     obs_data_release(settings);
     obs_frontend_save_streaming_service();
+}
+
+void RelayDock::applyObsStreamUrl(const QString &rtmpUrl)
+{
+    if (rtmpUrl.isEmpty()) return;
+    QString server, key;
+    splitIngest(rtmpUrl, server, key);
+    setSlimcastService(server, key);
     renderServiceBanner();
+}
+
+// No pod yet (no server address exists). At least flip OBS off a Twitch/preset
+// onto Custom so it's ready; the real server fills in on Start. If it's already
+// Custom we leave it alone (don't wipe a server that may already be set).
+void RelayDock::ensureCustomService()
+{
+    obs_service_t *svc = obs_frontend_get_streaming_service();
+    const char *type = svc ? obs_service_get_type(svc) : nullptr;
+    if (type && strcmp(type, "rtmp_custom") == 0) return;
+    setSlimcastService("", "live");
 }
 
 // Returns a warning if OBS's stream output isn't pointed at SlimCast, else "".
@@ -790,34 +797,39 @@ QString RelayDock::obsServiceIssue()
         const QString curServer = QString::fromUtf8(obs_data_get_string(s, "server"));
         const QString curKey = QString::fromUtf8(obs_data_get_string(s, "key"));
         obs_data_release(s);
-        if (curServer != server || curKey != key)
+        if (curKey != key)
+            return "Wrong stream key in OBS — it must be “" + key + "” for SlimCast. "
+                   "Press “Point OBS at SlimCast” to fix it.";
+        if (curServer != server)
             return "OBS isn’t pointed at your current SlimCast server. Press "
-                   "“Point OBS at SlimCast”.";
+                   "“Point OBS at SlimCast” to fix it.";
     }
     return "";
 }
 
 void RelayDock::renderServiceBanner()
 {
-    if (!m_serviceBanner) return;
+    if (!m_serviceWarn) return;
     const QString issue = obsServiceIssue();
-    m_serviceBanner->setText(issue);
-    m_serviceBanner->setVisible(!issue.isEmpty());
+    if (issue.isEmpty()) {
+        m_serviceWarn->setVisible(false);
+        return;
+    }
+    // Hover popup (rich text → wraps at a sane width).
+    m_serviceWarn->setToolTip("<div style='max-width:240px'>" + issue.toHtmlEscaped() + "</div>");
+    m_serviceWarn->setVisible(true);
 }
 
 void RelayDock::onPointObsClicked()
 {
-    if (m_lastGpuInfo.status == "running" && !m_lastGpuInfo.rtmpUrl.isEmpty()) {
-        applyObsStreamUrl(m_lastGpuInfo.rtmpUrl);
-    } else if (m_serviceBanner) {
-        // No pod yet → no server address exists to point at.
-        m_serviceBanner->setStyleSheet(
-            "background:#3a2a12; border:1px solid #b9821f; border-radius:8px; "
-            "color:#f3d39a; font-size:11px; padding:9px;");
-        m_serviceBanner->setText("Press Start Streaming in OBS — SlimCast boots a "
-                                 "server and points OBS at it automatically.");
-        m_serviceBanner->setVisible(true);
+    const bool podLive = m_lastGpuInfo.status == "running" && !m_lastGpuInfo.rtmpUrl.isEmpty();
+    if (podLive) {
+        applyObsStreamUrl(m_lastGpuInfo.rtmpUrl);   // full server + key
+    } else {
+        ensureCustomService();                       // flip to Custom; server fills on Start
     }
+    // The warning "!" clears itself if the issue is resolved.
+    renderServiceBanner();
 }
 
 void RelayDock::setStatus(const QString &text, const QString &color)
