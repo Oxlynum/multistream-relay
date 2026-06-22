@@ -126,6 +126,25 @@ They just aren't the brand. The brand is "stream everywhere, no setup."
       (idempotent: provider destroy + revoke pod key + delete row; best-effort so
       a provider error never strands the row).
 
+11. **Stream keys must never reach the public — secret-handling rules.**
+    - Stored in `platform_connections.stream_key_encrypted` (note: currently
+      **plaintext** despite the name — encryption-at-rest is a TODO; see below).
+    - Only `/api/agent/{pair,config}` ever return keys, and only to an
+      authenticated agent (pod/user key) over HTTPS. The dashboard GET routes and
+      all browser queries select **everything except** the key column — keys never
+      reach the client after the one-time POST that sets them.
+    - Env split: only `NEXT_PUBLIC_{SUPABASE_URL,SUPABASE_ANON_KEY,APP_URL}` are
+      public; service-role + Stripe secret are server-only; `.env*` is gitignored.
+    - Relay: stream keys get embedded in the FFmpeg command + FFmpeg's stderr
+      banner, so `supervisor._redact()` literal-scrubs every known key from the
+      log ring buffer (refreshed each `apply()` via `_register_secrets`). The
+      FastAPI debug panel (`app.py`, key-bearing `/api/logs`) is **not** exposed
+      publicly — RunPod pods open `1935/tcp` only (see `runpod.ts`), and the panel
+      fails closed without `RELAY_PASSWORD`.
+    - **TODO (not yet done):** encrypt keys at rest (envelope w/ a server-only
+      `STREAM_KEY_SECRET`); decrypt only in agent-config. Needs the prod secret +
+      a legacy-plaintext fallback during migration.
+
 ## Key files
 ### relay/
 - `supervisor.py` — `plan_runners()` groups enabled outputs by orientation +

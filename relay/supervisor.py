@@ -30,6 +30,7 @@ import os
 import subprocess
 import threading
 import time
+import urllib.parse
 
 CONFIG_PATH = os.environ.get("RELAY_CONFIG", "config.json")
 # Loopback feed republished by MediaMTX. We pull over SRT (MPEG-TS), NOT RTSP:
@@ -43,6 +44,35 @@ LOCAL_SOURCE = os.environ.get(
 LOG_LINES = 250
 RESTART_MIN = 2.0      # seconds
 RESTART_MAX = 30.0     # seconds
+
+# ---- secret redaction ----------------------------------------------------
+# Stream keys end up embedded in the FFmpeg command (rtmp://host/app/<KEY>) and
+# in FFmpeg's own "Output #0 ... to '<url>'" banner. Both flow into the in-memory
+# log ring buffer, which the debug panel can surface — so a key must never be
+# written there verbatim. We keep a live set of the actual key strings (refreshed
+# on every apply) and literal-replace them in every log line. Literal replacement
+# is exact: no regex guesswork, no over-redaction of harmless path segments.
+_SECRETS: set[str] = set()
+
+
+def _register_secrets(cfg: dict) -> None:
+    """Collect every stream key from the live config so _redact can scrub them."""
+    for o in cfg.get("outputs", []):
+        key = (o.get("key") or "").strip()
+        if len(key) >= 4:
+            _SECRETS.add(key)
+        # YouTube HLS passthrough carries the key as the cid= query param.
+        url = o.get("url") or ""
+        if "cid=" in url:
+            cid = urllib.parse.parse_qs(urllib.parse.urlparse(url).query).get("cid", [""])[0]
+            if len(cid) >= 4:
+                _SECRETS.add(cid)
+
+
+def _redact(msg: str) -> str:
+    for s in _SECRETS:
+        msg = msg.replace(s, "***")
+    return msg
 
 
 def _input_args(source: str) -> list[str]:
@@ -325,7 +355,7 @@ class OutputRunner:
 
     # ---- helpers ---------------------------------------------------------
     def _log(self, msg: str) -> None:
-        self._logs.append(f"{time.strftime('%H:%M:%S')} {msg}")
+        self._logs.append(f"{time.strftime('%H:%M:%S')} {_redact(msg)}")
 
     def status(self) -> dict:
         return {
@@ -432,6 +462,7 @@ class Supervisor:
     def apply(self, cfg: dict) -> None:
         """Reconcile running processes with the desired (grouped) config."""
         with self.lock:
+            _register_secrets(cfg)
             desired = plan_runners(cfg)
 
             # stop & remove runners no longer wanted

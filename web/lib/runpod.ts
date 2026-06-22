@@ -47,7 +47,10 @@ export async function createPod(params: {
     cloudType: params.cloudType ?? 'COMMUNITY',
     containerDiskInGb: 15,
     volumeInGb: 0,
-    ports: '1935/tcp,8080/tcp',
+    // Only expose the RTMP ingest publicly. The FastAPI debug panel on :8080
+    // handles stream keys and must never be reachable from the internet — the
+    // agent talks to Vercel, nothing external talks to the pod except OBS→RTMP.
+    ports: '1935/tcp',
     env: params.env,
     // Restrict to the supplied datacenters (proximity-ordered by the broker).
     ...(params.dataCenterIds?.length ? { dataCenterIds: params.dataCenterIds } : {}),
