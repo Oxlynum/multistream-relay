@@ -27,9 +27,10 @@ billed in seconds; +0.2 token/hr per extra transcoded platform. No subscription.
   shown read-only from OBS. cloud-provider/provider-presets removed. Builds +
   installs clean locally (CMake/Ninja); .pkg/.exe via CI.
 - **Most of the self-serve SaaS is built** (agent, broker, billing, dashboard,
-  crop editor, OBS plugin). Remaining gaps: stream_sessions not yet recorded
-  (stats/history show empty); end-to-end RunPod provision not yet verified live
-  (gpuTypeId / dataCenterIds unconfirmed).
+  crop editor, OBS plugin). stream_sessions are now recorded by the heartbeat
+  (open on first streaming beat → accumulate duration/credits/platforms → close
+  on stop or teardown), so stats/history populate. Remaining gap: end-to-end
+  RunPod provision not yet verified live (gpuTypeId / dataCenterIds unconfirmed).
   Plan: `/Users/danielaltom/.claude/plans/alright-lets-plan-this-eventual-clover.md`
 
 ## Layout
@@ -218,10 +219,14 @@ landscape_bitrate_kbps (default 6000), portrait_bitrate_kbps (default 4000) — 
 per-encode-group bitrate caps (NOT per-platform; the GPU encodes once per
 orientation, so agent-config writes the group cap onto every member output).
 gpu_instances cols: provider, gpu_type, datacenter, burn_rate, ip_address, status,
-outputs (jsonb), streaming (bool). The pod heartbeat persists outputs+streaming so
-`/api/gpu/status` can feed the dashboard + OBS plugin per-platform dots.
-Migrations through `20260619000002_group_bitrate.sql`. stream_sessions are NOT yet
-written by anything (stats/history empty until session recording is wired).
+outputs (jsonb), streaming (bool), idle_since (timestamptz), session_id (uuid →
+stream_sessions, the pod's currently-open session). The pod heartbeat persists
+outputs+streaming so `/api/gpu/status` can feed the dashboard + OBS plugin
+per-platform dots.
+stream_sessions are written by the heartbeat (`/api/agent/status`, pod only):
+opened on the first streaming beat, duration/credits_deducted/platforms
+accumulated each beat, closed (ended_at) when streaming stops or on
+teardownInstance. Migrations through `20260622000001_session_recording.sql`.
 
 ## Codec roadmap
 - HEVC ingest now; YouTube already gets HEVC passthrough. AV1 output later

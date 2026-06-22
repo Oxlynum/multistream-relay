@@ -34,7 +34,7 @@ export async function POST(request: NextRequest) {
 
   const { data: instance } = await supabase
     .from('gpu_instances')
-    .select('last_seen_at, burn_rate, created_at, idle_since')
+    .select('last_seen_at, burn_rate, created_at, idle_since, session_id')
     .eq('user_id', userId)
     .maybeSingle()
 
@@ -72,6 +72,58 @@ export async function POST(request: NextRequest) {
       ? null
       : (instance?.idle_since ?? new Date(now).toISOString())
 
+    // --- Session recording (history + billing audit trail) -----------------
+    // Open on the first streaming beat, accumulate each beat, close on stop.
+    // The same heartbeat that bills also records, so the two never diverge.
+    let sessionId = instance?.session_id ?? null
+    const livePlatforms = Array.from(
+      new Set(outputs.flatMap(o => o.platforms ?? []))
+    )
+
+    if (streaming && !sessionId) {
+      const { data: opened } = await supabase
+        .from('stream_sessions')
+        .insert({
+          user_id: userId,
+          started_at: new Date(now).toISOString(),
+          duration_seconds: 0,
+          credits_deducted: 0,
+          platforms: livePlatforms,
+        })
+        .select('id')
+        .single()
+      sessionId = opened?.id ?? null
+    } else if (streaming && sessionId) {
+      const { data: open } = await supabase
+        .from('stream_sessions')
+        .select('started_at, credits_deducted, platforms')
+        .eq('id', sessionId)
+        .maybeSingle()
+      if (open) {
+        const merged = Array.from(new Set([...(open.platforms ?? []), ...livePlatforms]))
+        await supabase
+          .from('stream_sessions')
+          .update({
+            duration_seconds: Math.round((now - new Date(open.started_at).getTime()) / 1000),
+            credits_deducted: (open.credits_deducted ?? 0) + deduct,
+            platforms: merged,
+          })
+          .eq('id', sessionId)
+      } else {
+        // Row vanished (history pruned) — stop tracking it.
+        sessionId = null
+      }
+    } else if (!streaming && sessionId) {
+      // Stream stopped: close the session, keep the last accumulated duration
+      // (don't extend it across the idle gap).
+      await supabase
+        .from('stream_sessions')
+        .update({ ended_at: new Date(now).toISOString() })
+        .eq('id', sessionId)
+        .is('ended_at', null)
+      sessionId = null
+    }
+
     await supabase
       .from('gpu_instances')
       .update({
@@ -80,6 +132,7 @@ export async function POST(request: NextRequest) {
         outputs,
         streaming,
         idle_since: idleSince,
+        session_id: sessionId,
       })
       .eq('user_id', userId)
 

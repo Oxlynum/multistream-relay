@@ -10,11 +10,21 @@ export async function teardownInstance(userId: string, reason: string): Promise<
 
   const { data: instance } = await supabase
     .from('gpu_instances')
-    .select('provider_id, pod_key_hash, provider')
+    .select('provider_id, pod_key_hash, provider, session_id')
     .eq('user_id', userId)
     .maybeSingle()
 
   if (!instance) return false
+
+  // Close any session still open on this pod (crash, credits-out, reaper kill).
+  // Keep the duration the heartbeat already accumulated; just stamp ended_at.
+  if (instance.session_id) {
+    await supabase
+      .from('stream_sessions')
+      .update({ ended_at: new Date().toISOString() })
+      .eq('id', instance.session_id)
+      .is('ended_at', null)
+  }
 
   // Kill the actual cloud pod first — this is the part that stops the bleeding.
   try {
