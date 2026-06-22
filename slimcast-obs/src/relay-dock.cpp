@@ -14,6 +14,7 @@
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QDateTime>
+#include <QMessageBox>
 #include <cmath>
 #include <algorithm>
 
@@ -398,6 +399,25 @@ void RelayDock::onDeviceLinked(QString apiKey)
 
 void RelayDock::onDisconnect()
 {
+    // If a stream/pod is live, tear it down cleanly BEFORE we throw away the key
+    // — otherwise the pod keeps billing and the dock can no longer control it.
+    const bool live = obs_frontend_streaming_active() || m_lastGpuInfo.status == "running";
+    if (live) {
+        const auto btn = QMessageBox::question(
+            this, "Disconnect SlimCast",
+            "You're live. Disconnecting will stop your stream and shut down the "
+            "streaming server. Continue?",
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (btn != QMessageBox::Yes) return;
+
+        // destroyGpu()'s request is built with the current key synchronously, so
+        // it's authorized even though we clear the key just below. Then stop OBS
+        // pushing RTMP to the (now tearing-down) pod.
+        m_api->destroyGpu();
+        if (obs_frontend_streaming_active())
+            obs_frontend_streaming_stop();
+    }
+
     m_pollTimer->stop();
     m_api->setApiKey("");
     m_apiKeyEdit->clear();
