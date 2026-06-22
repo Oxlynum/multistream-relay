@@ -53,6 +53,7 @@ private slots:
     void onLockToggled(bool locked);
     void onBitrateReleased();
     void onConfirmClicked();
+    void onPointObsClicked();
 
 private:
     void buildUi();
@@ -64,6 +65,8 @@ private:
     void applyObsStreamUrl(const QString &rtmpUrl);
     void render(const GpuInfo &info);
     void renderConfirm(const GpuInfo &info);
+    void renderServiceBanner();
+    QString obsServiceIssue();
     void renderChannels();
     void updateIngestLabel();
     void updateTotals();
@@ -91,6 +94,8 @@ private:
     QWidget        *m_confirmBanner = nullptr;
     QLabel         *m_confirmLabel  = nullptr;
     QPushButton    *m_confirmBtn    = nullptr;
+    QLabel         *m_serviceBanner = nullptr;   // red: OBS not pointed at SlimCast
+    QPushButton    *m_pointObsBtn   = nullptr;   // manual "point OBS at SlimCast"
 
     // ── Internal state ─────────────────────────────────────────────────────
     RelayApi *m_api;
