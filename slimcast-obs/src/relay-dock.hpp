@@ -39,6 +39,7 @@ public slots:
 private slots:
     void onSaveApiKey();
     void onConnectClicked();
+    void onDisconnect();
     void onDeviceLinked(QString apiKey);
     void onDeviceLinkFailed(QString message);
     void onGpuStatusUpdated(GpuInfo info);

@@ -319,6 +319,16 @@ QWidget *RelayDock::buildActivePage()
     manage->setStyleSheet("font-size:11px");
     ly->addWidget(manage);
 
+    // Unlink this device → back to the setup page (the "Connect" button).
+    auto *disconnect = new QPushButton("Disconnect this device");
+    disconnect->setFlat(true);
+    disconnect->setCursor(Qt::PointingHandCursor);
+    disconnect->setStyleSheet(QString(
+        "QPushButton{color:%1; font-size:10px; border:none; text-align:left; padding:2px 0;}"
+        "QPushButton:hover{color:#e7ebf2;}").arg(C_FAINT));
+    ly->addWidget(disconnect);
+    connect(disconnect, &QPushButton::clicked, this, &RelayDock::onDisconnect);
+
     ly->addStretch();
 
     scroll->setWidget(w);
@@ -384,6 +394,19 @@ void RelayDock::onDeviceLinked(QString apiKey)
     m_apiKeyEdit->setText(apiKey);
     saveSettings();
     enterActive();
+}
+
+void RelayDock::onDisconnect()
+{
+    m_pollTimer->stop();
+    m_api->setApiKey("");
+    m_apiKeyEdit->clear();
+
+    QSettings s("SlimCast", "obs-plugin");
+    s.remove("apiKey");
+
+    if (m_setupHint) m_setupHint->setVisible(false);
+    showSetup(true);
 }
 
 void RelayDock::onDeviceLinkFailed(QString message)

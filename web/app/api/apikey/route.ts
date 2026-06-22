@@ -49,13 +49,15 @@ export async function POST(request: Request) {
   const rawKey = generateApiKey()
   const keyHash = hashApiKey(rawKey)
 
-  // Delete all existing user-label keys, then insert the new one.
-  // Keeps pod-label keys (ephemeral per-session) untouched.
+  // Reset access: revoke the old manual key AND every device linked via the
+  // "Connect with SlimCast" (PKCE) flow, so refreshing actually cuts off all
+  // existing connections — not just the manual key. Pod-label keys (ephemeral
+  // per-session) are left alone; a running pod is torn down on its own paths.
   await supabase
     .from('agent_api_keys')
     .delete()
     .eq('user_id', user.id)
-    .eq('label', 'user')
+    .in('label', ['user', 'device'])
 
   await supabase.from('agent_api_keys').insert({
     user_id: user.id,

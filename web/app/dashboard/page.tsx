@@ -94,6 +94,7 @@ export default function DashboardPage() {
   useEffect(() => { loadStats(period) }, [loadStats, period])
 
   async function generateApiKey() {
+    if (!window.confirm('Reset access? This disconnects every linked OBS device and the old manual key. You’ll need to reconnect.')) return
     setKeyLoading(true)
     try {
       const supabase = createBrowserClient()
@@ -225,9 +226,10 @@ export default function DashboardPage() {
 
         {/* API key */}
         <div className="bg-surface border border-line rounded-2xl p-6">
-          <div className="text-sm text-ink-muted mb-1">OBS API key</div>
+          <div className="text-sm text-ink-muted mb-1">OBS connection</div>
           <div className="text-xs text-ink-faint mb-4">
-            Paste this into the SlimCast panel inside OBS. Refreshing creates a new key and invalidates the old one.
+            In OBS, open the SlimCast panel and click <span className="text-ink-muted">Connect with SlimCast</span> — no key to copy.
+            Use a manual key only if you can&apos;t use the button. Resetting revokes <span className="text-ink-muted">all</span> connected devices and the old manual key; every OBS will need to reconnect.
           </div>
           {apiKey ? (
             <div className="space-y-3">
@@ -252,7 +254,7 @@ export default function DashboardPage() {
               disabled={keyLoading}
               className="bg-elevated hover:bg-line-strong disabled:opacity-50 px-5 py-2 rounded-lg text-sm font-semibold transition-colors"
             >
-              {keyLoading ? 'Generating…' : 'Refresh API key'}
+              {keyLoading ? 'Resetting…' : 'Reset access · new manual key'}
             </button>
           )}
         </div>
