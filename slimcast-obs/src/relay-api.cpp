@@ -217,7 +217,12 @@ void RelayApi::exchangeDeviceCode(const QString &code)
         reply->deleteLater();
         const QByteArray data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
-            emit deviceLinkFailed("Could not complete linking. Try again.");
+            const QString serverErr = QJsonDocument::fromJson(data).object()["error"].toString();
+            const int httpCode = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            const QString detail = !serverErr.isEmpty() ? serverErr
+                                 : (httpCode ? QString("HTTP %1").arg(httpCode)
+                                             : reply->errorString());
+            emit deviceLinkFailed("Linking failed: " + detail);
             return;
         }
         const QString key = QJsonDocument::fromJson(data).object()["api_key"].toString();

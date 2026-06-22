@@ -33,12 +33,22 @@ export async function POST(request: Request) {
     .eq('code_hash', codeHash)
     .maybeSingle()
 
-  if (!row || row.consumed || new Date(row.expires_at).getTime() < Date.now()) {
+  if (!row) {
+    console.error('[link/token] code not found')
     return Response.json({ error: 'invalid_or_expired_code' }, { status: 400 })
+  }
+  if (row.consumed) {
+    console.error('[link/token] code already consumed')
+    return Response.json({ error: 'code_already_used' }, { status: 400 })
+  }
+  if (new Date(row.expires_at).getTime() < Date.now()) {
+    console.error('[link/token] code expired')
+    return Response.json({ error: 'code_expired' }, { status: 400 })
   }
 
   // PKCE: the verifier must hash to the challenge the plugin registered.
   if (base64urlSha256(verifier) !== row.code_challenge) {
+    console.error('[link/token] pkce mismatch', { got: base64urlSha256(verifier).slice(0, 8), want: row.code_challenge.slice(0, 8) })
     return Response.json({ error: 'pkce_verification_failed' }, { status: 400 })
   }
 
