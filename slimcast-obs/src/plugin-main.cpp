@@ -1,6 +1,9 @@
 #include <obs-module.h>
 #include <obs-frontend-api.h>
 #include <QMainWindow>
+#include <QCoreApplication>
+#include <QDir>
+#include <dlfcn.h>
 #include "relay-dock.hpp"
 
 OBS_DECLARE_MODULE()
@@ -31,8 +34,26 @@ static void frontendEventCb(obs_frontend_event event, void *data)
     }
 }
 
+// OBS ships QtNetwork but no Qt TLS backend plugin, so https requests fail with
+// "TLS initialization failed". We bundle the backend at Contents/PlugIns/tls/
+// (see CMakeLists) and add that dir to Qt's plugin search path here, before any
+// network call. Path is derived from this module's own location so it works for
+// both a local install and a packaged .pkg.
+static void registerBundledTlsBackend()
+{
+    Dl_info info;
+    if (!dladdr(reinterpret_cast<const void *>(&registerBundledTlsBackend), &info) || !info.dli_fname)
+        return;
+    QDir dir(QString::fromUtf8(info.dli_fname));  // …/Contents/MacOS/slimcast-obs
+    dir.cdUp();   // MacOS
+    dir.cdUp();   // Contents
+    QCoreApplication::addLibraryPath(dir.absoluteFilePath("PlugIns"));
+}
+
 bool obs_module_load(void)
 {
+    registerBundledTlsBackend();
+
     auto *win = static_cast<QMainWindow *>(obs_frontend_get_main_window());
     s_dock = new RelayDock(win);
 
