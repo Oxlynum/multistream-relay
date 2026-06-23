@@ -105,7 +105,8 @@ private:
     // ── Internal state ─────────────────────────────────────────────────────
     RelayApi *m_api;
     QTimer   *m_pollTimer;
-    QTimer   *m_launchTimeout = nullptr;   // overall Go Live timeout
+    QTimer   *m_launchTimeout   = nullptr;   // overall Go Live timeout
+    QTimer   *m_streamWatchdog  = nullptr;   // 90s platform-alive check after OBS starts
 
     bool m_autoLaunching  = false;
     bool m_resumingStream = false;

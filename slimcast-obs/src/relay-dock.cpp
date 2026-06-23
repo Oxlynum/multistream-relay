@@ -103,6 +103,21 @@ RelayDock::RelayDock(QWidget *parent)
         abortLaunch("Couldn't get a server online in time. Please try Go Live again.");
     });
 
+    // Platform-alive watchdog: started when OBS begins streaming (our launch).
+    // Relay-reach watchdog: started when OBS begins streaming. Cancelled as soon
+    // as the relay reports streaming=true (OBS reached the pod and FFmpeg started).
+    // If OBS never reaches the relay in 90s → wrong URL/port, cancel the stream.
+    // Platform failures (bad stream key, Twitch rejecting) are shown per-channel
+    // as "reconnecting" and do NOT kill the stream.
+    m_streamWatchdog = new QTimer(this);
+    m_streamWatchdog->setSingleShot(true);
+    m_streamWatchdog->setInterval(90000);   // 90s from OBS streaming start → relay confirms
+    connect(m_streamWatchdog, &QTimer::timeout, this, [this]() {
+        blog(LOG_WARNING, "[slimcast] stream watchdog: OBS didn't reach the relay in 90s, stopping");
+        obs_frontend_streaming_stop();
+        setStatus("OBS didn't reach the relay — check your stream settings", C_ERR);
+    });
+
     if (m_api->hasApiKey()) {
         enterActive();
     } else {
@@ -492,8 +507,12 @@ void RelayDock::onObsStreamingStarting()
     // — that fires this; just clear the guard and let it proceed. We deliberately
     // do NOT touch OBS's own Start button, so it coexists with StreamElements and
     // any other control-panel plugin. (Use the SlimCast Go Live button to stream.)
-    if (m_resumingStream)
+    if (m_resumingStream) {
         m_resumingStream = false;
+        // Start the platform-alive watchdog: if no output reaches "running"
+        // within 90s the RTMP path or stream key is wrong — stop cleanly.
+        if (m_streamWatchdog) m_streamWatchdog->start();
+    }
 }
 
 void RelayDock::onObsStreamingStopped()
@@ -533,20 +552,25 @@ void RelayDock::onGpuStatusUpdated(GpuInfo info)
     // Agent paired → status flips 'provisioning' → 'running'. That means
     // MediaMTX is up and RTMP is accepting. Set OBS's URL and start streaming.
     if (m_autoLaunching && info.status == "running") {
-        if (m_launchTimeout) m_launchTimeout->stop();
-        m_autoLaunching  = false;
         if (!info.rtmpUrl.isEmpty()) {
+            // Port mapping is in the DB — we have everything we need.
+            if (m_launchTimeout) m_launchTimeout->stop();
+            m_autoLaunching  = false;
             m_resumingStream = true;
             setStatus("Connecting…", C_WARN);
             applyObsStreamUrl(info.rtmpUrl, info.ingestKey);
             obs_frontend_streaming_start();
-        } else {
-            // Server is up but we don't have the mapped port yet — should be
-            // extremely rare. User can Stop and Go Live again to reprovision.
-            setStatus("Ready (reconnect OBS manually)", C_WARN);
         }
+        // rtmpUrl is null: pod paired but provision hasn't saved the public port
+        // yet (waitForIp() is still polling RunPod's GraphQL — typically resolves
+        // within one 5s poll). Stay in autoLaunching; the 6-min timeout backstops.
         return;
     }
+
+    // Relay-reach watchdog: cancel the moment the relay reports streaming=true.
+    // That means OBS reached the pod and FFmpeg is running — the connection is good.
+    if (m_streamWatchdog && m_streamWatchdog->isActive() && info.streaming)
+        m_streamWatchdog->stop();
 
     // SAFETY: a running pod while OBS is not streaming (and we aren't mid-launch)
     // is an orphan — e.g. OBS crashed and was reopened, or a Stop teardown failed.
