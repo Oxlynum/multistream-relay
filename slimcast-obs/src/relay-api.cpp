@@ -74,6 +74,7 @@ void RelayApi::fetchGpuStatus()
         info.status         = obj["status"].toString("stopped");
         info.ip             = obj["ip"].toString();
         info.rtmpUrl        = obj["rtmp_url"].toString();
+        info.ingestKey      = obj["ingest_key"].toString();
         info.creditsSeconds = obj["credits_seconds"].toInt(0);
         info.burnRate       = obj["burn_rate"].toDouble(0);
         info.streaming      = obj["streaming"].toBool(false);

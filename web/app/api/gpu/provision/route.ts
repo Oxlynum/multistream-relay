@@ -138,6 +138,10 @@ export async function POST(request: Request) {
   const lat = Number(request.headers.get('x-vercel-ip-latitude')) || FALLBACK_LAT
   const lon = Number(request.headers.get('x-vercel-ip-longitude')) || FALLBACK_LON
 
+  // Per-pod secret used as the RTMP ingest path, so only OBS holding this key
+  // can publish to the pod (no more open "live" ingest on a public port).
+  const ingestKey = generateApiKey().slice(0, 24)
+
   const result = await provisionGpu({
     lat,
     lon,
@@ -146,6 +150,7 @@ export async function POST(request: Request) {
     env: [
       { key: 'SLIMCAST_API_KEY', value: podRawKey },
       { key: 'SLIMCAST_VERCEL_URL', value: callbackUrl },
+      { key: 'SLIMCAST_INGEST_KEY', value: ingestKey },
     ],
   })
 
@@ -168,6 +173,8 @@ export async function POST(request: Request) {
       pod_key_hash: podKeyHash,
       status: 'provisioning',
       ip_address: result.ip ?? null,
+      ingest_port: result.port ?? null,
+      ingest_key: ingestKey,
       provider: result.provider,
       gpu_type: result.gpuKey,
       datacenter: result.datacenter,

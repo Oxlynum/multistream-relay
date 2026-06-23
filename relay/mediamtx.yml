@@ -27,8 +27,10 @@ hls: no
 webrtc: no
 
 paths:
-  # OBS publishes to rtmp://<pod>:1935/live ; encoders pull rtsp://127.0.0.1:8554/live
-  live:
+  # OBS publishes to rtmp://<pod>:<mapped-port>/<ingest-key>. The path is a
+  # per-pod secret (the agent substitutes __INGEST_PATH__ from SLIMCAST_INGEST_KEY
+  # at boot), so only OBS holding the key can publish. Defaults to "live" locally.
+  __INGEST_PATH__:
     source: publisher
 
     # Auto start/stop the transcoder with OBS:

@@ -26,7 +26,7 @@ export async function GET(request: Request) {
 
   const { data: instance } = await supabase
     .from('gpu_instances')
-    .select('status, ip_address, last_seen_at, burn_rate, outputs, streaming, max_session_at')
+    .select('status, ip_address, ingest_port, ingest_key, last_seen_at, burn_rate, outputs, streaming, max_session_at')
     .eq('user_id', userId)
     .maybeSingle()
 
@@ -41,6 +41,7 @@ export async function GET(request: Request) {
       status: 'stopped',
       ip: null,
       rtmp_url: null,
+      ingest_key: null,
       credits_seconds: profile?.streaming_credits_seconds ?? 0,
       burn_rate: 0,
       streaming: false,
@@ -66,10 +67,17 @@ export async function GET(request: Request) {
   const stale = !lastSeen || (Date.now() - lastSeen.getTime() > 30_000)
   const effectiveStatus = instance.status === 'running' && stale ? 'provisioning' : instance.status
 
+  // OBS server is the pod IP + the RunPod-mapped public port; the stream key is
+  // the per-pod secret (the RTMP path). Both are needed and set by the plugin.
+  const server = instance.ip_address && instance.ingest_port
+    ? `rtmp://${instance.ip_address}:${instance.ingest_port}`
+    : null
+
   return Response.json({
     status: effectiveStatus,
     ip: instance.ip_address ?? null,
-    rtmp_url: instance.ip_address ? `rtmp://${instance.ip_address}:1935/live` : null,
+    rtmp_url: server,
+    ingest_key: instance.ingest_key ?? null,
     credits_seconds: profile?.streaming_credits_seconds ?? 0,
     // Zero the meter when the agent is stale/stopped so the UI doesn't show a
     // burn rate for a stream that isn't actually running.

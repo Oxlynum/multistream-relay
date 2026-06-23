@@ -88,13 +88,13 @@ export function rankCandidates(lat: number, lon: number): GpuCandidate[] {
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 
-/** Poll until the pod reports a public IP (booted), or time out. */
-async function waitForIp(provider: GpuProvider, podId: string): Promise<string | null> {
+/** Poll until the pod reports a public IP + mapped port (booted), or time out. */
+async function waitForIp(provider: GpuProvider, podId: string): Promise<{ ip: string; port: number } | null> {
   const deadline = Date.now() + READINESS_TIMEOUT_MS
   while (Date.now() < deadline) {
     try {
       const s = await provider.getStatus(podId)
-      if (s.ip) return s.ip
+      if (s.ip && s.port) return { ip: s.ip, port: s.port }
       if (s.status === 'error' || s.status === 'terminated') return null
     } catch {
       // transient API error — keep polling within the budget
@@ -109,6 +109,7 @@ export interface ProvisionResult {
   provider?: string
   podId?: string
   ip?: string
+  port?: number
   gpuKey?: string
   datacenter?: string
   pricePerHr?: number
@@ -162,15 +163,16 @@ export async function provisionGpu(args: {
         continue
       }
 
-      // Got inventory — now make sure it actually boots.
+      // Got inventory — now make sure it actually boots (IP + mapped port).
       bootAttempts++
-      const ip = await waitForIp(provider, podId)
-      if (ip) {
+      const addr = await waitForIp(provider, podId)
+      if (addr) {
         return {
           ok: true,
           provider: provider.name,
           podId,
-          ip,
+          ip: addr.ip,
+          port: addr.port,
           gpuKey: candidate.gpuKey,
           datacenter: candidate.datacenterIds[0],
           pricePerHr: actualCost ?? candidate.pricePerHr,

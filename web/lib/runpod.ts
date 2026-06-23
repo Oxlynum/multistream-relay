@@ -78,11 +78,14 @@ export async function listPods(): Promise<Array<{ id: string; name: string }>> {
   return (pods ?? []).map(p => ({ id: p.id, name: p.name }))
 }
 
-export async function getPodStatus(podId: string): Promise<{ status: string; ip: string | null }> {
+export async function getPodStatus(podId: string): Promise<{ status: string; ip: string | null; port: number | null }> {
   const pod = await request<RunPodPod>('GET', `/pods/${podId}`)
+  // RunPod proxies the internal 1935/tcp to a public IP + a RANDOM external
+  // port. OBS must use that mapped port, not 1935.
   const publicPort = pod.runtime?.ports?.find(p => p.isIpPublic && p.privatePort === 1935)
   return {
     status: pod.desiredStatus,
     ip: publicPort?.ip ?? null,
+    port: publicPort?.publicPort ?? null,
   }
 }

@@ -10,15 +10,15 @@ export async function POST(request: NextRequest) {
     return Response.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
-  const body = await request.json().catch(() => ({}))
-  const ip = body.ip_address as string | undefined
-
   const supabase = createServerClient()
 
-  // Mark the instance as running and record its IP.
+  // Mark the instance as running. We do NOT touch ip_address/ingest_port here:
+  // the agent's self-reported (egress) IP is not the RTMP ingest address — that
+  // comes from the RunPod port mapping captured at provision time. Overwriting it
+  // would point OBS at the wrong host.
   await supabase
     .from('gpu_instances')
-    .update({ status: 'running', ip_address: ip ?? null, last_seen_at: new Date().toISOString() })
+    .update({ status: 'running', last_seen_at: new Date().toISOString() })
     .eq('user_id', userId)
 
   // Return platform config + portrait framing so the agent can start immediately.

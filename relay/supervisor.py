@@ -57,6 +57,10 @@ _SECRETS: set[str] = set()
 
 def _register_secrets(cfg: dict) -> None:
     """Collect every stream key from the live config so _redact can scrub them."""
+    # The per-pod ingest key appears in the SRT loopback source URL on the cmd.
+    ingest = os.environ.get("SLIMCAST_INGEST_KEY", "").strip()
+    if len(ingest) >= 4:
+        _SECRETS.add(ingest)
     for o in cfg.get("outputs", []):
         key = (o.get("key") or "").strip()
         if len(key) >= 4:

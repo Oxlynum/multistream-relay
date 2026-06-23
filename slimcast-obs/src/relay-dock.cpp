@@ -19,6 +19,9 @@
 #include <QGraphicsOpacityEffect>
 #include <QPropertyAnimation>
 #include <QCursor>
+#include <QTcpSocket>
+#include <QUrl>
+#include <QTimer>
 #include <cmath>
 #include <algorithm>
 #include <cstring>
@@ -490,8 +493,10 @@ void RelayDock::onObsStreamingStarting()
     }
     if (m_autoLaunching) return;
 
+    // Pod already running (e.g. starting a second time this session) — it's
+    // already accepting, so just point OBS at it and let the start proceed.
     if (m_lastGpuInfo.status == "running" && !m_lastGpuInfo.rtmpUrl.isEmpty()) {
-        applyObsStreamUrl(m_lastGpuInfo.rtmpUrl);
+        applyObsStreamUrl(m_lastGpuInfo.rtmpUrl, m_lastGpuInfo.ingestKey);
         return;
     }
 
@@ -508,6 +513,74 @@ void RelayDock::onObsStreamingStopped()
     setStatus("Stopping…", C_MUTE);
 }
 
+// ── Readiness probe ────────────────────────────────────────────────────────────
+// "status: running" + an IP means the pod booted, but NOT that the RTMP ingest
+// (MediaMTX + RunPod's TCP proxy) is accepting yet. Resuming OBS too early fails
+// the connect. So we TCP-probe the ingest port and only resume once it's open.
+static constexpr int PROBE_MAX_ATTEMPTS = 25;   // ~50s at 2s spacing
+static constexpr int PROBE_INTERVAL_MS  = 2000;
+
+void RelayDock::startReadinessProbe(const QString &server, const QString &key)
+{
+    m_probing       = true;
+    m_probeServer   = server;
+    m_probeKey      = key;
+    m_probeAttempts = 0;
+    setStatus("Connecting…", C_WARN);
+    probeOnce();
+}
+
+void RelayDock::probeOnce()
+{
+    const QUrl u(m_probeServer);
+    const QString host = u.host();
+    const int port = u.port(1935);
+
+    auto *sock = new QTcpSocket(this);
+    auto *timeout = new QTimer(sock);
+    timeout->setSingleShot(true);
+
+    connect(sock, &QTcpSocket::connected, this, [this, sock]() {
+        sock->abort();
+        sock->deleteLater();
+        onProbeSuccess();
+    });
+    connect(sock, &QTcpSocket::errorOccurred, this, [this, sock](QAbstractSocket::SocketError) {
+        sock->deleteLater();
+        onProbeRetry();
+    });
+    // Guard against connectToHost hanging past our interval.
+    connect(timeout, &QTimer::timeout, sock, [sock]() {
+        if (sock->state() != QAbstractSocket::ConnectedState) sock->abort();
+    });
+
+    sock->connectToHost(host, static_cast<quint16>(port));
+    timeout->start(PROBE_INTERVAL_MS);
+}
+
+void RelayDock::onProbeSuccess()
+{
+    m_probing        = false;
+    m_autoLaunching  = false;
+    m_resumingStream = true;
+    applyObsStreamUrl(m_probeServer, m_probeKey);
+    obs_frontend_streaming_start();
+}
+
+void RelayDock::onProbeRetry()
+{
+    if (!m_probing) return;
+    if (++m_probeAttempts >= PROBE_MAX_ATTEMPTS) {
+        m_probing       = false;
+        m_autoLaunching = false;
+        setStatus("Server unreachable", C_ERR);
+        if (m_totalLabel)
+            m_totalLabel->setText("Couldn't reach your SlimCast server. Stop and try again.");
+        return;
+    }
+    QTimer::singleShot(PROBE_INTERVAL_MS, this, &RelayDock::probeOnce);
+}
+
 // ── Status rendering ──────────────────────────────────────────────────────────
 
 void RelayDock::onGpuStatusUpdated(GpuInfo info)
@@ -515,13 +588,14 @@ void RelayDock::onGpuStatusUpdated(GpuInfo info)
     m_lastGpuInfo = info;
     render(info);
 
-    if (m_autoLaunching && info.status == "running" && !info.rtmpUrl.isEmpty()) {
-        m_autoLaunching  = false;
-        m_resumingStream = true;
-        applyObsStreamUrl(info.rtmpUrl);
-        obs_frontend_streaming_start();
+    // Pod booted (status running + address). Don't resume OBS yet — first make
+    // sure the RTMP ingest is actually accepting (has IP ≠ ingest ready). The
+    // probe keeps m_autoLaunching true so the orphan check below stays paused.
+    if (m_autoLaunching && !m_probing && info.status == "running" && !info.rtmpUrl.isEmpty()) {
+        startReadinessProbe(info.rtmpUrl, info.ingestKey);
         return;
     }
+    if (m_probing) return;   // wait for the probe to finish before anything else
 
     // SAFETY: a running pod while OBS is not streaming (and we aren't mid-launch)
     // is an orphan — e.g. OBS crashed and was reopened, or a Stop teardown failed.
@@ -739,20 +813,6 @@ void RelayDock::onNetworkError(QString message)
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-// Split rtmp://<ip>:1935/live → server "rtmp://<ip>:1935", key "live". OBS's
-// custom service publishes to server + "/" + key, so they must NOT both carry
-// the path (the old code did, producing …/live/live).
-static void splitIngest(const QString &rtmpUrl, QString &server, QString &key)
-{
-    server = rtmpUrl;
-    key = "live";
-    const int slash = server.lastIndexOf('/');
-    if (slash > 7) {                 // past the "rtmp://"
-        key = server.mid(slash + 1);
-        server = server.left(slash);
-    }
-}
-
 // Core: make OBS's streaming service a Custom RTMP service pointed at the given
 // server/key. Forces the service type to rtmp_custom (so a Twitch/YouTube preset
 // is replaced). Borrowed service ref — do NOT release it.
@@ -778,11 +838,9 @@ void RelayDock::setSlimcastService(const QString &server, const QString &key)
     obs_frontend_save_streaming_service();
 }
 
-void RelayDock::applyObsStreamUrl(const QString &rtmpUrl)
+void RelayDock::applyObsStreamUrl(const QString &server, const QString &key)
 {
-    if (rtmpUrl.isEmpty()) return;
-    QString server, key;
-    splitIngest(rtmpUrl, server, key);
+    if (server.isEmpty()) return;
     setSlimcastService(server, key);
     renderServiceBanner();
 }
@@ -795,7 +853,8 @@ void RelayDock::ensureCustomService()
     obs_service_t *svc = obs_frontend_get_streaming_service();
     const char *type = svc ? obs_service_get_type(svc) : nullptr;
     if (type && strcmp(type, "rtmp_custom") == 0) return;
-    setSlimcastService("", "live");
+    // Flip off a Twitch/preset onto Custom; server + per-pod key fill in on Start.
+    setSlimcastService("", "");
 }
 
 // Returns a warning if OBS's stream output isn't pointed at SlimCast, else "".
@@ -810,16 +869,14 @@ QString RelayDock::obsServiceIssue()
     }
     // Custom: while a pod is live, verify the server/key actually match it.
     if (m_lastGpuInfo.status == "running" && !m_lastGpuInfo.rtmpUrl.isEmpty()) {
-        QString server, key;
-        splitIngest(m_lastGpuInfo.rtmpUrl, server, key);
         obs_data_t *s = obs_service_get_settings(svc);
         const QString curServer = QString::fromUtf8(obs_data_get_string(s, "server"));
         const QString curKey = QString::fromUtf8(obs_data_get_string(s, "key"));
         obs_data_release(s);
-        if (curKey != key)
-            return "Wrong stream key in OBS — it must be “" + key + "” for SlimCast. "
-                   "Press “Point OBS at SlimCast” to fix it.";
-        if (curServer != server)
+        if (curKey != m_lastGpuInfo.ingestKey)
+            return "Wrong stream key in OBS for SlimCast. Press “Point OBS at "
+                   "SlimCast” to fix it.";
+        if (curServer != m_lastGpuInfo.rtmpUrl)
             return "OBS isn’t pointed at your current SlimCast server. Press "
                    "“Point OBS at SlimCast” to fix it.";
     }
@@ -843,9 +900,9 @@ void RelayDock::onPointObsClicked()
 {
     const bool podLive = m_lastGpuInfo.status == "running" && !m_lastGpuInfo.rtmpUrl.isEmpty();
     if (podLive) {
-        applyObsStreamUrl(m_lastGpuInfo.rtmpUrl);   // full server + key
+        applyObsStreamUrl(m_lastGpuInfo.rtmpUrl, m_lastGpuInfo.ingestKey);
     } else {
-        ensureCustomService();                       // flip to Custom; server fills on Start
+        ensureCustomService();                       // flip to Custom; server+key fill on Start
     }
     // The warning "⚠" clears itself if the issue is resolved.
     renderServiceBanner();

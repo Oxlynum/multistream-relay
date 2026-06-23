@@ -25,6 +25,13 @@ import threading
 import urllib.request
 import urllib.error
 
+# Per-pod secret ingest path (set by provision via SLIMCAST_INGEST_KEY). MediaMTX
+# accepts only this path and republishes it over the SRT loopback under the same
+# name, so the encoders must pull from it. RELAY_SOURCE has to be set BEFORE
+# importing supervisor (it reads it at import time). Defaults to "live" locally.
+INGEST_KEY = (os.environ.get("SLIMCAST_INGEST_KEY", "live").strip() or "live")
+os.environ.setdefault("RELAY_SOURCE", f"srt://127.0.0.1:8890?streamid=read:{INGEST_KEY}")
+
 from supervisor import Supervisor
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [agent] %(message)s")
@@ -87,9 +94,22 @@ def _api(method: str, path: str, body: dict | None = None, timeout: int = 10) ->
         return None
 
 
+def _render_mediamtx_config() -> str:
+    """Substitute the per-pod ingest path into the MediaMTX config template."""
+    with open(MEDIAMTX_CONFIG) as f:
+        cfg = f.read()
+    cfg = cfg.replace("__INGEST_PATH__", INGEST_KEY)
+    runtime_path = "/tmp/mediamtx.runtime.yml"
+    with open(runtime_path, "w") as f:
+        f.write(cfg)
+    return runtime_path
+
+
 def start_mediamtx() -> subprocess.Popen:
-    log.info("Starting MediaMTX (%s)…", MEDIAMTX_CONFIG)
-    proc = subprocess.Popen(["mediamtx", MEDIAMTX_CONFIG])
+    config = _render_mediamtx_config()
+    # Do NOT log INGEST_KEY — it's the publish secret.
+    log.info("Starting MediaMTX (ingest path configured)…")
+    proc = subprocess.Popen(["mediamtx", config])
     time.sleep(2)
     if proc.poll() is not None:
         log.error("MediaMTX exited immediately (code %s)", proc.returncode)

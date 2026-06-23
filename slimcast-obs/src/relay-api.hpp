@@ -13,7 +13,8 @@ class QTimer;
 struct GpuInfo {
     QString status;            // "provisioning" | "running" | "stopped"
     QString ip;                // populated when running
-    QString rtmpUrl;           // rtmp://{ip}:1935/live
+    QString rtmpUrl;           // server: rtmp://{ip}:{mapped-port}
+    QString ingestKey;         // per-pod secret RTMP path (the OBS stream key)
     int     creditsSeconds = 0;
     double  burnRate       = 0; // tokens/hr (== credit-seconds/sec); $2/token
     bool    streaming      = false;
