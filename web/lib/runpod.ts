@@ -57,7 +57,8 @@ export async function createPod(params: {
     containerDiskInGb: 15,
     // No persistent volume needed — the pod is ephemeral (destroyed on stream stop).
     // v1 REST: ports is an array, not a string.
-    ports: ['1935/tcp'],
+    // 1935 = RTMP ingest (OBS → pod). 8888 = MediaMTX HLS preview (dashboard monitor).
+    ports: ['1935/tcp', '8888/tcp'],
     // v1 REST: env is a plain object { KEY: value }, not [{key, value}] (GraphQL shape).
     env: Object.fromEntries(params.env.map(e => [e.key, e.value])),
     // Datacenter selection via v1 REST is not supported (GraphQL-only).
@@ -87,12 +88,15 @@ export async function listPods(): Promise<Array<{ id: string; name: string }>> {
 
 export async function getPodStatus(podId: string): Promise<{ status: string; ip: string | null; port: number | null }> {
   const pod = await request<RunPodPod>('GET', `/pods/${podId}`)
-  // RunPod proxies the internal 1935/tcp to a public IP + a RANDOM external
-  // port. OBS must use that mapped port, not 1935.
-  const publicPort = pod.runtime?.ports?.find(p => p.isIpPublic && p.privatePort === 1935)
-  return {
-    status: pod.desiredStatus,
-    ip: publicPort?.ip ?? null,
-    port: publicPort?.publicPort ?? null,
-  }
+
+  // Log the raw port data once so we can see the actual v1 API shape.
+  console.log(`[runpod] pod ${podId} status=${pod.desiredStatus} publicIp=${pod.publicIp} portMappings=${JSON.stringify(pod.portMappings)} runtime.ports=${JSON.stringify(pod.runtime?.ports)}`)
+
+  // v1 REST may return portMappings:{"1935":12345} or runtime.ports[].
+  const runtimePort = pod.runtime?.ports?.find(p => p.isIpPublic && p.privatePort === 1935)
+  const mappedPort  = pod.portMappings?.['1935']
+  const ip          = runtimePort?.ip ?? pod.publicIp ?? null
+  const port        = runtimePort?.publicPort ?? mappedPort ?? null
+
+  return { status: pod.desiredStatus, ip, port }
 }

@@ -22,8 +22,13 @@ srtAddress: :8890
 rtsp: yes
 rtspAddress: :8554
 
-# Disable protocols we do not use.
-hls: no
+# HLS preview on :8888. Used by the dashboard to verify OBS→pod ingest.
+# Only the ingest-key path is published, so the URL is effectively secret.
+hls: yes
+hlsAddress: :8888
+hlsAllowOrigin: '*'
+hlsAlwaysRemux: no   # only serve HLS when a publisher is active
+
 webrtc: no
 
 paths:

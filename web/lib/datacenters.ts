@@ -91,12 +91,14 @@ export const CLOUD_TYPES: string[] = ['COMMUNITY']
 // Readiness gate: after a pod is created we poll until it has a public IP
 // (i.e. it actually booted). If it never does, we abandon it and try the next
 // candidate — "got inventory" is not the same as "it works".
-export const READINESS_TIMEOUT_MS = 90_000
-export const READINESS_POLL_MS = 4_000
+// RunPod cold start: Docker pull (60-90s) + container start (10s) = ~100s.
+// 120s gives enough margin. Worst case with 2 boot attempts = 240s < Vercel 300s limit.
+export const READINESS_TIMEOUT_MS = 120_000
+export const READINESS_POLL_MS = 5_000
 
 // Cap how many pods we'll boot-and-abandon before giving up (capacity misses
 // are fast and don't count — only real-but-dead boots do).
-export const MAX_BOOT_ATTEMPTS = 3
+export const MAX_BOOT_ATTEMPTS = 2
 
 // Default location when the request carries no geo headers (local dev, VPNs):
 // central US minimizes worst-case latency for an unknown US user.
