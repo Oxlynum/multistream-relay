@@ -236,7 +236,7 @@ QWidget *RelayDock::buildActivePage()
     m_goLiveBtn = new QPushButton("Go Live");
     m_goLiveBtn->setMinimumHeight(34);
     ly->addWidget(m_goLiveBtn);
-    connect(m_goLiveBtn, &QPushButton::clicked, this, &RelayDock::onGoLiveClicked);
+    connect(m_goLiveBtn, &QPushButton::clicked, this, &RelayDock::onMainBtnClicked);
 
     // ── "Still streaming?" confirmation banner (hidden until the 12h window) ──
     m_confirmBanner = new QWidget;
@@ -575,17 +575,20 @@ void RelayDock::render(const GpuInfo &info)
     }
     setStatus(text, color);
 
-    // ── Go Live / Stop button ────────────────────────────────────────────────
+    // ── Main action button: Go Live → Cancel (connecting) → Stop Stream (live) ─
     if (m_goLiveBtn) {
-        const bool busy = m_autoLaunching || false /* m_probing removed */ || m_shuttingDown;
         const bool live = info.status == "running" || info.streaming;
-        if (busy) {
+        if (m_shuttingDown) {
             m_goLiveBtn->setEnabled(false);
-            m_goLiveBtn->setText(m_shuttingDown ? "Stopping…" : "Starting…");
+            m_goLiveBtn->setText("Stopping…");
             m_goLiveBtn->setStyleSheet(goLiveStyle(C_WARN));
+        } else if (m_autoLaunching) {
+            m_goLiveBtn->setEnabled(true);
+            m_goLiveBtn->setText("Cancel");
+            m_goLiveBtn->setStyleSheet(goLiveStyle(C_ERR));
         } else if (live) {
             m_goLiveBtn->setEnabled(true);
-            m_goLiveBtn->setText("Stop streaming");
+            m_goLiveBtn->setText("Stop Stream");
             m_goLiveBtn->setStyleSheet(goLiveStyle(C_ERR));
         } else {
             m_goLiveBtn->setEnabled(true);
@@ -901,6 +904,26 @@ void RelayDock::onGoLiveClicked()
     // We start m_launchTimeout in onGpuProvisioned once the pod exists.
     m_api->provisionGpu();
     render(m_lastGpuInfo);
+}
+
+// Dispatcher for the single main button: Go Live | Cancel | Stop Stream.
+void RelayDock::onMainBtnClicked()
+{
+    if (m_shuttingDown) return;
+
+    if (m_autoLaunching) {
+        // Cancel: abort the in-flight provision request and destroy any pod
+        // that was already created before we gave up.
+        m_autoLaunching = false;
+        if (m_launchTimeout) m_launchTimeout->stop();
+        m_api->cancelProvision();
+        m_api->destroyGpu();   // no-op if pod never got created
+        setStatus("Cancelled", C_IDLE);
+        render(m_lastGpuInfo);
+        return;
+    }
+
+    onGoLiveClicked();
 }
 
 void RelayDock::setStatus(const QString &text, const QString &color)

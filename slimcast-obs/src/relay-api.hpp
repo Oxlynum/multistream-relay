@@ -63,6 +63,7 @@ public:
     // GPU lifecycle.
     void fetchGpuStatus();
     void provisionGpu();
+    void cancelProvision();  // abort in-flight provision request (then destroyGpu)
     void destroyGpu();
     void confirmSession();   // "Yes, still streaming" — extends the 12h deadline
 
@@ -86,6 +87,8 @@ signals:
 private:
     QNetworkAccessManager *m_nam;
     QString m_apiKey;
+
+    QNetworkReply *m_provisionReply = nullptr;  // tracked so cancelProvision() can abort it
 
     // ── Device-link (PKCE) state ──────────────────────────────────────────────
     QTcpServer *m_linkServer = nullptr;

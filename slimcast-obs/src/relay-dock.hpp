@@ -55,6 +55,7 @@ private slots:
     void onBitrateReleased();
     void onConfirmClicked();
     void onGoLiveClicked();
+    void onMainBtnClicked();   // dispatches: Go Live | Cancel | Stop Stream
 
 private:
     void buildUi();

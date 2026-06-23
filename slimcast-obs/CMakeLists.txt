@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.26)
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/common/bootstrap.cmake" NO_POLICY_SCOPE)
 
-project(slimcast-obs VERSION 2.8.3 LANGUAGES CXX)
+project(slimcast-obs VERSION 2.8.4 LANGUAGES CXX)
 
 if(APPLE)
     include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/macos/buildspec.cmake")

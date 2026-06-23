@@ -105,9 +105,16 @@ void RelayApi::provisionGpu()
     req.setRawHeader("Authorization", ("Bearer " + m_apiKey).toUtf8());
     req.setTransferTimeout(180000);   // 3 min for broker + RunPod boot
 
-    QNetworkReply *reply = m_nam->post(req, QByteArray("{}"));
-    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+    m_provisionReply = m_nam->post(req, QByteArray("{}"));
+    connect(m_provisionReply, &QNetworkReply::finished, this, [this]() {
+        QNetworkReply *reply = m_provisionReply;
+        m_provisionReply = nullptr;
+        if (!reply) return;
         reply->deleteLater();
+
+        // Aborted by cancelProvision() — no error popup, dock handles UI reset.
+        if (reply->error() == QNetworkReply::OperationCanceledError) return;
+
         const QByteArray data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
             const auto obj = QJsonDocument::fromJson(data).object();
@@ -122,6 +129,14 @@ void RelayApi::provisionGpu()
         }
         emit gpuProvisioned();
     });
+}
+
+void RelayApi::cancelProvision()
+{
+    if (m_provisionReply) {
+        m_provisionReply->abort();
+        m_provisionReply = nullptr;
+    }
 }
 
 void RelayApi::destroyGpu()
