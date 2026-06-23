@@ -52,7 +52,7 @@ export async function createPod(params: {
   const pod = await request<RunPodPod>('POST', '/pods', {
     name: params.name,
     imageName: params.imageTag,
-    gpuTypeId: params.gpuTypeId,
+    gpuTypeIds: [params.gpuTypeId],
     cloudType: params.cloudType ?? 'COMMUNITY',
     containerDiskInGb: 15,
     // No persistent volume needed — the pod is ephemeral (destroyed on stream stop).
