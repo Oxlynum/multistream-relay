@@ -11,9 +11,6 @@
 #include <QPushButton>
 #include "relay-api.hpp"
 
-class QAbstractButton;
-class QEvent;
-
 // One channel control row: live dot + name + cost sub-line + on/off toggle.
 struct ChannelRow {
     QWidget   *container = nullptr;
@@ -33,10 +30,6 @@ class RelayDock : public QDockWidget {
 
 public:
     explicit RelayDock(QWidget *parent = nullptr);
-
-protected:
-    // Intercept clicks on OBS's native Start/Stop button → route to Go Live.
-    bool eventFilter(QObject *obj, QEvent *event) override;
 
 public slots:
     // Invoked via QMetaObject::invokeMethod from OBS frontend-event callback.
@@ -70,7 +63,6 @@ private:
     void loadSettings();
     void saveSettings();
     void enterActive();   // switch to the active page + start polling
-    void installObsButtonHook();   // hook OBS's native Start button → Go Live
     void abortLaunch(const QString &message);   // give up + clean up a failed Go Live
     void applyObsStreamUrl(const QString &server, const QString &key);
     void setSlimcastService(const QString &server, const QString &key);
@@ -100,8 +92,7 @@ private:
     QLabel         *m_statusLabel  = nullptr;
     QLabel         *m_creditsLabel = nullptr;
     QLabel         *m_ingestLabel  = nullptr;
-    QAbstractButton *m_obsStreamButton = nullptr;  // OBS's native Start button (redirected)
-    int             m_hookAttempts = 0;
+    QPushButton    *m_goLiveBtn    = nullptr;   // dock-driven Go Live / Stop
     QMap<QString, ChannelRow> m_channels;
     QCheckBox      *m_lockCheck    = nullptr;
     QSlider        *m_landscapeSlider = nullptr;

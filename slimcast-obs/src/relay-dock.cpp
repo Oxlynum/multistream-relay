@@ -49,6 +49,15 @@ static const QMap<QString, QString> PLATFORM_LABELS = {
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 
+// Stylesheet for the Go Live / Stop button, coloured by the given accent.
+static QString goLiveStyle(const QString &bg)
+{
+    return QString(
+        "QPushButton{background:%1; color:#0b0e14; font-weight:700; font-size:13px;"
+        " border:none; border-radius:8px; padding:8px;}"
+        "QPushButton:disabled{background:#2a313d; color:#6b7280;}").arg(bg);
+}
+
 static QString formatCredits(int seconds)
 {
     if (seconds <= 0) return QStringLiteral("0m");
@@ -98,10 +107,6 @@ RelayDock::RelayDock(QWidget *parent)
     connect(m_launchTimeout, &QTimer::timeout, this, [this]() {
         abortLaunch("Couldn't get a server online in time. Please try Go Live again.");
     });
-
-    // Route OBS's native Start button → our Go Live flow (self-retries until the
-    // button exists).
-    installObsButtonHook();
 
     if (m_api->hasApiKey()) {
         enterActive();
@@ -229,6 +234,14 @@ QWidget *RelayDock::buildActivePage()
     m_ingestLabel = new QLabel("—");
     m_ingestLabel->setStyleSheet(QString("color:%1; font-size:11px").arg(C_FAINT));
     ly->addWidget(m_ingestLabel);
+
+    // Primary control. Provisions the pod → waits until reachable → fills OBS's
+    // URL → starts OBS. We never touch OBS's own Start button (coexists cleanly
+    // with StreamElements and any other control-panel plugin).
+    m_goLiveBtn = new QPushButton("Go Live");
+    m_goLiveBtn->setMinimumHeight(34);
+    ly->addWidget(m_goLiveBtn);
+    connect(m_goLiveBtn, &QPushButton::clicked, this, &RelayDock::onGoLiveClicked);
 
     // ── "Still streaming?" confirmation banner (hidden until the 12h window) ──
     m_confirmBanner = new QWidget;
@@ -480,28 +493,12 @@ void RelayDock::onDeviceLinkFailed(QString message)
 
 void RelayDock::onObsStreamingStarting()
 {
-    // This fires from our own programmatic start (the Go Live flow) — let it run.
-    if (m_resumingStream) {
+    // Our Go Live flow calls obs_frontend_streaming_start() once the pod is ready
+    // — that fires this; just clear the guard and let it proceed. We deliberately
+    // do NOT touch OBS's own Start button, so it coexists with StreamElements and
+    // any other control-panel plugin. (Use the SlimCast Go Live button to stream.)
+    if (m_resumingStream)
         m_resumingStream = false;
-        return;
-    }
-    if (m_autoLaunching || m_probing) return;   // mid-launch, ignore
-
-    // Fallback: a native start that bypassed the button redirect (e.g. a stream
-    // hotkey, or the OBS button hook wasn't found). Don't let OBS connect to a
-    // non-SlimCast target — abort and run the Go Live flow instead.
-    if (!m_api->hasApiKey()) {
-        obs_frontend_streaming_stop();
-        m_totalLabel->setText("Connect your SlimCast account first.");
-        return;
-    }
-    m_autoLaunching = true;                 // set before stop (absorbs reentrant STOPPED)
-    obs_frontend_streaming_stop();
-    m_shuttingDown  = false;
-    m_launchStartMs = QDateTime::currentMSecsSinceEpoch();
-    if (m_launchTimeout) m_launchTimeout->start();
-    m_api->provisionGpu();
-    render(m_lastGpuInfo);
 }
 
 void RelayDock::onObsStreamingStopped()
@@ -641,6 +638,25 @@ void RelayDock::render(const GpuInfo &info)
         m_launchStartMs = 0;
     }
     setStatus(text, color);
+
+    // ── Go Live / Stop button ────────────────────────────────────────────────
+    if (m_goLiveBtn) {
+        const bool busy = m_autoLaunching || m_probing || m_shuttingDown;
+        const bool live = info.status == "running" || info.streaming;
+        if (busy) {
+            m_goLiveBtn->setEnabled(false);
+            m_goLiveBtn->setText(m_shuttingDown ? "Stopping…" : "Starting…");
+            m_goLiveBtn->setStyleSheet(goLiveStyle(C_WARN));
+        } else if (live) {
+            m_goLiveBtn->setEnabled(true);
+            m_goLiveBtn->setText("Stop streaming");
+            m_goLiveBtn->setStyleSheet(goLiveStyle(C_ERR));
+        } else {
+            m_goLiveBtn->setEnabled(true);
+            m_goLiveBtn->setText("Go Live");
+            m_goLiveBtn->setStyleSheet(goLiveStyle(C_LIVE));
+        }
+    }
 
     m_creditsLabel->setText(formatCredits(info.creditsSeconds));
     const QString cColor = info.creditsSeconds <= 0 ? C_ERR
@@ -839,57 +855,6 @@ void RelayDock::abortLaunch(const QString &message)
     if (m_totalLabel) m_totalLabel->setText(message);
 }
 
-// Find OBS's Start button. Normally it's under the main window, but the Controls
-// dock can be floated, so also scan all top-level widgets.
-static QAbstractButton *findObsStreamButton()
-{
-    if (auto *mw = static_cast<QWidget *>(obs_frontend_get_main_window()))
-        if (auto *b = mw->findChild<QAbstractButton *>("streamButton")) return b;
-    for (QWidget *w : QApplication::topLevelWidgets())
-        if (auto *b = w->findChild<QAbstractButton *>("streamButton")) return b;
-    return nullptr;
-}
-
-// Hook OBS's native Start/Stop button so clicking it runs our Go Live flow
-// instead of OBS's own start (which would try to connect before the pod exists).
-// OBS's UI may not be fully built when the plugin loads, so we retry.
-void RelayDock::installObsButtonHook()
-{
-    if (m_obsStreamButton) return;   // already hooked
-    if (auto *btn = findObsStreamButton()) {
-        m_obsStreamButton = btn;
-        btn->installEventFilter(this);
-        blog(LOG_INFO, "[slimcast] hooked OBS Start button → Go Live");
-        return;
-    }
-    if (m_hookAttempts++ < 20) {
-        QTimer::singleShot(1000, this, &RelayDock::installObsButtonHook);
-    } else {
-        blog(LOG_WARNING, "[slimcast] could not find OBS Start button to hook — "
-                          "native Start will fall back to provisioning");
-    }
-}
-
-bool RelayDock::eventFilter(QObject *obj, QEvent *event)
-{
-    if (obj == m_obsStreamButton) {
-        const QEvent::Type t = event->type();
-        if (t == QEvent::MouseButtonPress || t == QEvent::MouseButtonRelease ||
-            t == QEvent::MouseButtonDblClick) {
-            if (t == QEvent::MouseButtonRelease)
-                QMetaObject::invokeMethod(this, "onGoLiveClicked", Qt::QueuedConnection);
-            return true;             // consume → OBS's own start/stop never fires
-        }
-        if (t == QEvent::KeyPress) {
-            const int k = static_cast<QKeyEvent *>(event)->key();
-            if (k == Qt::Key_Space || k == Qt::Key_Return || k == Qt::Key_Enter) {
-                QMetaObject::invokeMethod(this, "onGoLiveClicked", Qt::QueuedConnection);
-                return true;
-            }
-        }
-    }
-    return QDockWidget::eventFilter(obj, event);
-}
 
 void RelayDock::onPollTick()
 {
