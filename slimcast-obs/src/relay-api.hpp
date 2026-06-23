@@ -75,6 +75,7 @@ public:
 signals:
     void gpuStatusUpdated(GpuInfo info);
     void gpuProvisioned();
+    void gpuProvisionFailed(QString reason);   // broker found no capacity, etc.
     void gpuDestroyed();
     void platformsUpdated(QList<PlatformConfig> platforms);
     void encodeUpdated(EncodeConfig encode);

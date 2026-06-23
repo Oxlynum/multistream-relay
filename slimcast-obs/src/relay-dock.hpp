@@ -11,6 +11,9 @@
 #include <QPushButton>
 #include "relay-api.hpp"
 
+class QAbstractButton;
+class QEvent;
+
 // One channel control row: live dot + name + cost sub-line + on/off toggle.
 struct ChannelRow {
     QWidget   *container = nullptr;
@@ -31,6 +34,10 @@ class RelayDock : public QDockWidget {
 public:
     explicit RelayDock(QWidget *parent = nullptr);
 
+protected:
+    // Intercept clicks on OBS's native Start/Stop button → route to Go Live.
+    bool eventFilter(QObject *obj, QEvent *event) override;
+
 public slots:
     // Invoked via QMetaObject::invokeMethod from OBS frontend-event callback.
     void onObsStreamingStarting();
@@ -44,6 +51,7 @@ private slots:
     void onDeviceLinkFailed(QString message);
     void onGpuStatusUpdated(GpuInfo info);
     void onGpuProvisioned();
+    void onGpuProvisionFailed(QString reason);
     void onGpuDestroyed();
     void onPlatformsUpdated(QList<PlatformConfig> platforms);
     void onEncodeUpdated(EncodeConfig encode);
@@ -53,7 +61,7 @@ private slots:
     void onLockToggled(bool locked);
     void onBitrateReleased();
     void onConfirmClicked();
-    void onPointObsClicked();
+    void onGoLiveClicked();
 
 private:
     void buildUi();
@@ -62,9 +70,10 @@ private:
     void loadSettings();
     void saveSettings();
     void enterActive();   // switch to the active page + start polling
+    void installObsButtonHook();   // hook OBS's native Start button → Go Live
+    void abortLaunch(const QString &message);   // give up + clean up a failed Go Live
     void applyObsStreamUrl(const QString &server, const QString &key);
     void setSlimcastService(const QString &server, const QString &key);
-    void ensureCustomService();
 
     // Readiness probe: don't resume OBS until the pod's RTMP port is accepting.
     void startReadinessProbe(const QString &server, const QString &key);
@@ -75,7 +84,6 @@ private:
     void renderConfirm(const GpuInfo &info);
     void renderServiceBanner();
     QString obsServiceIssue();
-    void flashPointedFeedback();   // fading ✓ after Point-OBS
     void renderChannels();
     void updateIngestLabel();
     void updateTotals();
@@ -92,6 +100,7 @@ private:
     QLabel         *m_statusLabel  = nullptr;
     QLabel         *m_creditsLabel = nullptr;
     QLabel         *m_ingestLabel  = nullptr;
+    QAbstractButton *m_obsStreamButton = nullptr;  // OBS's native Start button (redirected)
     QMap<QString, ChannelRow> m_channels;
     QCheckBox      *m_lockCheck    = nullptr;
     QSlider        *m_landscapeSlider = nullptr;
@@ -103,17 +112,18 @@ private:
     QWidget        *m_confirmBanner = nullptr;
     QLabel         *m_confirmLabel  = nullptr;
     QPushButton    *m_confirmBtn    = nullptr;
-    QPushButton    *m_serviceWarn   = nullptr;   // red "⚠" (hover/click): OBS not pointed at SlimCast
-    QPushButton    *m_pointObsBtn   = nullptr;   // manual "point OBS at SlimCast"
-    QLabel         *m_pointObsCheck = nullptr;   // fading "✓" confirmation
+    QPushButton    *m_serviceWarn   = nullptr;   // red "⚠" (hover/click): OBS drifted off SlimCast
 
     // ── Internal state ─────────────────────────────────────────────────────
     RelayApi *m_api;
     QTimer   *m_pollTimer;
+    QTimer   *m_launchTimeout = nullptr;   // overall Go Live timeout
 
     bool m_autoLaunching  = false;
     bool m_resumingStream = false;
     bool m_probing        = false;   // readiness probe in flight
+    bool m_shuttingDown   = false;   // stop/destroy in progress
+    qint64 m_launchStartMs = 0;      // when Go Live was pressed (for elapsed time)
     QString m_probeServer;
     QString m_probeKey;
     int  m_probeAttempts  = 0;

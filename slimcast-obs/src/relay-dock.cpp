@@ -22,6 +22,10 @@
 #include <QTcpSocket>
 #include <QUrl>
 #include <QTimer>
+#include <QEvent>
+#include <QKeyEvent>
+#include <QMainWindow>
+#include <QAbstractButton>
 #include <cmath>
 #include <algorithm>
 #include <cstring>
@@ -38,11 +42,6 @@ static const QString C_FAINT = QStringLiteral("#6b7280");
 // SlimCast fans out to. (Facebook was dropped: its low cap dragged the shared
 // landscape encode down.)
 static const QStringList PLATFORM_NAMES = {"twitch", "kick", "youtube", "tiktok"};
-
-// Placeholder so OBS will allow Start before a pod exists (OBS rejects an empty
-// server). Never actually streamed to — the start is aborted and re-driven to
-// the real pod address once it boots.
-static const QString PLACEHOLDER_SERVER = QStringLiteral("rtmp://127.0.0.1:1935");
 static const QMap<QString, QString> PLATFORM_LABELS = {
     {"twitch",  "Twitch"}, {"kick", "Kick"}, {"youtube", "YouTube"}, {"tiktok", "TikTok"},
 };
@@ -77,17 +76,32 @@ RelayDock::RelayDock(QWidget *parent)
     buildUi();
     loadSettings();
 
-    connect(m_api, &RelayApi::gpuStatusUpdated, this, &RelayDock::onGpuStatusUpdated);
-    connect(m_api, &RelayApi::gpuProvisioned,   this, &RelayDock::onGpuProvisioned);
-    connect(m_api, &RelayApi::gpuDestroyed,     this, &RelayDock::onGpuDestroyed);
-    connect(m_api, &RelayApi::platformsUpdated, this, &RelayDock::onPlatformsUpdated);
-    connect(m_api, &RelayApi::encodeUpdated,    this, &RelayDock::onEncodeUpdated);
-    connect(m_api, &RelayApi::networkError,     this, &RelayDock::onNetworkError);
-    connect(m_api, &RelayApi::deviceLinked,     this, &RelayDock::onDeviceLinked);
-    connect(m_api, &RelayApi::deviceLinkFailed, this, &RelayDock::onDeviceLinkFailed);
+    connect(m_api, &RelayApi::gpuStatusUpdated,  this, &RelayDock::onGpuStatusUpdated);
+    connect(m_api, &RelayApi::gpuProvisioned,    this, &RelayDock::onGpuProvisioned);
+    connect(m_api, &RelayApi::gpuProvisionFailed, this, &RelayDock::onGpuProvisionFailed);
+    connect(m_api, &RelayApi::gpuDestroyed,      this, &RelayDock::onGpuDestroyed);
+    connect(m_api, &RelayApi::platformsUpdated,  this, &RelayDock::onPlatformsUpdated);
+    connect(m_api, &RelayApi::encodeUpdated,     this, &RelayDock::onEncodeUpdated);
+    connect(m_api, &RelayApi::networkError,      this, &RelayDock::onNetworkError);
+    connect(m_api, &RelayApi::deviceLinked,      this, &RelayDock::onDeviceLinked);
+    connect(m_api, &RelayApi::deviceLinkFailed,  this, &RelayDock::onDeviceLinkFailed);
 
     m_pollTimer->setInterval(5000);
     connect(m_pollTimer, &QTimer::timeout, this, &RelayDock::onPollTick);
+
+    // Overall Go Live timeout: provisioning (broker search + boot) + connect.
+    // If we don't reach Live within this, we give up and clean up.
+    m_launchTimeout = new QTimer(this);
+    m_launchTimeout->setSingleShot(true);
+    m_launchTimeout->setInterval(120000);   // 2 min
+    connect(m_launchTimeout, &QTimer::timeout, this, [this]() {
+        abortLaunch("Couldn't get a server online in time. Please try Go Live again.");
+    });
+
+    // Route OBS's native Start button → our Go Live flow. Retry once in case
+    // OBS's UI isn't fully built yet when the plugin loads.
+    installObsButtonHook();
+    QTimer::singleShot(1500, this, &RelayDock::installObsButtonHook);
 
     if (m_api->hasApiKey()) {
         enterActive();
@@ -215,24 +229,6 @@ QWidget *RelayDock::buildActivePage()
     m_ingestLabel = new QLabel("—");
     m_ingestLabel->setStyleSheet(QString("color:%1; font-size:11px").arg(C_FAINT));
     ly->addWidget(m_ingestLabel);
-
-    // Manual trigger: point OBS's stream output at SlimCast on demand (it also
-    // happens automatically on Start Streaming).
-    m_pointObsBtn = new QPushButton("Point OBS at SlimCast");
-    m_pointObsBtn->setStyleSheet(
-        "QPushButton{background:#1f2a44; color:#cfe0ff; border:1px solid #34507f; "
-        "border-radius:6px; padding:7px; font-size:12px;}"
-        "QPushButton:hover{background:#26344f;}"
-        "QPushButton:disabled{color:#5b6577; border-color:#2a2f3a;}");
-    ly->addWidget(m_pointObsBtn);
-    connect(m_pointObsBtn, &QPushButton::clicked, this, &RelayDock::onPointObsClicked);
-
-    // Fading "✓" shown briefly after the button is pressed.
-    m_pointObsCheck = new QLabel("✓ Pointed at SlimCast");
-    m_pointObsCheck->setAlignment(Qt::AlignCenter);
-    m_pointObsCheck->setStyleSheet("color:#5fd28a; font-size:11px; font-weight:600;");
-    m_pointObsCheck->setVisible(false);
-    ly->addWidget(m_pointObsCheck);
 
     // ── "Still streaming?" confirmation banner (hidden until the 12h window) ──
     m_confirmBanner = new QWidget;
@@ -415,20 +411,6 @@ void RelayDock::enterActive()
 {
     showSetup(false);
     setStatus("Connecting…", C_WARN);
-
-    // If OBS is stuck on a Custom service with an EMPTY server (e.g. left over
-    // from a prior session), OBS would refuse Start ("stream URL is missing").
-    // Drop in the placeholder so Start works; we leave presets (Twitch/YouTube)
-    // alone — those have a server and our STREAMING_STARTING hook handles them.
-    obs_service_t *svc = obs_frontend_get_streaming_service();
-    const char *type = svc ? obs_service_get_type(svc) : nullptr;
-    if (type && strcmp(type, "rtmp_custom") == 0) {
-        obs_data_t *s = obs_service_get_settings(svc);
-        const QString server = QString::fromUtf8(obs_data_get_string(s, "server"));
-        obs_data_release(s);
-        if (server.isEmpty()) setSlimcastService(PLACEHOLDER_SERVER, "slimcast");
-    }
-
     m_pollTimer->start();
     m_api->fetchGpuStatus();
     m_api->fetchPlatforms();
@@ -498,29 +480,28 @@ void RelayDock::onDeviceLinkFailed(QString message)
 
 void RelayDock::onObsStreamingStarting()
 {
-    if (!m_api->hasApiKey()) {
-        m_totalLabel->setText("Connect your SlimCast API key first.");
-        return;
-    }
+    // This fires from our own programmatic start (the Go Live flow) — let it run.
     if (m_resumingStream) {
         m_resumingStream = false;
         return;
     }
-    if (m_autoLaunching) return;
+    if (m_autoLaunching || m_probing) return;   // mid-launch, ignore
 
-    // Pod already running (e.g. starting a second time this session) — it's
-    // already accepting, so just point OBS at it and let the start proceed.
-    if (m_lastGpuInfo.status == "running" && !m_lastGpuInfo.rtmpUrl.isEmpty()) {
-        applyObsStreamUrl(m_lastGpuInfo.rtmpUrl, m_lastGpuInfo.ingestKey);
+    // Fallback: a native start that bypassed the button redirect (e.g. a stream
+    // hotkey, or the OBS button hook wasn't found). Don't let OBS connect to a
+    // non-SlimCast target — abort and run the Go Live flow instead.
+    if (!m_api->hasApiKey()) {
+        obs_frontend_streaming_stop();
+        m_totalLabel->setText("Connect your SlimCast account first.");
         return;
     }
-
-    // Set the flag BEFORE stopping: the synchronous stop re-enters our event
-    // callback with STREAMING_STOPPED, which must be ignored mid-launch.
-    m_autoLaunching = true;
+    m_autoLaunching = true;                 // set before stop (absorbs reentrant STOPPED)
     obs_frontend_streaming_stop();
-    setStatus("Starting…", C_WARN);
+    m_shuttingDown  = false;
+    m_launchStartMs = QDateTime::currentMSecsSinceEpoch();
+    if (m_launchTimeout) m_launchTimeout->start();
     m_api->provisionGpu();
+    render(m_lastGpuInfo);
 }
 
 void RelayDock::onObsStreamingStopped()
@@ -577,6 +558,7 @@ void RelayDock::probeOnce()
 
 void RelayDock::onProbeSuccess()
 {
+    if (m_launchTimeout) m_launchTimeout->stop();
     m_probing        = false;
     m_autoLaunching  = false;
     m_resumingStream = true;
@@ -631,12 +613,34 @@ void RelayDock::onGpuStatusUpdated(GpuInfo info)
 
 void RelayDock::render(const GpuInfo &info)
 {
-    if (info.status == "provisioning")
-        setStatus("Starting…", C_WARN);
-    else if (info.status == "running")
-        setStatus(info.streaming ? "Live" : "Ready", C_LIVE);
-    else
-        setStatus("Idle", C_IDLE);
+    // Clear the shutting-down flag once the pod is actually gone.
+    if (m_shuttingDown && info.status != "running" && !obs_frontend_streaming_active())
+        m_shuttingDown = false;
+
+    // ── Lifecycle status (green = live/ready, yellow = working, red = problem) ──
+    const int elapsed = m_launchStartMs
+        ? int((QDateTime::currentMSecsSinceEpoch() - m_launchStartMs) / 1000) : 0;
+    QString text, color;
+    if (m_shuttingDown) {
+        text = "Shutting down…";                       color = C_ERR;
+    } else if (m_probing) {
+        text = QString("Connecting to server… %1s").arg(elapsed);  color = C_WARN;
+    } else if (m_autoLaunching && info.status != "running") {
+        if (info.ip.isEmpty())
+            text = QString("Searching for a GPU… %1s").arg(elapsed);
+        else
+            text = QString("Booting server… %1s").arg(elapsed);
+        color = C_WARN;
+    } else if (info.status == "provisioning") {
+        text = "Starting up…";                         color = C_WARN;
+    } else if (info.status == "running") {
+        text  = info.streaming ? "Live" : "Ready";     color = C_LIVE;
+        m_launchStartMs = 0;                            // startup finished
+    } else {
+        text = "Idle";                                 color = C_IDLE;
+        m_launchStartMs = 0;
+    }
+    setStatus(text, color);
 
     m_creditsLabel->setText(formatCredits(info.creditsSeconds));
     const QString cColor = info.creditsSeconds <= 0 ? C_ERR
@@ -815,6 +819,60 @@ void RelayDock::onGpuDestroyed()
     render(blank);
 }
 
+void RelayDock::onGpuProvisionFailed(QString reason)
+{
+    // Broker found no capacity under the price ceiling, or the call failed.
+    const QString msg = reason.contains("capacity", Qt::CaseInsensitive)
+        ? "No GPU available under the price cap right now — please try again shortly."
+        : ("Couldn't start a server: " + reason);
+    abortLaunch(msg);
+}
+
+void RelayDock::abortLaunch(const QString &message)
+{
+    if (m_launchTimeout) m_launchTimeout->stop();
+    m_autoLaunching = false;
+    m_probing       = false;
+    m_launchStartMs = 0;
+    m_api->destroyGpu();        // clean up any half-provisioned pod (idempotent)
+    setStatus("Couldn't start", C_ERR);
+    if (m_totalLabel) m_totalLabel->setText(message);
+}
+
+// Hook OBS's native Start/Stop button so clicking it runs our Go Live flow
+// instead of OBS's own start (which would try to connect before the pod exists).
+void RelayDock::installObsButtonHook()
+{
+    if (m_obsStreamButton) return;   // already hooked
+    auto *mw = static_cast<QMainWindow *>(obs_frontend_get_main_window());
+    if (!mw) return;
+    auto *btn = mw->findChild<QAbstractButton *>("streamButton");
+    if (!btn) return;                // OBS changed it → degrade gracefully
+    m_obsStreamButton = btn;
+    btn->installEventFilter(this);
+}
+
+bool RelayDock::eventFilter(QObject *obj, QEvent *event)
+{
+    if (obj == m_obsStreamButton) {
+        const QEvent::Type t = event->type();
+        if (t == QEvent::MouseButtonPress || t == QEvent::MouseButtonRelease ||
+            t == QEvent::MouseButtonDblClick) {
+            if (t == QEvent::MouseButtonRelease)
+                QMetaObject::invokeMethod(this, "onGoLiveClicked", Qt::QueuedConnection);
+            return true;             // consume → OBS's own start/stop never fires
+        }
+        if (t == QEvent::KeyPress) {
+            const int k = static_cast<QKeyEvent *>(event)->key();
+            if (k == Qt::Key_Space || k == Qt::Key_Return || k == Qt::Key_Enter) {
+                QMetaObject::invokeMethod(this, "onGoLiveClicked", Qt::QueuedConnection);
+                return true;
+            }
+        }
+    }
+    return QDockWidget::eventFilter(obj, event);
+}
+
 void RelayDock::onPollTick()
 {
     if (!m_api->hasApiKey()) return;
@@ -862,51 +920,24 @@ void RelayDock::applyObsStreamUrl(const QString &server, const QString &key)
     renderServiceBanner();
 }
 
-// No pod yet (no server address exists). At least flip OBS off a Twitch/preset
-// onto Custom so it's ready; the real server fills in on Start. If it's already
-// Custom we leave it alone (don't wipe a server that may already be set).
-void RelayDock::ensureCustomService()
-{
-    // OBS refuses to start with an empty server ("stream URL is missing"), and
-    // we need it to start so our STREAMING_STARTING hook can provision. So set a
-    // placeholder server (never actually connected to — the start is aborted and
-    // re-driven to the real pod once it boots). A non-empty server is the point.
-    obs_service_t *svc = obs_frontend_get_streaming_service();
-    const char *type = svc ? obs_service_get_type(svc) : nullptr;
-    obs_data_t *settings = svc ? obs_service_get_settings(svc) : nullptr;
-    const QString curServer = settings
-        ? QString::fromUtf8(obs_data_get_string(settings, "server")) : QString();
-    if (settings) obs_data_release(settings);
-
-    // Already Custom with some server → leave it (don't stomp a real/placeholder one).
-    if (type && strcmp(type, "rtmp_custom") == 0 && !curServer.isEmpty()) return;
-
-    setSlimcastService(PLACEHOLDER_SERVER, "slimcast");
-}
-
-// Returns a warning if OBS's stream output isn't pointed at SlimCast, else "".
+// Returns a warning if, while a pod is live, OBS's output drifted off the
+// SlimCast server/key (e.g. user changed it mid-stream). Idle → nothing to warn
+// (Go Live configures everything itself).
 QString RelayDock::obsServiceIssue()
 {
+    if (m_lastGpuInfo.status != "running" || m_lastGpuInfo.rtmpUrl.isEmpty())
+        return "";
     obs_service_t *svc = obs_frontend_get_streaming_service();  // borrowed
     const char *type = svc ? obs_service_get_type(svc) : nullptr;
-    if (!type || strcmp(type, "rtmp_custom") != 0) {
-        return "OBS isn't pointed at SlimCast. Set Service to “Custom” — or just "
-               "press “Point OBS at SlimCast” (it’s also done automatically when "
-               "you Start Streaming).";
-    }
-    // Custom: while a pod is live, verify the server/key actually match it.
-    if (m_lastGpuInfo.status == "running" && !m_lastGpuInfo.rtmpUrl.isEmpty()) {
-        obs_data_t *s = obs_service_get_settings(svc);
-        const QString curServer = QString::fromUtf8(obs_data_get_string(s, "server"));
-        const QString curKey = QString::fromUtf8(obs_data_get_string(s, "key"));
-        obs_data_release(s);
-        if (curKey != m_lastGpuInfo.ingestKey)
-            return "Wrong stream key in OBS for SlimCast. Press “Point OBS at "
-                   "SlimCast” to fix it.";
-        if (curServer != m_lastGpuInfo.rtmpUrl)
-            return "OBS isn’t pointed at your current SlimCast server. Press "
-                   "“Point OBS at SlimCast” to fix it.";
-    }
+    if (!type || strcmp(type, "rtmp_custom") != 0)
+        return "OBS's stream output isn't on SlimCast. Stop and press Go Live again.";
+    obs_data_t *s = obs_service_get_settings(svc);
+    const QString curServer = QString::fromUtf8(obs_data_get_string(s, "server"));
+    const QString curKey = QString::fromUtf8(obs_data_get_string(s, "key"));
+    obs_data_release(s);
+    if (curKey != m_lastGpuInfo.ingestKey || curServer != m_lastGpuInfo.rtmpUrl)
+        return "OBS isn't pointed at your current SlimCast server. Stop and press "
+               "Go Live again.";
     return "";
 }
 
@@ -923,36 +954,30 @@ void RelayDock::renderServiceBanner()
     m_serviceWarn->setVisible(true);
 }
 
-void RelayDock::onPointObsClicked()
+// The single start/stop control. Idle → provision a pod; the existing
+// status-poll → readiness-probe → resume flow fills the real URL and starts OBS.
+// Live → stop OBS (which tears the pod down). This is the ONLY start path, so
+// OBS never has to connect before the pod/URL exist.
+void RelayDock::onGoLiveClicked()
 {
-    const bool podLive = m_lastGpuInfo.status == "running" && !m_lastGpuInfo.rtmpUrl.isEmpty();
-    if (podLive) {
-        applyObsStreamUrl(m_lastGpuInfo.rtmpUrl, m_lastGpuInfo.ingestKey);
-    } else {
-        ensureCustomService();                       // flip to Custom; server+key fill on Start
+    if (m_autoLaunching || m_probing) return;   // already starting
+
+    const bool live = obs_frontend_streaming_active() || m_lastGpuInfo.status == "running";
+    if (live) {
+        if (m_launchTimeout) m_launchTimeout->stop();
+        m_shuttingDown = true;
+        if (obs_frontend_streaming_active()) obs_frontend_streaming_stop();
+        else                                  m_api->destroyGpu();
+        render(m_lastGpuInfo);
+        return;
     }
-    // The warning "⚠" clears itself if the issue is resolved.
-    renderServiceBanner();
-    flashPointedFeedback();
-}
 
-void RelayDock::flashPointedFeedback()
-{
-    if (!m_pointObsCheck) return;
-    m_pointObsCheck->setVisible(true);
-
-    auto *fx = new QGraphicsOpacityEffect(m_pointObsCheck);
-    m_pointObsCheck->setGraphicsEffect(fx);
-    auto *anim = new QPropertyAnimation(fx, "opacity", this);
-    anim->setDuration(1500);
-    anim->setKeyValueAt(0.0, 1.0);
-    anim->setKeyValueAt(0.5, 1.0);   // hold briefly, then fade
-    anim->setKeyValueAt(1.0, 0.0);
-    connect(anim, &QPropertyAnimation::finished, m_pointObsCheck, [this]() {
-        m_pointObsCheck->setVisible(false);
-        m_pointObsCheck->setGraphicsEffect(nullptr);
-    });
-    anim->start(QAbstractAnimation::DeleteWhenStopped);
+    m_shuttingDown  = false;
+    m_autoLaunching = true;
+    m_launchStartMs = QDateTime::currentMSecsSinceEpoch();
+    if (m_launchTimeout) m_launchTimeout->start();
+    m_api->provisionGpu();
+    render(m_lastGpuInfo);
 }
 
 void RelayDock::setStatus(const QString &text, const QString &color)

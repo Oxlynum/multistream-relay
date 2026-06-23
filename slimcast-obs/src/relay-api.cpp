@@ -97,8 +97,25 @@ void RelayApi::fetchGpuStatus()
 
 void RelayApi::provisionGpu()
 {
-    dispatch(m_nam->post(makeRequest("/api/gpu/provision"), QByteArray("{}")),
-        [this](const QByteArray &) { emit gpuProvisioned(); });
+    // Provisioning includes the broker's capacity search + the pod boot, which
+    // can take ~45s — so this request needs a much longer timeout than the
+    // default. Success/failure is also surfaced so the dock can narrate it.
+    QNetworkRequest req(QUrl(BASE_URL + "/api/gpu/provision"));
+    req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+    req.setRawHeader("Authorization", ("Bearer " + m_apiKey).toUtf8());
+    req.setTransferTimeout(120000);
+
+    QNetworkReply *reply = m_nam->post(req, QByteArray("{}"));
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        const QByteArray data = reply->readAll();
+        if (reply->error() != QNetworkReply::NoError) {
+            const QString err = QJsonDocument::fromJson(data).object()["error"].toString();
+            emit gpuProvisionFailed(err.isEmpty() ? reply->errorString() : err);
+            return;
+        }
+        emit gpuProvisioned();
+    });
 }
 
 void RelayApi::destroyGpu()
