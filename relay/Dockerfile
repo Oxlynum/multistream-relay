@@ -2,7 +2,7 @@
 # Requires the NVIDIA container runtime at run time (RunPod provides this).
 FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
 
-ARG MEDIAMTX_VERSION=v1.9.3
+ARG MEDIAMTX_VERSION=v1.19.1
 ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \

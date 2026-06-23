@@ -34,9 +34,11 @@ import urllib.parse
 
 CONFIG_PATH = os.environ.get("RELAY_CONFIG", "config.json")
 # Loopback feed republished by MediaMTX. We pull over SRT (MPEG-TS), NOT RTSP:
-# MediaMTX's RTP/HEVC packetization mangles Apple VideoToolbox's temporal-layered
-# HEVC ("Illegal temporal ID in RTP/HEVC packet" -> dropped frames -> artifacts).
-# SRT carries the HEVC in MPEG-TS cleanly. Loopback SRT is lossless + low latency.
+# RTSP/RTP mangles Apple's temporal-layered HEVC ("Illegal temporal ID" →
+# dropped frames / artifacts). SRT carries HEVC cleanly.
+# Note: MediaMTX <v1.15.0 had a DTS extractor bug with Apple VT HEVC that closed
+# SRT connections ("DTS is not monotonically increasing"). Fixed in v1.15.0
+# (issue #4892). Dockerfile pins MediaMTX to v1.19.1+ which includes this fix.
 LOCAL_SOURCE = os.environ.get(
     "RELAY_SOURCE", "srt://127.0.0.1:8890?streamid=read:live"
 )
@@ -84,7 +86,6 @@ def _input_args(source: str) -> list[str]:
     if source.startswith("rtsp"):
         return ["-rtsp_transport", "tcp"]
     if source.startswith("srt"):
-        # tolerate brief loopback hiccups without exiting
         return ["-fflags", "+genpts"]
     return []
 

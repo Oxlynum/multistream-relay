@@ -26,8 +26,12 @@ rtspAddress: :8554
 # Only the ingest-key path is published, so the URL is effectively secret.
 hls: yes
 hlsAddress: :8888
-hlsAllowOrigin: '*'
+hlsAllowOrigins: ["*"]
 hlsAlwaysRemux: no   # only serve HLS when a publisher is active
+# fmp4 avoids Low-Latency HLS session tokens (LLHLS is the v1.19 default).
+# LLHLS requires a session cookie for sub-playlists; our stateless Vercel
+# proxy doesn't forward it, causing 401s on video1_stream.m3u8/audio2_stream.m3u8.
+hlsVariant: fmp4
 
 webrtc: no
 

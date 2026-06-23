@@ -29,8 +29,11 @@ import urllib.request
 import urllib.error
 
 # Per-pod secret ingest path (set by provision via SLIMCAST_INGEST_KEY). MediaMTX
-# accepts only this path and republishes it over the SRT loopback under the same
-# name, so the encoders must pull from it. RELAY_SOURCE has to be set BEFORE
+# accepts only this path and republishes it over the SRT loopback. Encoders pull
+# via SRT (MPEG-TS), NOT RTSP: RTP mangles Apple's temporal-layered HEVC.
+# MediaMTX <v1.15.0 had a DTS extractor bug with Apple VT HEVC that caused the
+# SRT muxer to close connections ("DTS is not monotonically increasing"). Fixed in
+# v1.15.0 (issue #4892). We now require v1.19.1+. RELAY_SOURCE must be set BEFORE
 # importing supervisor (it reads it at import time). Defaults to "live" locally.
 INGEST_KEY = (os.environ.get("SLIMCAST_INGEST_KEY", "live").strip() or "live")
 os.environ.setdefault("RELAY_SOURCE", f"srt://127.0.0.1:8890?streamid=read:{INGEST_KEY}")
@@ -231,7 +234,7 @@ def main() -> None:
 
         # ── Heartbeat ──────────────────────────────────────────────────────────
         statuses = sup.status()
-        streaming = any(s["state"] == "running" for s in statuses)
+        streaming = obs_connected or any(s["state"] == "running" for s in statuses)
         if streaming:
             last_active = time.time()
 

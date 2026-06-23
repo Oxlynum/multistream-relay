@@ -598,7 +598,7 @@ void RelayDock::render(const GpuInfo &info)
         ? int((QDateTime::currentMSecsSinceEpoch() - m_launchStartMs) / 1000) : 0;
     QString text, color;
     if (m_shuttingDown) {
-        text = "Shutting down…";                       color = C_ERR;
+        text = "Shutting down…";                         color = C_ERR;
     } else if (m_autoLaunching && info.status != "running") {
         if (info.ip.isEmpty())
             text = QString("Searching for a GPU… %1s").arg(elapsed);
@@ -606,16 +606,23 @@ void RelayDock::render(const GpuInfo &info)
             text = QString("Booting server… %1s").arg(elapsed);
         color = C_WARN;
     } else if (info.status == "provisioning") {
-        text = "Starting up…";                         color = C_WARN;
+        text = "Spinning up server…";                    color = C_WARN;
     } else if (info.status == "running") {
         if (info.streaming) {
-            text = "Live";             color = C_LIVE;
+            bool anyErr = false, anyRestart = false;
+            for (const QString &st : info.platformStates) {
+                if (st == "error")      anyErr     = true;
+                else if (st == "restarting") anyRestart = true;
+            }
+            if (anyErr)      { text = "Live · platform error";  color = C_ERR;  }
+            else if (anyRestart) { text = "Live · reconnecting…"; color = C_WARN; }
+            else             { text = "Live";                   color = C_LIVE; }
         } else {
-            text = "Waiting for OBS…"; color = C_WARN;
+            text = "Server ready · waiting for OBS";     color = C_WARN;
         }
-        m_launchStartMs = 0;                            // startup finished
+        m_launchStartMs = 0;                             // startup finished
     } else {
-        text = "Idle";                                 color = C_IDLE;
+        text = "Idle — not streaming";                   color = C_IDLE;
         m_launchStartMs = 0;
     }
     setStatus(text, color);
@@ -747,8 +754,9 @@ void RelayDock::renderChannels()
         const QString st = m_lastGpuInfo.platformStates.value(id);
         QString dotColor, liveText;
         if (st == "running")         { dotColor = C_LIVE; liveText = "live"; }
-        else if (st == "restarting") { dotColor = C_WARN; liveText = "restarting"; }
+        else if (st == "restarting") { dotColor = C_WARN; liveText = "reconnecting"; }
         else if (st == "error")      { dotColor = C_ERR;  liveText = "error"; }
+        else if (!st.isEmpty())      { dotColor = C_IDLE; liveText = "connecting…"; }
         else                         { dotColor = C_IDLE; liveText = "idle"; }
         row.dot->setStyleSheet(QString("color:%1").arg(dotColor));
 
