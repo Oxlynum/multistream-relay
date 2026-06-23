@@ -1,3 +1,18 @@
+import net from 'net'
+
+// TCP probe: verify the RTMP port is actually forwarding before we hand the
+// address to OBS. RunPod GraphQL reports the mapping before the tunnel is fully
+// wired up on community cloud; this catches broken port mappings and lets the
+// broker cascade to a different pod automatically.
+function probeTcp(host: string, port: number, timeoutMs = 8000): Promise<boolean> {
+  return new Promise(resolve => {
+    const socket = net.createConnection(port, host)
+    const timer = setTimeout(() => { socket.destroy(); resolve(false) }, timeoutMs)
+    socket.once('connect', () => { clearTimeout(timer); socket.destroy(); resolve(true) })
+    socket.once('error',   () => { clearTimeout(timer); resolve(false) })
+  })
+}
+
 // GPU availability broker.
 //
 // Instead of "give me an L4 in this DC → fail if dry", this generates a ranked
@@ -175,6 +190,19 @@ export async function provisionGpu(args: {
       bootAttempts++
       const addr = await waitForIp(provider, podId)
       if (addr) {
+        // Verify the RTMP port is actually reachable. RunPod community cloud
+        // reports port mappings in GraphQL before the TCP tunnel is live; a
+        // probe here catches broken forwarding and lets us cascade automatically.
+        const reachable = await probeTcp(addr.ip, addr.port)
+        if (!reachable) {
+          console.warn(`[broker] pod ${podId} RTMP ${addr.ip}:${addr.port} unreachable — tunnel failure, cascading`)
+          try { await provider.destroy(podId) } catch { /* best effort */ }
+          lastError = 'RTMP port unreachable (RunPod tunnel not set up)'
+          if (bootAttempts >= MAX_BOOT_ATTEMPTS) {
+            return { ok: false, attempts, error: 'too many failed boots' }
+          }
+          continue
+        }
         return {
           ok: true,
           provider: provider.name,
