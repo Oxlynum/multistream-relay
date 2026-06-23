@@ -173,21 +173,23 @@ export async function POST(request: Request) {
     )
   }
 
-  // Pod is up — fill in the claim row with the real provider details. (Keep the
-  // max_session_at the claim set, so the 12h confirm clock runs from claim time.)
+  // Pod is up — fill in the claim row with the real provider details. Do NOT
+  // touch status or last_seen_at here: if the agent already paired (it can race
+  // waitForIp by a few seconds when the image is cached), overwriting status back
+  // to 'provisioning' or clearing last_seen_at would permanently hide it from the
+  // dock's stale check and keep the dock stuck on "Booting server..." forever.
+  // The claim INSERT set status='provisioning'; the pair route flips it to 'running'.
   await supabase
     .from('gpu_instances')
     .update({
       provider_id: result.podId!,
       pod_key_hash: podKeyHash,
-      status: 'provisioning',
       ip_address: result.ip ?? null,
       ingest_port: result.port ?? null,
       ingest_key: ingestKey,
       provider: result.provider,
       gpu_type: result.gpuKey,
       datacenter: result.datacenter,
-      last_seen_at: null,
     })
     .eq('user_id', userId)
 
