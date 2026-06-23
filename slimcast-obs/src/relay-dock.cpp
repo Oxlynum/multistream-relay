@@ -26,6 +26,7 @@
 #include <QKeyEvent>
 #include <QMainWindow>
 #include <QAbstractButton>
+#include <QApplication>
 #include <cmath>
 #include <algorithm>
 #include <cstring>
@@ -98,10 +99,9 @@ RelayDock::RelayDock(QWidget *parent)
         abortLaunch("Couldn't get a server online in time. Please try Go Live again.");
     });
 
-    // Route OBS's native Start button → our Go Live flow. Retry once in case
-    // OBS's UI isn't fully built yet when the plugin loads.
+    // Route OBS's native Start button → our Go Live flow (self-retries until the
+    // button exists).
     installObsButtonHook();
-    QTimer::singleShot(1500, this, &RelayDock::installObsButtonHook);
 
     if (m_api->hasApiKey()) {
         enterActive();
@@ -839,17 +839,35 @@ void RelayDock::abortLaunch(const QString &message)
     if (m_totalLabel) m_totalLabel->setText(message);
 }
 
+// Find OBS's Start button. Normally it's under the main window, but the Controls
+// dock can be floated, so also scan all top-level widgets.
+static QAbstractButton *findObsStreamButton()
+{
+    if (auto *mw = static_cast<QWidget *>(obs_frontend_get_main_window()))
+        if (auto *b = mw->findChild<QAbstractButton *>("streamButton")) return b;
+    for (QWidget *w : QApplication::topLevelWidgets())
+        if (auto *b = w->findChild<QAbstractButton *>("streamButton")) return b;
+    return nullptr;
+}
+
 // Hook OBS's native Start/Stop button so clicking it runs our Go Live flow
 // instead of OBS's own start (which would try to connect before the pod exists).
+// OBS's UI may not be fully built when the plugin loads, so we retry.
 void RelayDock::installObsButtonHook()
 {
     if (m_obsStreamButton) return;   // already hooked
-    auto *mw = static_cast<QMainWindow *>(obs_frontend_get_main_window());
-    if (!mw) return;
-    auto *btn = mw->findChild<QAbstractButton *>("streamButton");
-    if (!btn) return;                // OBS changed it → degrade gracefully
-    m_obsStreamButton = btn;
-    btn->installEventFilter(this);
+    if (auto *btn = findObsStreamButton()) {
+        m_obsStreamButton = btn;
+        btn->installEventFilter(this);
+        blog(LOG_INFO, "[slimcast] hooked OBS Start button → Go Live");
+        return;
+    }
+    if (m_hookAttempts++ < 20) {
+        QTimer::singleShot(1000, this, &RelayDock::installObsButtonHook);
+    } else {
+        blog(LOG_WARNING, "[slimcast] could not find OBS Start button to hook — "
+                          "native Start will fall back to provisioning");
+    }
 }
 
 bool RelayDock::eventFilter(QObject *obj, QEvent *event)

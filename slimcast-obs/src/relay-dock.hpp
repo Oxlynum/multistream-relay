@@ -101,6 +101,7 @@ private:
     QLabel         *m_creditsLabel = nullptr;
     QLabel         *m_ingestLabel  = nullptr;
     QAbstractButton *m_obsStreamButton = nullptr;  // OBS's native Start button (redirected)
+    int             m_hookAttempts = 0;
     QMap<QString, ChannelRow> m_channels;
     QCheckBox      *m_lockCheck    = nullptr;
     QSlider        *m_landscapeSlider = nullptr;
