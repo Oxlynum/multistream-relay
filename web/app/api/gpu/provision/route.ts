@@ -32,24 +32,28 @@ export async function POST(request: Request) {
   // ── Payment gate: no pod may ever run without a card on file AND a way to
   // pay for it. This is the hard stop against "run pods without paying" and
   // against multi-account free-GPU abuse (a card is the anti-sybil signal). ──
-  const { data: gate } = await supabase
-    .from('profiles')
-    .select('stripe_payment_method_id, streaming_credits_seconds, auto_refill_enabled')
-    .eq('id', userId)
-    .single()
+  // DEV ONLY: SLIMCAST_DEV_SKIP_PAYMENT_GATE=1 bypasses this for testing before
+  // the Stripe webhook is wired up. MUST be unset before launch.
+  if (process.env.SLIMCAST_DEV_SKIP_PAYMENT_GATE !== '1') {
+    const { data: gate } = await supabase
+      .from('profiles')
+      .select('stripe_payment_method_id, streaming_credits_seconds, auto_refill_enabled')
+      .eq('id', userId)
+      .single()
 
-  if (!gate?.stripe_payment_method_id) {
-    return Response.json(
-      { error: 'payment_method_required', message: 'Add a payment method before streaming.' },
-      { status: 402 },
-    )
-  }
-  const credits = gate.streaming_credits_seconds ?? 0
-  if (credits <= 0 && !gate.auto_refill_enabled) {
-    return Response.json(
-      { error: 'out_of_credits', message: 'You are out of streaming time. Add credits or enable auto-refill.' },
-      { status: 402 },
-    )
+    if (!gate?.stripe_payment_method_id) {
+      return Response.json(
+        { error: 'payment_method_required', message: 'Add a payment method before streaming.' },
+        { status: 402 },
+      )
+    }
+    const credits = gate.streaming_credits_seconds ?? 0
+    if (credits <= 0 && !gate.auto_refill_enabled) {
+      return Response.json(
+        { error: 'out_of_credits', message: 'You are out of streaming time. Add credits or enable auto-refill.' },
+        { status: 402 },
+      )
+    }
   }
 
   // ── Atomic provisioning claim ──────────────────────────────────────────
