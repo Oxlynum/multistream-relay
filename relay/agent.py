@@ -6,9 +6,13 @@ Replaces run.sh / start.sh. Responsibilities:
   2. POST /api/agent/pair → register IP, receive initial config.
   3. Start MediaMTX subprocess (ingest + SRT loopback).
   4. Start uvicorn (FastAPI control panel, debug only).
-  5. Poll /api/agent/config every 10s → apply config changes via supervisor.
-  6. POST /api/agent/status → heartbeat with live stream state.
-  7. Handle stop commands in heartbeat response.
+  5. Poll /api/agent/config every 10s → store config; apply it once OBS connects.
+  6. Watch /tmp/obs_connected (written by hook.sh) to know when OBS connects/drops.
+     On connect  → immediately call sup.apply() so FFmpeg starts with a fresh retry
+                   rather than waiting out whatever backoff the runners are in.
+     On disconnect → call sup.schedule_stop() for the grace period.
+  7. POST /api/agent/status → heartbeat with live stream state.
+  8. Handle stop commands in heartbeat response.
 """
 
 from __future__ import annotations
@@ -17,7 +21,6 @@ import json
 import logging
 import os
 import signal
-import socket
 import subprocess
 import sys
 import time
@@ -37,23 +40,19 @@ from supervisor import Supervisor
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [agent] %(message)s")
 log = logging.getLogger("agent")
 
-API_KEY = os.environ.get("SLIMCAST_API_KEY", "")
-# Temporary dev/test domain — slimcast.com isn't owned yet. Provision passes the
-# real callback URL via SLIMCAST_VERCEL_URL; this default is only a fallback.
+API_KEY    = os.environ.get("SLIMCAST_API_KEY", "")
 VERCEL_URL = os.environ.get("SLIMCAST_VERCEL_URL", "https://slimcast-oxlynum.vercel.app")
 POLL_INTERVAL = int(os.environ.get("AGENT_POLL_INTERVAL", "10"))
 MEDIAMTX_CONFIG = os.environ.get("MEDIAMTX_CONFIG", "mediamtx.yml")
 
+# Flag file written by hook.sh when OBS publishes to MediaMTX (runOnReady).
+# Cleared when OBS drops (runOnNotReady). Agent uses this to start/stop the
+# supervisor in sync with OBS instead of starting at pod boot.
+OBS_FLAG = "/tmp/obs_connected"
+
 # ── Safety watchdogs ──────────────────────────────────────────────────────────
-# Consecutive failed heartbeats before we stop encoding (control plane is gone,
-# so the stream is unsupervised/unbilled — and the Vercel reaper will destroy
-# this pod once its heartbeat goes stale).
 HEARTBEAT_FAIL_LIMIT = int(os.environ.get("AGENT_HB_FAIL_LIMIT", "6"))   # ~60s
-# No active outputs this long → abandoned; ask Vercel to destroy this pod.
 IDLE_LIMIT_S = int(os.environ.get("AGENT_IDLE_LIMIT_S", str(5 * 60)))
-# NOTE: the 12h session cap is now a confirmable deadline owned by the server
-# (heartbeat returns command:'stop' at the deadline unless the user confirmed),
-# so the agent intentionally no longer self-terminates on elapsed session time.
 
 if not API_KEY:
     log.error("SLIMCAST_API_KEY is not set — cannot authenticate with Vercel.")
@@ -76,8 +75,6 @@ def _get_external_ip() -> str:
 
 
 def _api(method: str, path: str, body: dict | None = None, timeout: int = 10) -> dict | None:
-    """Returns the parsed JSON dict, or None if the call failed (so callers can
-    distinguish an unreachable control plane from an empty response)."""
     url = f"{VERCEL_URL}{path}"
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, headers=_headers(), method=method)
@@ -85,8 +82,6 @@ def _api(method: str, path: str, body: dict | None = None, timeout: int = 10) ->
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read())
     except urllib.error.HTTPError as e:
-        # Log status only — never the response body. Config/pair responses carry
-        # stream keys, and we don't want any of that reaching pod logs.
         log.warning("API %s %s → %d", method, path, e.code)
         return None
     except Exception as exc:
@@ -107,7 +102,6 @@ def _render_mediamtx_config() -> str:
 
 def start_mediamtx() -> subprocess.Popen:
     config = _render_mediamtx_config()
-    # Do NOT log INGEST_KEY — it's the publish secret.
     log.info("Starting MediaMTX (ingest path configured)…")
     proc = subprocess.Popen(["mediamtx", config])
     time.sleep(2)
@@ -135,7 +129,6 @@ def main() -> None:
     ip = _get_external_ip()
     log.info("External IP: %s", ip or "(unknown)")
 
-    # Pair with Vercel — register IP and receive initial config.
     log.info("Pairing with %s…", VERCEL_URL)
     pair_resp = {}
     for attempt in range(10):
@@ -154,16 +147,28 @@ def main() -> None:
     uvicorn_proc = start_uvicorn()
 
     sup = Supervisor()
-    initial_config = pair_resp.get("config", {})
-    if initial_config:
-        sup.apply(initial_config)
-        log.info("Applied initial config (%d outputs)", len(build_outputs(initial_config)))
 
+    # Store the latest config. We apply it when OBS connects, not at pod boot.
+    # Reason: starting FFmpeg before OBS publishes means it immediately fails the
+    # SRT loopback read and enters exponential backoff. If OBS connects while
+    # FFmpeg is in a 30s backoff window, it won't pick up the stream until the
+    # backoff expires — and the OBS plugin's 90s watchdog may fire first.
+    # Instead: watch the flag file hook.sh writes and start immediately on connect.
+    last_known_config: dict = pair_resp.get("config", {})
     last_config_hash = json.dumps(
-        {"outputs": initial_config.get("outputs", []),
-         "crop": initial_config.get("crop", {})},
+        {"outputs": last_known_config.get("outputs", []),
+         "crop": last_known_config.get("crop", {})},
         sort_keys=True,
     )
+
+    # Handle the case where the agent restarts mid-stream (OBS already connected).
+    prev_obs_connected = os.path.exists(OBS_FLAG)
+    if prev_obs_connected:
+        log.info("OBS already connected on startup — applying config immediately.")
+        if last_known_config:
+            sup.apply(last_known_config)
+    else:
+        log.info("Waiting for OBS to connect (watching %s).", OBS_FLAG)
 
     def shutdown(sig: int, _frame: object) -> None:
         log.info("Received signal %d — shutting down…", sig)
@@ -177,7 +182,7 @@ def main() -> None:
 
     streaming = False
     start_time = time.time()
-    last_active = start_time   # last time we had an active output
+    last_active = start_time
     hb_failures = 0
 
     while True:
@@ -186,17 +191,19 @@ def main() -> None:
             log.warning("MediaMTX exited — restarting…")
             mediamtx_proc = start_mediamtx()
 
-        # Poll config.
+        # ── Config poll ───────────────────────────────────────────────────────
         cfg_resp = _api("GET", "/api/agent/config")
         if cfg_resp:
             outputs = cfg_resp.get("outputs", [])
-            crop = cfg_resp.get("crop", {})
-            # Hash outputs + crop together so a framing change re-applies the
-            # portrait group (crop changes alter the FFmpeg command).
+            crop    = cfg_resp.get("crop", {})
             new_hash = json.dumps({"outputs": outputs, "crop": crop}, sort_keys=True)
             if new_hash != last_config_hash:
-                log.info("Config changed — reapplying.")
-                sup.apply({"outputs": outputs, "crop": crop})
+                last_known_config = {"outputs": outputs, "crop": crop}
+                if prev_obs_connected:
+                    log.info("Config changed — reapplying.")
+                    sup.apply(last_known_config)
+                else:
+                    log.info("Config changed — stored (OBS not connected yet).")
                 last_config_hash = new_hash
 
             credits_seconds = cfg_resp.get("credits_seconds", 0)
@@ -205,7 +212,24 @@ def main() -> None:
                 sup.stop_all()
                 streaming = False
 
-        # Send heartbeat.
+        # ── OBS connection state (hook.sh writes/clears /tmp/obs_connected) ──
+        obs_connected = os.path.exists(OBS_FLAG)
+        if obs_connected and not prev_obs_connected:
+            # OBS just connected → SRT loopback is now publishing. Start runners
+            # immediately (fresh start, bypasses any backoff from pre-connect retries).
+            log.info("OBS connected — starting encoders immediately.")
+            sup.cancel_pending_stop()
+            if last_known_config:
+                sup.apply(last_known_config)
+            last_active = time.time()   # reset idle timer
+        elif not obs_connected and prev_obs_connected:
+            # OBS disconnected → schedule a grace-period stop so a quick
+            # OBS reconnect cancels it without tearing down the encoders.
+            log.info("OBS disconnected — scheduling grace stop.")
+            sup.schedule_stop()
+        prev_obs_connected = obs_connected
+
+        # ── Heartbeat ──────────────────────────────────────────────────────────
         statuses = sup.status()
         streaming = any(s["state"] == "running" for s in statuses)
         if streaming:
@@ -217,12 +241,9 @@ def main() -> None:
         })
 
         if hb_resp is None:
-            # Control plane unreachable.
             hb_failures += 1
             log.warning("Heartbeat failed (%d/%d).", hb_failures, HEARTBEAT_FAIL_LIMIT)
             if hb_failures >= HEARTBEAT_FAIL_LIMIT and streaming:
-                # Never keep streaming unsupervised. The Vercel reaper destroys
-                # this pod once its heartbeat goes stale.
                 log.error("No control-plane contact — stopping outputs (safety).")
                 sup.stop_all()
                 streaming = False
@@ -239,19 +260,12 @@ def main() -> None:
                 if cfg_resp2:
                     sup.apply({"outputs": cfg_resp2.get("outputs", [])})
 
-        # ── Watchdogs: proactively request our own teardown ──────────────────
+        # ── Watchdogs ──────────────────────────────────────────────────────────
         idle_for = time.time() - last_active
         if idle_for > IDLE_LIMIT_S:
-            log.warning("Idle %ds (no active outputs) — requesting termination.", int(idle_for))
+            log.warning("Idle %ds — requesting termination.", int(idle_for))
             sup.stop_all()
             _api("POST", "/api/agent/terminate", {"reason": "idle"})
-
-        # The 12h session cap is now a *confirmable* deadline owned by the server:
-        # the heartbeat returns command:'stop' at the deadline if the user didn't
-        # confirm, and lets a confirmed stream continue. We deliberately do NOT
-        # self-terminate on elapsed time here, so a confirmed long stream isn't
-        # cut off. If the control plane goes silent, the heartbeat-fail watchdog
-        # above already stops outputs and the Vercel reaper destroys the pod.
 
         time.sleep(POLL_INTERVAL)
 
