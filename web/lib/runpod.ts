@@ -26,7 +26,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   })
   const text = await res.text()
   if (!res.ok) {
-    throw new Error(`RunPod ${method} ${path} → ${res.status}: ${text.slice(0, 300)}`)
+    throw new Error(`RunPod ${method} ${path} → ${res.status}: ${text.slice(0, 800)}`)
   }
   if (!text) return undefined as T   // e.g. DELETE returns empty
   try {
@@ -60,8 +60,9 @@ export async function createPod(params: {
     // handles stream keys and must never be reachable from the internet.
     ports: '1935/tcp',
     env: params.env,
-    // v1 REST API uses dataCenterId (singular string), not dataCenterIds[].
-    ...(params.dataCenterIds?.[0] ? { dataCenterId: params.dataCenterIds[0] } : {}),
+    // Datacenter selection via the v1 REST API may not be supported (it's available
+    // in the GraphQL API). Omitting it lets RunPod auto-select based on cloudType.
+    // TODO: revisit when confirmed against the live v1 OpenAPI spec.
   })
   return { podId: pod.id, costPerHr: pod.costPerHr }
 }
