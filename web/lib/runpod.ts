@@ -1,11 +1,17 @@
 const RUNPOD_API_KEY = process.env.RUNPOD_API_KEY!
-const BASE = 'https://rest.runpod.io/v2'
+// RunPod's REST API is v1 (https://rest.runpod.io/v1). The old /v2 path returns
+// an HTML page → "Unexpected token '<'" when parsed as JSON.
+const BASE = 'https://rest.runpod.io/v1'
 
 interface RunPodPod {
   id: string
   name: string
   desiredStatus: string
   costPerHr?: number
+  publicIp?: string
+  // v1 may expose the mapped public port via portMappings { "1935": 12345 } or
+  // the older runtime.ports[] shape. We handle both in getPodStatus.
+  portMappings?: Record<string, number>
   runtime?: { ports?: Array<{ ip: string; isIpPublic: boolean; privatePort: number; publicPort: number }> }
 }
 
@@ -18,11 +24,16 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     },
     body: body ? JSON.stringify(body) : undefined,
   })
+  const text = await res.text()
   if (!res.ok) {
-    const text = await res.text()
-    throw new Error(`RunPod ${method} ${path} → ${res.status}: ${text}`)
+    throw new Error(`RunPod ${method} ${path} → ${res.status}: ${text.slice(0, 300)}`)
   }
-  return res.json() as Promise<T>
+  if (!text) return undefined as T   // e.g. DELETE returns empty
+  try {
+    return JSON.parse(text) as T
+  } catch {
+    throw new Error(`RunPod ${method} ${path} → ${res.status} non-JSON body: ${text.slice(0, 200)}`)
+  }
 }
 
 export interface PodEnv { key: string; value: string }
