@@ -67,19 +67,25 @@ export function rankCandidates(lat: number, lon: number): GpuCandidate[] {
 
   const candidates: GpuCandidate[] = []
   for (const tier of ['near', 'mid', 'far'] as const) {
-    const dcs = byTier[tier].sort((a, b) => a.rtt - b.rtt).map(d => d.id)
-    if (dcs.length === 0) continue
-    for (const cloudType of CLOUD_TYPES) {
-      for (const gpu of gpus) {
-        candidates.push({
-          gpuKey: gpu.key,
-          gpuTypeId: gpu.runpodId,
-          gen: gpu.gen,
-          pricePerHr: gpu.pricePerHr,
-          cloudType,
-          datacenterIds: dcs,
-          tier,
-        })
+    // Sort DCs nearest-first within the tier. Each DC gets its own candidate so
+    // the broker tries DC1 (nearest) before DC2, etc. Previously all DCs were
+    // bundled into one candidate and the datacenterIds array was never forwarded
+    // to RunPod — letting RunPod pick any DC worldwide (e.g. France from Florida).
+    const sortedDcs = byTier[tier].sort((a, b) => a.rtt - b.rtt)
+    if (sortedDcs.length === 0) continue
+    for (const dc of sortedDcs) {
+      for (const cloudType of CLOUD_TYPES) {
+        for (const gpu of gpus) {
+          candidates.push({
+            gpuKey: gpu.key,
+            gpuTypeId: gpu.runpodId,
+            gen: gpu.gen,
+            pricePerHr: gpu.pricePerHr,
+            cloudType,
+            datacenterIds: [dc.id],
+            tier,
+          })
+        }
       }
     }
   }
@@ -88,13 +94,13 @@ export function rankCandidates(lat: number, lon: number): GpuCandidate[] {
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 
-/** Poll until the pod reports a public IP + mapped port (booted), or time out. */
-async function waitForIp(provider: GpuProvider, podId: string): Promise<{ ip: string; port: number } | null> {
+/** Poll until the pod reports a public IP + mapped RTMP port (booted), or time out. */
+async function waitForIp(provider: GpuProvider, podId: string): Promise<{ ip: string; port: number; hlsPort: number | null } | null> {
   const deadline = Date.now() + READINESS_TIMEOUT_MS
   while (Date.now() < deadline) {
     try {
       const s = await provider.getStatus(podId)
-      if (s.ip && s.port) return { ip: s.ip, port: s.port }
+      if (s.ip && s.port) return { ip: s.ip, port: s.port, hlsPort: s.hlsPort ?? null }
       if (s.status === 'error' || s.status === 'terminated') return null
     } catch {
       // transient API error — keep polling within the budget
@@ -110,6 +116,7 @@ export interface ProvisionResult {
   podId?: string
   ip?: string
   port?: number
+  hlsPort?: number | null
   gpuKey?: string
   datacenter?: string
   pricePerHr?: number
@@ -174,6 +181,7 @@ export async function provisionGpu(args: {
           podId,
           ip: addr.ip,
           port: addr.port,
+          hlsPort: addr.hlsPort,
           gpuKey: candidate.gpuKey,
           datacenter: candidate.datacenterIds[0],
           pricePerHr: actualCost ?? candidate.pricePerHr,

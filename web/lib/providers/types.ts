@@ -25,7 +25,8 @@ export interface CreatedPod {
 export interface PodStatus {
   status: string
   ip: string | null
-  port: number | null   // public mapped port for the RTMP ingest (1935)
+  port: number | null     // public mapped port for the RTMP ingest (1935)
+  hlsPort: number | null  // public mapped port for the HLS preview server (8888)
 }
 
 // A cloud GPU provider. RunPod is implemented today; Vultr / Vast.ai slot in as

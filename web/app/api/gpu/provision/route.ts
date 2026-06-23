@@ -186,6 +186,7 @@ export async function POST(request: Request) {
       pod_key_hash: podKeyHash,
       ip_address: result.ip ?? null,
       ingest_port: result.port ?? null,
+      hls_port: result.hlsPort ?? null,
       ingest_key: ingestKey,
       provider: result.provider,
       gpu_type: result.gpuKey,

@@ -8,11 +8,14 @@ interface RunPodPod {
   name: string
   desiredStatus: string
   costPerHr?: number
-  publicIp?: string
-  // v1 may expose the mapped public port via portMappings { "1935": 12345 } or
-  // the older runtime.ports[] shape. We handle both in getPodStatus.
-  portMappings?: Record<string, number>
-  runtime?: { ports?: Array<{ ip: string; isIpPublic: boolean; privatePort: number; publicPort: number }> }
+}
+
+interface GqlPod {
+  id: string
+  desiredStatus: string
+  runtime?: {
+    ports?: Array<{ ip: string; isIpPublic: boolean; privatePort: number; publicPort: number }>
+  }
 }
 
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -36,9 +39,26 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   }
 }
 
+// RunPod's v1 REST API doesn't return port mappings (portMappings and
+// runtime.ports are both absent). Use the GraphQL API for status polling —
+// it reliably includes runtime.ports once the container is up.
+async function gqlRequest<T>(query: string): Promise<T> {
+  const res = await fetch(`https://api.runpod.io/graphql?api_key=${RUNPOD_API_KEY}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query }),
+  })
+  const body = await res.json() as { data?: T; errors?: Array<{ message: string }> }
+  if (body.errors?.length) {
+    throw new Error(`RunPod GraphQL: ${body.errors[0].message}`)
+  }
+  if (!body.data) throw new Error('RunPod GraphQL: empty response')
+  return body.data
+}
+
 export interface PodEnv { key: string; value: string }
 
-// Low-level pod create for one specific candidate (gpu type + cloud + DC list).
+// Low-level pod create for one specific candidate (gpu type + cloud + DC).
 // The broker (lib/gpu-broker.ts) calls this repeatedly down a priority list and
 // catches "no capacity" errors to cascade — so this throws on any failure.
 export async function createPod(params: {
@@ -55,14 +75,13 @@ export async function createPod(params: {
     gpuTypeIds: [params.gpuTypeId],
     cloudType: params.cloudType ?? 'COMMUNITY',
     containerDiskInGb: 15,
-    // No persistent volume needed — the pod is ephemeral (destroyed on stream stop).
+    // 1935 = RTMP ingest (OBS → pod). 8888 = MediaMTX HLS preview.
     // v1 REST: ports is an array, not a string.
-    // 1935 = RTMP ingest (OBS → pod). 8888 = MediaMTX HLS preview (dashboard monitor).
     ports: ['1935/tcp', '8888/tcp'],
     // v1 REST: env is a plain object { KEY: value }, not [{key, value}] (GraphQL shape).
     env: Object.fromEntries(params.env.map(e => [e.key, e.value])),
-    // Datacenter selection via v1 REST is not supported (GraphQL-only).
-    // Let RunPod auto-select within the requested cloudType.
+    // dataCenterIds (plural array) is the correct v1 REST field name.
+    ...(params.dataCenterIds?.length ? { dataCenterIds: params.dataCenterIds } : {}),
   })
   return { podId: pod.id, costPerHr: pod.costPerHr }
 }
@@ -79,24 +98,35 @@ export async function destroyPod(podId: string): Promise<void> {
   await request('DELETE', `/pods/${podId}`)
 }
 
-// List all pods on the account (used by the reaper to find orphans — pods that
-// exist at RunPod but have no gpu_instances row, which no other path can see).
+// List all pods on the account (used by the reaper to find orphans).
 export async function listPods(): Promise<Array<{ id: string; name: string }>> {
   const pods = await request<RunPodPod[]>('GET', '/pods')
   return (pods ?? []).map(p => ({ id: p.id, name: p.name }))
 }
 
-export async function getPodStatus(podId: string): Promise<{ status: string; ip: string | null; port: number | null }> {
-  const pod = await request<RunPodPod>('GET', `/pods/${podId}`)
+// Poll pod status via GraphQL — the only RunPod API path that reliably returns
+// runtime.ports (public IP + mapped port) for community cloud pods.
+// The v1 REST GET /pods/{id} response omits portMappings/runtime for community
+// pods, so we'd time out waiting for a port that never appears there.
+export async function getPodStatus(podId: string): Promise<{ status: string; ip: string | null; port: number | null; hlsPort: number | null }> {
+  const data = await gqlRequest<{ pod: GqlPod }>(
+    `query { pod(input: {podId: "${podId}"}) { id desiredStatus runtime { ports { ip isIpPublic privatePort publicPort } } } }`
+  )
+  const pod = data.pod
+  const ports = pod?.runtime?.ports ?? []
+  const rtmpObj = ports.find(p => p.isIpPublic && p.privatePort === 1935)
+  const hlsObj  = ports.find(p => p.isIpPublic && p.privatePort === 8888)
 
-  // Log the raw port data once so we can see the actual v1 API shape.
-  console.log(`[runpod] pod ${podId} status=${pod.desiredStatus} publicIp=${pod.publicIp} portMappings=${JSON.stringify(pod.portMappings)} runtime.ports=${JSON.stringify(pod.runtime?.ports)}`)
+  const ip      = rtmpObj?.ip ?? null
+  const port    = rtmpObj?.publicPort ?? null
+  const hlsPort = hlsObj?.publicPort ?? null
 
-  // v1 REST may return portMappings:{"1935":12345} or runtime.ports[].
-  const runtimePort = pod.runtime?.ports?.find(p => p.isIpPublic && p.privatePort === 1935)
-  const mappedPort  = pod.portMappings?.['1935']
-  const ip          = runtimePort?.ip ?? pod.publicIp ?? null
-  const port        = runtimePort?.publicPort ?? mappedPort ?? null
+  console.log(`[runpod/gql] pod ${podId} status=${pod?.desiredStatus} ip=${ip} rtmp=${port} hls=${hlsPort}`)
 
-  return { status: pod.desiredStatus, ip, port }
+  return {
+    status: pod?.desiredStatus ?? 'unknown',
+    ip,
+    port,
+    hlsPort,
+  }
 }

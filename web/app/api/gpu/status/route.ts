@@ -26,7 +26,7 @@ export async function GET(request: Request) {
 
   const { data: instance } = await supabase
     .from('gpu_instances')
-    .select('status, ip_address, ingest_port, ingest_key, last_seen_at, burn_rate, outputs, streaming, max_session_at')
+    .select('status, ip_address, ingest_port, hls_port, ingest_key, last_seen_at, burn_rate, outputs, streaming, max_session_at, datacenter, gpu_type')
     .eq('user_id', userId)
     .maybeSingle()
 
@@ -48,6 +48,8 @@ export async function GET(request: Request) {
       outputs: [],
       confirm_required: false,
       confirm_deadline: null,
+      datacenter: null,
+      gpu_type: null,
     })
   }
 
@@ -89,5 +91,10 @@ export async function GET(request: Request) {
     // The dock shows a countdown + "Yes, still streaming" button when this is set.
     confirm_required: confirmRequired,
     confirm_deadline: instance.max_session_at ?? null,
+    // Shown in the dashboard stream manager.
+    datacenter: instance.datacenter ?? null,
+    gpu_type: instance.gpu_type ?? null,
+    // True when the pod has a mapped HLS port — enables the preview player.
+    hls_available: effectiveStatus === 'running' && !!instance.hls_port,
   })
 }
