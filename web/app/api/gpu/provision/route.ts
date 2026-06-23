@@ -159,11 +159,16 @@ export async function POST(request: Request) {
   })
 
   if (!result.ok) {
+    console.error(`[provision] broker exhausted after ${result.attempts} attempts:`, result.error)
     // Clean up the unused pod key AND release the claim so the user can retry.
     await supabase.from('agent_api_keys').delete().eq('key_hash', podKeyHash)
     await releaseClaim()
     return Response.json(
-      { error: 'No GPU capacity available right now. Please retry in a moment.', detail: result.error },
+      {
+        error: 'No GPU capacity available right now.',
+        message: 'No GPU capacity available right now. Please retry in a moment.',
+        detail: result.error ?? `tried ${result.attempts} option(s)`,
+      },
       { status: 503 },
     )
   }

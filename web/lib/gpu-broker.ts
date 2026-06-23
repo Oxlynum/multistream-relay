@@ -151,6 +151,7 @@ export async function provisionGpu(args: {
       } catch (err) {
         // No capacity / rejected — fast miss, move to the next candidate.
         lastError = err instanceof Error ? err.message : String(err)
+        console.error(`[broker] ${provider.name} ${candidate.gpuKey} @ ${candidate.datacenterIds[0]} (${candidate.cloudType}) failed:`, lastError)
         continue
       }
 

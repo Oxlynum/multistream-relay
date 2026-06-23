@@ -110,8 +110,14 @@ void RelayApi::provisionGpu()
         reply->deleteLater();
         const QByteArray data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
-            const QString err = QJsonDocument::fromJson(data).object()["error"].toString();
-            emit gpuProvisionFailed(err.isEmpty() ? reply->errorString() : err);
+            const auto obj = QJsonDocument::fromJson(data).object();
+            QString err = obj["error"].toString();
+            const QString detail = obj["detail"].toString();
+            const QString message = obj["message"].toString();
+            if (err.isEmpty()) err = reply->errorString();
+            if (!message.isEmpty()) err = message;
+            if (!detail.isEmpty()) err += "\n\nDetails: " + detail;
+            emit gpuProvisionFailed(err);
             return;
         }
         emit gpuProvisioned();

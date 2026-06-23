@@ -567,11 +567,8 @@ void RelayDock::onProbeRetry()
 {
     if (!m_probing) return;
     if (++m_probeAttempts >= PROBE_MAX_ATTEMPTS) {
-        m_probing       = false;
-        m_autoLaunching = false;
-        setStatus("Server unreachable", C_ERR);
-        if (m_totalLabel)
-            m_totalLabel->setText("Couldn't reach your SlimCast server. Stop and try again.");
+        abortLaunch("Your SlimCast server booted but its ingest never became "
+                    "reachable (the RTMP port didn't open in time). Please try again.");
         return;
     }
     QTimer::singleShot(PROBE_INTERVAL_MS, this, &RelayDock::probeOnce);
@@ -837,11 +834,7 @@ void RelayDock::onGpuDestroyed()
 
 void RelayDock::onGpuProvisionFailed(QString reason)
 {
-    // Broker found no capacity under the price ceiling, or the call failed.
-    const QString msg = reason.contains("capacity", Qt::CaseInsensitive)
-        ? "No GPU available under the price cap right now — please try again shortly."
-        : ("Couldn't start a server: " + reason);
-    abortLaunch(msg);
+    abortLaunch(reason.isEmpty() ? "Couldn't start a server. Please try again." : reason);
 }
 
 void RelayDock::abortLaunch(const QString &message)
@@ -852,7 +845,9 @@ void RelayDock::abortLaunch(const QString &message)
     m_launchStartMs = 0;
     m_api->destroyGpu();        // clean up any half-provisioned pod (idempotent)
     setStatus("Couldn't start", C_ERR);
-    if (m_totalLabel) m_totalLabel->setText(message);
+    if (m_totalLabel) m_totalLabel->setText("Go Live failed — see the popup.");
+    // Clear popup so the user sees exactly why it failed.
+    QMessageBox::warning(this, "SlimCast — couldn't go live", message);
 }
 
 
