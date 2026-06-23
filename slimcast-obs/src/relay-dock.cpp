@@ -19,14 +19,9 @@
 #include <QGraphicsOpacityEffect>
 #include <QPropertyAnimation>
 #include <QCursor>
-#include <QTcpSocket>
 #include <QUrl>
 #include <QTimer>
-#include <QEvent>
-#include <QKeyEvent>
 #include <QMainWindow>
-#include <QAbstractButton>
-#include <QApplication>
 #include <cmath>
 #include <algorithm>
 #include <cstring>
@@ -512,67 +507,10 @@ void RelayDock::onObsStreamingStopped()
 // "status: running" + an IP means the pod booted, but NOT that the RTMP ingest
 // (MediaMTX + RunPod's TCP proxy) is accepting yet. Resuming OBS too early fails
 // the connect. So we TCP-probe the ingest port and only resume once it's open.
-static constexpr int PROBE_MAX_ATTEMPTS = 25;   // ~50s at 2s spacing
-static constexpr int PROBE_INTERVAL_MS  = 2000;
-
-void RelayDock::startReadinessProbe(const QString &server, const QString &key)
-{
-    m_probing       = true;
-    m_probeServer   = server;
-    m_probeKey      = key;
-    m_probeAttempts = 0;
-    setStatus("Connecting…", C_WARN);
-    probeOnce();
-}
-
-void RelayDock::probeOnce()
-{
-    const QUrl u(m_probeServer);
-    const QString host = u.host();
-    const int port = u.port(1935);
-
-    auto *sock = new QTcpSocket(this);
-    auto *timeout = new QTimer(sock);
-    timeout->setSingleShot(true);
-
-    connect(sock, &QTcpSocket::connected, this, [this, sock]() {
-        sock->abort();
-        sock->deleteLater();
-        onProbeSuccess();
-    });
-    connect(sock, &QTcpSocket::errorOccurred, this, [this, sock](QAbstractSocket::SocketError) {
-        sock->deleteLater();
-        onProbeRetry();
-    });
-    // Guard against connectToHost hanging past our interval.
-    connect(timeout, &QTimer::timeout, sock, [sock]() {
-        if (sock->state() != QAbstractSocket::ConnectedState) sock->abort();
-    });
-
-    sock->connectToHost(host, static_cast<quint16>(port));
-    timeout->start(PROBE_INTERVAL_MS);
-}
-
-void RelayDock::onProbeSuccess()
-{
-    if (m_launchTimeout) m_launchTimeout->stop();
-    m_probing        = false;
-    m_autoLaunching  = false;
-    m_resumingStream = true;
-    applyObsStreamUrl(m_probeServer, m_probeKey);
-    obs_frontend_streaming_start();
-}
-
-void RelayDock::onProbeRetry()
-{
-    if (!m_probing) return;
-    if (++m_probeAttempts >= PROBE_MAX_ATTEMPTS) {
-        abortLaunch("Your SlimCast server booted but its ingest never became "
-                    "reachable (the RTMP port didn't open in time). Please try again.");
-        return;
-    }
-    QTimer::singleShot(PROBE_INTERVAL_MS, this, &RelayDock::probeOnce);
-}
+// Readiness is signalled by the agent pairing, not a TCP probe. The status
+// endpoint returns 'provisioning' while last_seen_at is stale, then flips to
+// 'running' the moment the agent first phones home — which means MediaMTX is up
+// and the RTMP ingest is accepting. We just watch the existing 5s poll.
 
 // ── Status rendering ──────────────────────────────────────────────────────────
 
@@ -581,14 +519,17 @@ void RelayDock::onGpuStatusUpdated(GpuInfo info)
     m_lastGpuInfo = info;
     render(info);
 
-    // Pod booted (status running + address). Don't resume OBS yet — first make
-    // sure the RTMP ingest is actually accepting (has IP ≠ ingest ready). The
-    // probe keeps m_autoLaunching true so the orphan check below stays paused.
-    if (m_autoLaunching && !m_probing && info.status == "running" && !info.rtmpUrl.isEmpty()) {
-        startReadinessProbe(info.rtmpUrl, info.ingestKey);
+    // Agent paired → status flips 'provisioning' → 'running'. That means
+    // MediaMTX is up and RTMP is accepting. Set OBS's URL and start streaming.
+    if (m_autoLaunching && info.status == "running" && !info.rtmpUrl.isEmpty()) {
+        if (m_launchTimeout) m_launchTimeout->stop();
+        m_autoLaunching  = false;
+        m_resumingStream = true;
+        setStatus("Connecting…", C_WARN);
+        applyObsStreamUrl(info.rtmpUrl, info.ingestKey);
+        obs_frontend_streaming_start();
         return;
     }
-    if (m_probing) return;   // wait for the probe to finish before anything else
 
     // SAFETY: a running pod while OBS is not streaming (and we aren't mid-launch)
     // is an orphan — e.g. OBS crashed and was reopened, or a Stop teardown failed.
@@ -617,8 +558,6 @@ void RelayDock::render(const GpuInfo &info)
     QString text, color;
     if (m_shuttingDown) {
         text = "Shutting down…";                       color = C_ERR;
-    } else if (m_probing) {
-        text = QString("Connecting to server… %1s").arg(elapsed);  color = C_WARN;
     } else if (m_autoLaunching && info.status != "running") {
         if (info.ip.isEmpty())
             text = QString("Searching for a GPU… %1s").arg(elapsed);
@@ -638,7 +577,7 @@ void RelayDock::render(const GpuInfo &info)
 
     // ── Go Live / Stop button ────────────────────────────────────────────────
     if (m_goLiveBtn) {
-        const bool busy = m_autoLaunching || m_probing || m_shuttingDown;
+        const bool busy = m_autoLaunching || false /* m_probing removed */ || m_shuttingDown;
         const bool live = info.status == "running" || info.streaming;
         if (busy) {
             m_goLiveBtn->setEnabled(false);
@@ -841,7 +780,6 @@ void RelayDock::abortLaunch(const QString &message)
 {
     if (m_launchTimeout) m_launchTimeout->stop();
     m_autoLaunching = false;
-    m_probing       = false;
     m_launchStartMs = 0;
     m_api->destroyGpu();        // clean up any half-provisioned pod (idempotent)
     setStatus("Couldn't start", C_ERR);
@@ -938,7 +876,7 @@ void RelayDock::renderServiceBanner()
 // OBS never has to connect before the pod/URL exist.
 void RelayDock::onGoLiveClicked()
 {
-    if (m_autoLaunching || m_probing) return;   // already starting
+    if (m_autoLaunching || false /* m_probing removed */) return;   // already starting
 
     const bool live = obs_frontend_streaming_active() || m_lastGpuInfo.status == "running";
     if (live) {

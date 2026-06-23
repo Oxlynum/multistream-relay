@@ -67,11 +67,6 @@ private:
     void applyObsStreamUrl(const QString &server, const QString &key);
     void setSlimcastService(const QString &server, const QString &key);
 
-    // Readiness probe: don't resume OBS until the pod's RTMP port is accepting.
-    void startReadinessProbe(const QString &server, const QString &key);
-    void probeOnce();
-    void onProbeSuccess();
-    void onProbeRetry();
     void render(const GpuInfo &info);
     void renderConfirm(const GpuInfo &info);
     void renderServiceBanner();
@@ -113,12 +108,8 @@ private:
 
     bool m_autoLaunching  = false;
     bool m_resumingStream = false;
-    bool m_probing        = false;   // readiness probe in flight
     bool m_shuttingDown   = false;   // stop/destroy in progress
     qint64 m_launchStartMs = 0;      // when Go Live was pressed (for elapsed time)
-    QString m_probeServer;
-    QString m_probeKey;
-    int  m_probeAttempts  = 0;
     bool m_wasStreaming   = false;  // to auto-engage the channel lock on stream start
     bool m_haveEncode     = false;
     int  m_orphanTicks    = 0;      // consecutive polls of "pod up, OBS not streaming"
