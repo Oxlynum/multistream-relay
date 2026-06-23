@@ -682,12 +682,42 @@ void RelayDock::onConfirmClicked()
 void RelayDock::updateIngestLabel()
 {
     obs_video_info ovi;
+    QString base;
     if (obs_get_video_info(&ovi) && ovi.fps_den > 0) {
         int fps = (int)std::lround((double)ovi.fps_num / (double)ovi.fps_den);
-        m_ingestLabel->setText(QString("%1×%2 · %3 fps")
-            .arg(ovi.output_width).arg(ovi.output_height).arg(fps));
+        base = QString("%1×%2 · %3 fps")
+            .arg(ovi.output_width).arg(ovi.output_height).arg(fps);
     } else {
-        m_ingestLabel->setText("Resolution set in OBS");
+        base = QStringLiteral("Resolution set in OBS");
+    }
+
+    // H264 B-frames cause DTS to go non-monotonic in MediaMTX's SRT republish,
+    // crashing FFmpeg every few seconds. HEVC (H265) doesn't have this problem.
+    bool isHevc = true;  // assume OK if we can't read the profile config
+    config_t *cfg = obs_frontend_get_profile_config();
+    if (cfg) {
+        const char *mode  = config_get_string(cfg, "Output", "Mode");
+        const char *encId = (mode && strcmp(mode, "Advanced") == 0)
+            ? config_get_string(cfg, "AdvOut",        "Encoder")
+            : config_get_string(cfg, "SimpleOutput",  "StreamEncoder");
+        if (encId && *encId) {
+            QString id = QString::fromUtf8(encId).toLower();
+            isHevc = id.contains("hevc") || id.contains("h265");
+        }
+    }
+
+    if (!isHevc) {
+        m_ingestLabel->setText(base + " · ⚠ Switch encoder to H265");
+        m_ingestLabel->setStyleSheet(
+            QString("color:%1; font-size:11px").arg(C_WARN));
+        m_ingestLabel->setToolTip(
+            "SlimCast requires H265 (HEVC) — H264 breaks the relay.\n"
+            "OBS Settings → Output → Streaming → Encoder → Apple VT H265");
+    } else {
+        m_ingestLabel->setText(base);
+        m_ingestLabel->setStyleSheet(
+            QString("color:%1; font-size:11px").arg(C_FAINT));
+        m_ingestLabel->setToolTip({});
     }
 }
 
