@@ -761,7 +761,12 @@ void RelayDock::onBitrateReleased()
 
 void RelayDock::onGpuProvisioned()
 {
-    m_totalLabel->setText("Server starting… (~45 seconds)");
+    // Pod exists — start the "waiting for agent to pair" timeout from NOW,
+    // not from when Go Live was pressed (the provision itself already consumed
+    // up to 3 min). Reset the elapsed counter so the UI shows time since boot.
+    m_launchStartMs = QDateTime::currentMSecsSinceEpoch();
+    if (m_launchTimeout) m_launchTimeout->start();
+    m_totalLabel->setText("Server starting…");
 }
 
 void RelayDock::onGpuDestroyed()
@@ -891,7 +896,9 @@ void RelayDock::onGoLiveClicked()
     m_shuttingDown  = false;
     m_autoLaunching = true;
     m_launchStartMs = QDateTime::currentMSecsSinceEpoch();
-    if (m_launchTimeout) m_launchTimeout->start();
+    // Don't start the timeout yet — it covers the "waiting for agent to pair"
+    // phase only. The provision HTTP call has its own 3-min network timeout.
+    // We start m_launchTimeout in onGpuProvisioned once the pod exists.
     m_api->provisionGpu();
     render(m_lastGpuInfo);
 }
