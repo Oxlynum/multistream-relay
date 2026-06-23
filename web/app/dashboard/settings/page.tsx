@@ -6,6 +6,72 @@ import { createBrowserClient } from '@/lib/supabase'
 import { DashboardNav } from '@/components/dashboard-nav'
 import { PortraitCropEditor } from '@/components/portrait-crop-editor'
 
+function OBSConnectionCard() {
+  const [apiKey, setApiKey] = useState<string | null>(null)
+  const [keyLoading, setKeyLoading] = useState(false)
+  const [copied, setCopied] = useState(false)
+
+  async function generateApiKey() {
+    if (!window.confirm("Reset access? This disconnects every linked OBS device and the old manual key. You'll need to reconnect.")) return
+    setKeyLoading(true)
+    try {
+      const supabase = createBrowserClient()
+      const { data: { session } } = await supabase.auth.getSession()
+      if (!session) return
+      const res = await fetch('/api/apikey', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      })
+      const body = await res.json()
+      setApiKey(body.api_key)
+    } finally {
+      setKeyLoading(false)
+    }
+  }
+
+  function copy(text: string) {
+    navigator.clipboard.writeText(text)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
+  }
+
+  return (
+    <div className="bg-surface border border-line rounded-2xl p-6">
+      <div className="font-semibold mb-1">OBS connection</div>
+      <div className="text-xs text-ink-faint mb-4">
+        In OBS, open the SlimCast panel and click <span className="text-ink-muted">Connect with SlimCast</span> — no key to copy.
+        Use a manual key only if you can&apos;t use the button. Resetting revokes <span className="text-ink-muted">all</span> connected devices and the old manual key; every OBS will need to reconnect.
+      </div>
+      {apiKey ? (
+        <div className="space-y-3">
+          <div className="bg-amber-950/30 border border-amber-800/60 rounded-lg px-3 py-2 text-xs text-amber-400">
+            Copy this now — it won&apos;t be shown again.
+          </div>
+          <div className="flex items-center gap-3">
+            <code className="flex-1 bg-base border border-line rounded-lg px-3 py-2 text-sm font-mono text-ink break-all">
+              {apiKey}
+            </code>
+            <button
+              onClick={() => copy(apiKey)}
+              className={`px-3 py-2 rounded-lg text-sm font-medium transition-colors min-w-[70px] ${copied ? 'bg-accent text-base' : 'bg-elevated hover:bg-line-strong text-ink'}`}
+            >
+              {copied ? 'Copied!' : 'Copy'}
+            </button>
+          </div>
+        </div>
+      ) : (
+        <button
+          onClick={generateApiKey}
+          disabled={keyLoading}
+          className="bg-elevated hover:bg-line-strong disabled:opacity-50 px-5 py-2 rounded-lg text-sm font-semibold transition-colors"
+        >
+          {keyLoading ? 'Resetting…' : 'Reset access · new manual key'}
+        </button>
+      )}
+    </div>
+  )
+}
+
 interface PlatformSettings {
   platform: string
   orientation: string
@@ -207,6 +273,8 @@ export default function SettingsPage() {
             </div>
           </div>
         )}
+
+        <OBSConnectionCard />
       </main>
     </div>
   )

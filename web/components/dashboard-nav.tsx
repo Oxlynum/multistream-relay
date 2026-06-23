@@ -7,6 +7,7 @@ import { Logo } from './logo'
 
 const TABS = [
   { href: '/dashboard', label: 'Overview' },
+  { href: '/dashboard/stream', label: 'Stream' },
   { href: '/dashboard/platforms', label: 'Platforms' },
   { href: '/dashboard/settings', label: 'Settings' },
   { href: '/dashboard/credits', label: 'Credits' },

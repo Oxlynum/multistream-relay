@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { createBrowserClient } from '@/lib/supabase'
-import { secondsRemaining } from '@/lib/billing'
+import { secondsRemaining, formatTokens } from '@/lib/billing'
 
 interface OutputStatus {
   name: string
@@ -294,7 +294,7 @@ export function StreamManager() {
 
         <div className="text-right flex-shrink-0">
           <div className={`text-base font-bold font-mono ${lowCredits ? 'text-amber-400' : 'text-ink'}`}>
-            {fmtRemaining(remaining)}
+            {formatTokens(credits_seconds)}
           </div>
           <div className="text-xs text-ink-faint">
             {burn_rate > 0 ? `${burn_rate.toFixed(1)} tkn/hr · $${(burn_rate * 2).toFixed(2)}/hr` : 'remaining'}

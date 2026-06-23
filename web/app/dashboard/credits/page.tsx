@@ -4,12 +4,13 @@ import { useEffect, useState, useCallback, Suspense } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { createBrowserClient } from '@/lib/supabase'
 import { DashboardNav } from '@/components/dashboard-nav'
+import { formatTokens } from '@/lib/billing'
 
 const ACHIEVEMENTS = [
-  { key: 'first_stream',    label: 'First stream',                 reward: '+30 min' },
-  { key: 'streak_7',        label: 'Stream 7 days in a row',       reward: '+1 hr' },
-  { key: 'all_5_platforms', label: 'All 5 platforms live at once', reward: '+1 hr' },
-  { key: 'milestone_30d',   label: '30-day milestone',             reward: '+1 hr' },
+  { key: 'first_stream',    label: 'First stream',                 reward: '+0.5 tkn' },
+  { key: 'streak_7',        label: 'Stream 7 days in a row',       reward: '+1 tkn' },
+  { key: 'all_5_platforms', label: 'All 5 platforms live at once', reward: '+1 tkn' },
+  { key: 'milestone_30d',   label: '30-day milestone',             reward: '+1 tkn' },
 ]
 
 interface StreamSession {
@@ -27,24 +28,30 @@ function formatDuration(seconds: number | null) {
   return h > 0 ? `${h}h ${m}m` : `${m}m`
 }
 
+function capitalize(s: string) {
+  return s.charAt(0).toUpperCase() + s.slice(1)
+}
+
 function CreditsPageInner() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const success = searchParams.get('success') === '1'
 
   const [token, setToken] = useState<string | null>(null)
-  const [balance, setBalance] = useState<{ seconds: number; formatted: string } | null>(null)
+  const [balance, setBalance] = useState<number>(0)
   const [sessions, setSessions] = useState<StreamSession[]>([])
   const [earnedKeys, setEarnedKeys] = useState<string[]>([])
 
-  const [buyHours, setBuyHours] = useState(10)
+  const [buyTokens, setBuyTokens] = useState(10)
   const [checkingOut, setCheckingOut] = useState(false)
 
   const [refillEnabled, setRefillEnabled] = useState(false)
-  const [refillHours, setRefillHours] = useState(10)
+  const [refillTokens, setRefillTokens] = useState(10)
   const [hasPaymentMethod, setHasPaymentMethod] = useState(false)
+  const [card, setCard] = useState<{ brand: string; last4: string } | null>(null)
   const [savingRefill, setSavingRefill] = useState(false)
   const [refillError, setRefillError] = useState<string | null>(null)
+  const [portalLoading, setPortalLoading] = useState(false)
 
   const authHeaders = useCallback(() => ({
     Authorization: `Bearer ${token}`,
@@ -67,13 +74,14 @@ function CreditsPageInner() {
         supabase.from('achievements').select('achievement_key').eq('user_id', session.user.id),
       ])
 
-      const bal = await balRes.json().catch(() => ({ seconds: 0, formatted: '0m' }))
-      const refill = await refillRes.json().catch(() => ({ enabled: false, hours: 10, has_payment_method: false }))
+      const bal = await balRes.json().catch(() => ({ seconds: 0 }))
+      const refill = await refillRes.json().catch(() => ({ enabled: false, hours: 10, has_payment_method: false, card: null }))
 
-      setBalance({ seconds: bal.seconds, formatted: bal.formatted })
+      setBalance(bal.seconds ?? 0)
       setRefillEnabled(refill.enabled)
-      setRefillHours(refill.hours)
+      setRefillTokens(refill.hours ?? 10)
       setHasPaymentMethod(refill.has_payment_method)
+      setCard(refill.card ?? null)
       setSessions(sessRes.data ?? [])
       setEarnedKeys((achRes.data ?? []).map((a: { achievement_key: string }) => a.achievement_key))
     }
@@ -86,7 +94,7 @@ function CreditsPageInner() {
     const res = await fetch('/api/credits/checkout', {
       method: 'POST',
       headers: authHeaders(),
-      body: JSON.stringify({ hours: buyHours }),
+      body: JSON.stringify({ hours: buyTokens }),  // 1 token == 1 hr in the billing model
     })
     const body = await res.json()
     if (body.url) window.location.href = body.url
@@ -105,18 +113,30 @@ function CreditsPageInner() {
     const body = await res.json()
     if (!res.ok) {
       if (body.error === 'no_payment_method') {
-        setRefillError('Buy credits once to save a payment method, then enable auto-refill.')
+        setRefillError('Buy tokens once to save a payment method, then enable auto-refill.')
       } else {
         setRefillError(body.message ?? 'Something went wrong.')
       }
     } else {
       if (updates.enabled !== undefined) setRefillEnabled(updates.enabled)
-      if (updates.hours !== undefined) setRefillHours(updates.hours)
+      if (updates.hours !== undefined) setRefillTokens(updates.hours)
     }
     setSavingRefill(false)
   }
 
-  const totalCost = `$${(buyHours * 2).toFixed(2)}`
+  async function openPortal() {
+    if (!token) return
+    setPortalLoading(true)
+    const res = await fetch('/api/stripe/portal', {
+      method: 'POST',
+      headers: authHeaders(),
+    })
+    const body = await res.json()
+    if (body.url) window.location.href = body.url
+    else setPortalLoading(false)
+  }
+
+  const totalCost = `$${(buyTokens * 2).toFixed(2)}`
 
   return (
     <div className="min-h-screen">
@@ -125,51 +145,51 @@ function CreditsPageInner() {
       <main className="max-w-2xl mx-auto px-6 py-10 space-y-6">
         {success && (
           <div className="bg-accent-soft/40 border border-accent/40 rounded-xl px-5 py-4 text-accent text-sm">
-            Payment received — credits added to your balance.
+            Payment received — tokens added to your balance.
           </div>
         )}
 
         {/* Balance */}
         <div className="bg-surface border border-line rounded-2xl p-6">
-          <div className="text-sm text-ink-muted mb-1">Current balance</div>
-          <div className="text-4xl font-bold font-mono">{balance?.formatted ?? '—'}</div>
-          <div className="text-xs text-ink-faint mt-1">of streaming time remaining</div>
+          <div className="text-sm text-ink-muted mb-1">Token balance</div>
+          <div className="text-4xl font-bold font-mono">{formatTokens(balance)}</div>
+          <div className="text-xs text-ink-faint mt-1">1 token = $2 · base 1 tkn/hr while live</div>
         </div>
 
-        {/* Buy credits */}
+        {/* Buy tokens */}
         <div className="bg-surface border border-line rounded-2xl p-6 space-y-5">
-          <div className="font-semibold">Buy streaming time</div>
+          <div className="font-semibold">Buy tokens</div>
 
           <div className="space-y-3">
             <div className="flex items-center justify-between text-sm">
-              <span className="text-ink-muted">Hours to add</span>
-              <span className="font-mono font-bold text-lg">{buyHours} hr{buyHours !== 1 ? 's' : ''}</span>
+              <span className="text-ink-muted">Tokens to add</span>
+              <span className="font-mono font-bold text-lg">{buyTokens} tkn</span>
             </div>
             <input
               type="range"
               min={1}
               max={100}
-              value={buyHours}
-              onChange={e => setBuyHours(Number(e.target.value))}
+              value={buyTokens}
+              onChange={e => setBuyTokens(Number(e.target.value))}
               className="w-full accent-accent"
             />
             <div className="flex justify-between text-xs text-ink-faint">
-              <span>1 hr</span>
-              <span>100 hrs</span>
+              <span>1 tkn</span>
+              <span>100 tkn</span>
             </div>
           </div>
 
           <div className="flex items-center justify-between pt-1">
             <div>
               <div className="text-2xl font-bold font-mono">{totalCost}</div>
-              <div className="text-xs text-ink-faint">$2.00 / hr · credits never expire</div>
+              <div className="text-xs text-ink-faint">$2.00 / token · tokens never expire</div>
             </div>
             <button
               onClick={checkout}
               disabled={checkingOut}
               className="bg-accent hover:bg-accent-strong text-base disabled:opacity-40 px-6 py-2.5 rounded-lg text-sm font-semibold transition-colors"
             >
-              {checkingOut ? 'Redirecting…' : `Buy ${buyHours} hr${buyHours !== 1 ? 's' : ''}`}
+              {checkingOut ? 'Redirecting…' : `Buy ${buyTokens} tkn`}
             </button>
           </div>
         </div>
@@ -180,7 +200,7 @@ function CreditsPageInner() {
             <div>
               <div className="font-semibold">Auto-refill</div>
               <div className="text-xs text-ink-faint mt-0.5">
-                Automatically buys more time when your balance drops below 1 hour.
+                Automatically charges your saved card when balance drops below 1 token.
               </div>
             </div>
             <button
@@ -198,9 +218,27 @@ function CreditsPageInner() {
             </div>
           )}
 
-          {!hasPaymentMethod && (
+          {/* Payment method row */}
+          {hasPaymentMethod ? (
+            <div className="flex items-center justify-between text-xs">
+              {card ? (
+                <span className="text-ink-muted">
+                  Charges to <span className="text-ink font-medium">{capitalize(card.brand)} ····{card.last4}</span>
+                </span>
+              ) : (
+                <span className="text-ink-muted">Payment method saved</span>
+              )}
+              <button
+                onClick={openPortal}
+                disabled={portalLoading}
+                className="text-accent hover:text-accent-strong disabled:opacity-40 transition-colors"
+              >
+                {portalLoading ? 'Opening…' : 'Manage billing ↗'}
+              </button>
+            </div>
+          ) : (
             <div className="text-xs text-ink-muted bg-base border border-line rounded-lg px-3 py-2">
-              Buy credits once to save your payment method, then enable auto-refill.
+              Buy tokens once to save your payment method, then enable auto-refill.
             </div>
           )}
 
@@ -208,21 +246,21 @@ function CreditsPageInner() {
             <div className="space-y-3 pt-1">
               <div className="flex items-center justify-between text-sm">
                 <span className="text-ink-muted">Refill amount</span>
-                <span className="font-mono font-bold">{refillHours} hr{refillHours !== 1 ? 's' : ''} · ${(refillHours * 2).toFixed(2)}</span>
+                <span className="font-mono font-bold">{refillTokens} tkn · ${(refillTokens * 2).toFixed(2)}</span>
               </div>
               <input
                 type="range"
                 min={1}
                 max={100}
-                value={refillHours}
-                onChange={e => setRefillHours(Number(e.target.value))}
+                value={refillTokens}
+                onChange={e => setRefillTokens(Number(e.target.value))}
                 onMouseUp={e => saveRefillSettings({ hours: Number((e.target as HTMLInputElement).value) })}
                 onTouchEnd={e => saveRefillSettings({ hours: Number((e.target as HTMLInputElement).value) })}
                 className="w-full accent-accent"
               />
               <div className="flex justify-between text-xs text-ink-faint">
-                <span>1 hr</span>
-                <span>100 hrs</span>
+                <span>1 tkn</span>
+                <span>100 tkn</span>
               </div>
             </div>
           )}
@@ -250,7 +288,7 @@ function CreditsPageInner() {
           </div>
         </div>
 
-        {/* History */}
+        {/* Stream history */}
         {sessions.length > 0 && (
           <div>
             <div className="text-sm text-ink-muted mb-3">Stream history</div>
@@ -260,7 +298,7 @@ function CreditsPageInner() {
                   <tr className="border-b border-line text-ink-faint text-xs">
                     <th className="text-left px-4 py-3 font-normal">Date</th>
                     <th className="text-left px-4 py-3 font-normal">Duration</th>
-                    <th className="text-left px-4 py-3 font-normal">Credits used</th>
+                    <th className="text-left px-4 py-3 font-normal">Tokens used</th>
                     <th className="text-left px-4 py-3 font-normal">Platforms</th>
                   </tr>
                 </thead>
@@ -269,7 +307,7 @@ function CreditsPageInner() {
                     <tr key={s.id} className="border-b border-line/50 last:border-0">
                       <td className="px-4 py-3 text-ink-muted">{new Date(s.started_at).toLocaleDateString()}</td>
                       <td className="px-4 py-3 text-ink-muted font-mono">{formatDuration(s.duration_seconds)}</td>
-                      <td className="px-4 py-3 text-ink-muted font-mono">{formatDuration(s.credits_deducted)}</td>
+                      <td className="px-4 py-3 text-ink-muted font-mono">{formatTokens(s.credits_deducted ?? 0)}</td>
                       <td className="px-4 py-3 text-ink-faint text-xs capitalize">{s.platforms?.join(', ') || '—'}</td>
                     </tr>
                   ))}

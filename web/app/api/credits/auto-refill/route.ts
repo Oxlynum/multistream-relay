@@ -2,7 +2,7 @@ import { createServerClient } from '@/lib/supabase'
 import { stripe, HOURLY_PRICE_ID, hoursToSeconds } from '@/lib/stripe'
 import { creditPaymentOnce } from '@/lib/billing'
 
-// GET — return current auto-refill settings + whether a payment method is saved.
+// GET — return current auto-refill settings + saved card info.
 export async function GET(request: Request) {
   const supabase = createServerClient()
 
@@ -17,10 +17,20 @@ export async function GET(request: Request) {
     .eq('id', user.id)
     .single()
 
+  // Fetch card brand + last4 so the UI can show "Charges to Visa ····4242".
+  let card: { brand: string; last4: string } | null = null
+  if (profile?.stripe_payment_method_id) {
+    try {
+      const pm = await stripe.paymentMethods.retrieve(profile.stripe_payment_method_id)
+      if (pm.card) card = { brand: pm.card.brand, last4: pm.card.last4 }
+    } catch { /* card fetch is best-effort */ }
+  }
+
   return Response.json({
     enabled: profile?.auto_refill_enabled ?? false,
     hours: profile?.auto_refill_hours ?? 10,
     has_payment_method: !!profile?.stripe_payment_method_id,
+    card,
   })
 }
 

@@ -74,3 +74,12 @@ export function formatDuration(seconds: number): string {
   if (h > 0) return `${h}h`
   return `${m}m`
 }
+
+/** Format a credit balance as tokens (1 token = 3600 credit-seconds = $2). */
+export function formatTokens(seconds: number): string {
+  if (seconds <= 0) return '0 tkn'
+  const t = seconds / 3600
+  if (t >= 100) return `${Math.floor(t)} tkn`
+  if (t >= 10)  return `${t.toFixed(1)} tkn`
+  return `${t.toFixed(2)} tkn`
+}

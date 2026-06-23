@@ -4,7 +4,7 @@ import { useEffect, useState, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 import { createBrowserClient } from '@/lib/supabase'
 import { DashboardNav } from '@/components/dashboard-nav'
-import { CostMeter } from '@/components/cost-meter'
+import { formatTokens } from '@/lib/billing'
 
 interface DashboardData {
   credits_seconds: number
@@ -25,7 +25,7 @@ const PLATFORM_LABELS: Record<string, string> = {
   twitch: 'Twitch', kick: 'Kick', youtube: 'YouTube', tiktok: 'TikTok',
 }
 
-function fmt(seconds: number) {
+function fmtDuration(seconds: number) {
   if (seconds <= 0) return '0m'
   const h = Math.floor(seconds / 3600)
   const m = Math.floor((seconds % 3600) / 60)
@@ -47,9 +47,6 @@ export default function DashboardPage() {
   const [period, setPeriod] = useState('30d')
   const [loading, setLoading] = useState(true)
   const [statsLoading, setStatsLoading] = useState(false)
-  const [apiKey, setApiKey] = useState<string | null>(null)
-  const [keyLoading, setKeyLoading] = useState(false)
-  const [copied, setCopied] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     try {
@@ -93,30 +90,6 @@ export default function DashboardPage() {
   useEffect(() => { load() }, [load])
   useEffect(() => { loadStats(period) }, [loadStats, period])
 
-  async function generateApiKey() {
-    if (!window.confirm('Reset access? This disconnects every linked OBS device and the old manual key. You’ll need to reconnect.')) return
-    setKeyLoading(true)
-    try {
-      const supabase = createBrowserClient()
-      const { data: { session } } = await supabase.auth.getSession()
-      if (!session) return
-      const res = await fetch('/api/apikey', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${session.access_token}` },
-      })
-      const body = await res.json()
-      setApiKey(body.api_key)
-    } finally {
-      setKeyLoading(false)
-    }
-  }
-
-  function copy(text: string, label: string) {
-    navigator.clipboard.writeText(text)
-    setCopied(label)
-    setTimeout(() => setCopied(null), 2000)
-  }
-
   if (loading) {
     return (
       <div className="min-h-screen">
@@ -126,27 +99,27 @@ export default function DashboardPage() {
     )
   }
 
-  const creditsLow = (data?.credits_seconds ?? 0) < 1800
+  const creditsSeconds = data?.credits_seconds ?? 0
+  const creditsLow = creditsSeconds < 1800
 
   return (
     <div className="min-h-screen">
       <DashboardNav />
 
       <main className="max-w-5xl mx-auto px-6 py-10 space-y-5">
-        {/* Live cost meter (only visible while streaming) */}
-        <CostMeter />
 
-        {/* Credits */}
+        {/* Token balance */}
         <div className={`border rounded-2xl p-6 flex items-center justify-between ${creditsLow ? 'bg-amber-950/20 border-amber-800/60' : 'bg-surface border-line'}`}>
           <div>
-            <div className="text-sm text-ink-muted mb-1">Streaming credits</div>
+            <div className="text-sm text-ink-muted mb-1">Token balance</div>
             <div className={`text-3xl font-bold font-mono ${creditsLow ? 'text-amber-400' : 'text-ink'}`}>
-              {fmt(data?.credits_seconds ?? 0)}
+              {formatTokens(creditsSeconds)}
             </div>
+            <div className="text-xs text-ink-faint mt-1">1 token = $2 · base 1 tkn/hr while live</div>
             {creditsLow && <div className="text-sm text-amber-500 mt-1">Less than 30 minutes remaining</div>}
           </div>
           <a href="/dashboard/credits" className="bg-accent hover:bg-accent-strong text-base px-5 py-2 rounded-lg text-sm font-semibold transition-colors">
-            Buy credits
+            Buy tokens
           </a>
         </div>
 
@@ -174,10 +147,10 @@ export default function DashboardPage() {
           ) : (
             <>
               <div className="grid grid-cols-2 gap-4 sm:grid-cols-4 mb-5">
-                <Stat label="Hours streamed" value={fmt(stats?.total_duration_seconds ?? 0)} />
+                <Stat label="Hours streamed" value={fmtDuration(stats?.total_duration_seconds ?? 0)} />
                 <Stat label="Sessions" value={String(stats?.session_count ?? 0)} />
-                <Stat label="Avg session" value={fmt(stats?.avg_duration_seconds ?? 0)} />
-                <Stat label="Credits used" value={fmt(stats?.total_credits_used_seconds ?? 0)} />
+                <Stat label="Avg session" value={fmtDuration(stats?.avg_duration_seconds ?? 0)} />
+                <Stat label="Tokens used" value={formatTokens(stats?.total_credits_used_seconds ?? 0)} />
               </div>
 
               {(stats?.top_platforms?.length ?? 0) > 0 && (
@@ -196,7 +169,7 @@ export default function DashboardPage() {
 
               {stats?.session_count === 0 && (
                 <p className="text-sm text-ink-faint">
-                  No streams yet in this period. Start streaming in OBS to see your stats here.
+                  No streams yet in this period. Press Go Live in OBS to start.
                 </p>
               )}
             </>
@@ -224,40 +197,6 @@ export default function DashboardPage() {
           )}
         </div>
 
-        {/* API key */}
-        <div className="bg-surface border border-line rounded-2xl p-6">
-          <div className="text-sm text-ink-muted mb-1">OBS connection</div>
-          <div className="text-xs text-ink-faint mb-4">
-            In OBS, open the SlimCast panel and click <span className="text-ink-muted">Connect with SlimCast</span> — no key to copy.
-            Use a manual key only if you can&apos;t use the button. Resetting revokes <span className="text-ink-muted">all</span> connected devices and the old manual key; every OBS will need to reconnect.
-          </div>
-          {apiKey ? (
-            <div className="space-y-3">
-              <div className="bg-amber-950/30 border border-amber-800/60 rounded-lg px-3 py-2 text-xs text-amber-400">
-                Copy this now — it won&apos;t be shown again.
-              </div>
-              <div className="flex items-center gap-3">
-                <code className="flex-1 bg-base border border-line rounded-lg px-3 py-2 text-sm font-mono text-ink break-all">
-                  {apiKey}
-                </code>
-                <button
-                  onClick={() => copy(apiKey, 'apikey')}
-                  className={`px-3 py-2 rounded-lg text-sm font-medium transition-colors min-w-[70px] ${copied === 'apikey' ? 'bg-accent text-base' : 'bg-elevated hover:bg-line-strong text-ink'}`}
-                >
-                  {copied === 'apikey' ? 'Copied!' : 'Copy'}
-                </button>
-              </div>
-            </div>
-          ) : (
-            <button
-              onClick={generateApiKey}
-              disabled={keyLoading}
-              className="bg-elevated hover:bg-line-strong disabled:opacity-50 px-5 py-2 rounded-lg text-sm font-semibold transition-colors"
-            >
-              {keyLoading ? 'Resetting…' : 'Reset access · new manual key'}
-            </button>
-          )}
-        </div>
       </main>
     </div>
   )
