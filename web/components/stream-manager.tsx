@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState, useCallback } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { createBrowserClient } from '@/lib/supabase'
 import { secondsRemaining, formatTokens } from '@/lib/billing'
 
@@ -49,15 +49,6 @@ function fmtElapsed(ms: number): string {
   return `${m}:${String(ss).padStart(2, '0')}`
 }
 
-function fmtRemaining(seconds: number): string {
-  if (seconds <= 0) return '0m'
-  const h = Math.floor(seconds / 3600)
-  const m = Math.floor((seconds % 3600) / 60)
-  if (h > 0 && m > 0) return `${h}h ${m}m`
-  if (h > 0) return `${h}h`
-  return `${m}m`
-}
-
 const GPU_LABELS: Record<string, string> = {
   a4000: 'RTX A4000', a5000: 'RTX A5000', l4: 'L4',
   a40: 'A40', rtx3090: 'RTX 3090', rtxpro4000: 'RTX PRO 4000',
@@ -65,56 +56,89 @@ const GPU_LABELS: Record<string, string> = {
   rtx6000ada: 'RTX 6000 Ada', l40s: 'L40S', rtx5090: 'RTX 5090',
 }
 
-// HLS proxy URL — auth token is passed as a query param so the <video> src
-// can carry it without a custom fetch (the route also accepts Authorization header,
-// but <video> src doesn't support custom headers in the browser).
-function hlsProxyUrl(token: string) {
-  return `/api/gpu/hls/index.m3u8?token=${encodeURIComponent(token)}`
-}
+// ── HLS Player ────────────────────────────────────────────────────────────────
+// Uses hls.js xhrSetup so the Authorization header is sent on EVERY request
+// (manifest + sub-manifests + segments). A ?token= URL approach only works for
+// the first manifest fetch — subsequent segment requests drop it and 401.
 
-// ── HLS Video Player ─────────────────────────────────────────────────────────
 interface HlsPlayerProps {
-  src: string
-  onError: (msg: string) => void
+  authToken: string
+  streaming: boolean
 }
 
-function HlsPlayer({ src, onError }: HlsPlayerProps) {
+function HlsPlayer({ authToken, streaming }: HlsPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const hlsRef = useRef<import('hls.js').default | null>(null)
+  const [playerState, setPlayerState] = useState<'loading' | 'playing' | 'waiting' | 'error'>('loading')
+  const [errorMsg, setErrorMsg] = useState<string | null>(null)
+
+  // Reset when streaming starts so the player reinitialises after OBS connects.
+  const prevStreaming = useRef(false)
 
   useEffect(() => {
+    if (!streaming) {
+      setPlayerState('waiting')
+      setErrorMsg(null)
+      if (hlsRef.current) {
+        hlsRef.current.destroy()
+        hlsRef.current = null
+      }
+      prevStreaming.current = false
+      return
+    }
+
+    // Only (re)init when streaming transitions false → true.
+    if (prevStreaming.current) return
+    prevStreaming.current = true
+
     const video = videoRef.current
     if (!video) return
 
     let destroyed = false
+    setPlayerState('loading')
+    setErrorMsg(null)
 
     async function setup() {
       const Hls = (await import('hls.js')).default
-
-      if (destroyed) return
+      if (destroyed || !video) return
 
       if (Hls.isSupported()) {
         const hls = new Hls({
           maxBufferLength: 10,
           backBufferLength: 0,
+          // Attach the auth token to every request hls.js makes — manifest,
+          // sub-playlists, and segments all go through this hook.
+          xhrSetup(xhr) {
+            xhr.setRequestHeader('Authorization', `Bearer ${authToken}`)
+          },
         })
         hlsRef.current = hls
-        hls.loadSource(src)
-        hls.attachMedia(video!)
+        hls.loadSource('/api/gpu/hls/index.m3u8')
+        hls.attachMedia(video)
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
-          video!.play().catch(() => {/* autoplay blocked — user can press play */})
+          video.play().catch(() => {/* autoplay blocked — muted so usually fine */})
+          setPlayerState('playing')
         })
         hls.on(Hls.Events.ERROR, (_e, data) => {
           if (data.fatal) {
-            onError('Preview unavailable — stream may not be active yet.')
+            setPlayerState('error')
+            setErrorMsg('Preview failed — stream may have just started. Retrying…')
+            // Auto-recover: destroy and let the next streaming→true cycle restart.
+            hls.destroy()
+            hlsRef.current = null
+            prevStreaming.current = false
           }
         })
-      } else if (video!.canPlayType('application/vnd.apple.mpegurl')) {
-        // Safari handles HLS natively
-        video!.src = src
-        video!.play().catch(() => {})
+      } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+        // Safari native HLS (no hls.js needed, but no auth header possible —
+        // only works because the ?token= param is checked by the proxy route).
+        video.src = `/api/gpu/hls/index.m3u8?token=${encodeURIComponent(authToken)}`
+        video.play().catch(() => {})
+        setPlayerState('playing')
+        video.onerror = () => { setPlayerState('error'); setErrorMsg('Preview unavailable.') }
       } else {
-        onError('Live preview requires Safari or Chrome on Mac.')
+        setPlayerState('error')
+        setErrorMsg('Live preview requires Safari or Chrome 107+ on Mac.')
       }
     }
 
@@ -127,55 +151,32 @@ function HlsPlayer({ src, onError }: HlsPlayerProps) {
         hlsRef.current = null
       }
     }
-  }, [src, onError])
+  }, [streaming, authToken])
 
   return (
-    <video
-      ref={videoRef}
-      muted
-      playsInline
-      controls
-      className="w-full rounded-xl bg-black aspect-video"
-    />
-  )
-}
+    <div className="rounded-xl overflow-hidden bg-black aspect-video relative">
+      <video
+        ref={videoRef}
+        muted
+        playsInline
+        controls
+        className="w-full h-full object-contain"
+      />
 
-// ── Preview Panel ─────────────────────────────────────────────────────────────
-interface PreviewPanelProps {
-  token: string
-}
-
-function PreviewPanel({ token }: PreviewPanelProps) {
-  const [open, setOpen] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const src = hlsProxyUrl(token)
-
-  const handleError = useCallback((msg: string) => setError(msg), [])
-
-  return (
-    <div className="border-t border-line pt-4">
-      <button
-        onClick={() => { setOpen(o => !o); setError(null) }}
-        className="flex items-center gap-2 text-xs text-ink-muted hover:text-ink transition-colors"
-      >
-        <span className={`transition-transform ${open ? 'rotate-90' : ''}`}>▶</span>
-        {open ? 'Hide preview' : 'Preview live feed'}
-      </button>
-
-      {open && (
-        <div className="mt-3">
-          {error ? (
-            <div className="text-xs text-ink-faint bg-base border border-line rounded-xl px-4 py-3">
-              {error}
-            </div>
-          ) : (
-            <>
-              <HlsPlayer src={src} onError={handleError} />
-              <p className="text-[10px] text-ink-faint mt-1.5">
-                Monitoring feed · ~10–20 s latency · muted by default
-              </p>
-            </>
-          )}
+      {/* Overlay states */}
+      {playerState === 'waiting' && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-2">
+          <span className="text-ink-faint/60 text-sm">Preview activates when OBS is streaming</span>
+        </div>
+      )}
+      {playerState === 'loading' && (
+        <div className="absolute inset-0 flex items-center justify-center">
+          <span className="text-ink-faint/60 text-xs">Loading preview…</span>
+        </div>
+      )}
+      {playerState === 'error' && errorMsg && (
+        <div className="absolute inset-0 flex items-center justify-center px-6">
+          <span className="text-ink-faint/70 text-xs text-center">{errorMsg}</span>
         </div>
       )}
     </div>
@@ -186,7 +187,7 @@ function PreviewPanel({ token }: PreviewPanelProps) {
 export function StreamManager() {
   const [data, setData] = useState<GpuStatus | null>(null)
   const [elapsed, setElapsed] = useState(0)
-  const [token, setToken] = useState<string | null>(null)
+  const [authToken, setAuthToken] = useState<string | null>(null)
   const streamStartRef = useRef<number | null>(null)
   const prevStreaming = useRef(false)
 
@@ -198,7 +199,7 @@ export function StreamManager() {
       const { data: { session } } = await supabase.auth.getSession()
       if (!session || !active) return
 
-      if (!token) setToken(session.access_token)
+      if (!authToken) setAuthToken(session.access_token)
 
       const res = await fetch('/api/gpu/status', {
         headers: { Authorization: `Bearer ${session.access_token}` },
@@ -211,9 +212,7 @@ export function StreamManager() {
         streamStartRef.current = Date.now()
         setElapsed(0)
       }
-      if (!body.streaming) {
-        streamStartRef.current = null
-      }
+      if (!body.streaming) streamStartRef.current = null
       prevStreaming.current = body.streaming
     }
 
@@ -224,11 +223,11 @@ export function StreamManager() {
     }, 1000)
 
     return () => { active = false; clearInterval(pollId); clearInterval(tickId) }
-  }, [token])
+  }, [authToken])
 
   if (!data) return null
 
-  const { status, streaming, burn_rate, credits_seconds, outputs, datacenter, gpu_type, confirm_required, confirm_deadline, hls_available } = data
+  const { status, streaming, burn_rate, credits_seconds, outputs, gpu_type, confirm_required, confirm_deadline, hls_available } = data
   const states = platformStateMap(outputs)
   const activePlatforms = PLATFORM_ORDER.filter(p => p in states)
   const remaining = secondsRemaining(credits_seconds, burn_rate)
@@ -273,7 +272,7 @@ export function StreamManager() {
   return (
     <div className={`bg-surface border rounded-2xl p-6 space-y-5 ${lowCredits ? 'border-amber-800/60' : 'border-accent/30'}`}>
 
-      {/* Header: status + session timer + credits */}
+      {/* Header: status + session timer + token balance */}
       <div className="flex items-start justify-between gap-4">
         <div className="flex items-center gap-2.5">
           <span className="relative flex h-2.5 w-2.5 flex-shrink-0">
@@ -301,6 +300,11 @@ export function StreamManager() {
           </div>
         </div>
       </div>
+
+      {/* Live preview — always shown when pod has HLS available */}
+      {hls_available && authToken && (
+        <HlsPlayer authToken={authToken} streaming={streaming} />
+      )}
 
       {/* Platform tiles */}
       {activePlatforms.length > 0 && (
@@ -331,13 +335,10 @@ export function StreamManager() {
         </div>
       )}
 
-      {/* GPU info bar */}
-      {(gpu_type || datacenter) && (
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-line pt-4 text-xs text-ink-faint">
-          {gpu_type && (
-            <span className="font-medium text-ink-muted">{GPU_LABELS[gpu_type] ?? gpu_type.toUpperCase()}</span>
-          )}
-          {datacenter && <span>{datacenter}</span>}
+      {/* GPU info — only type, not datacenter (community cloud DC placement isn't guaranteed) */}
+      {gpu_type && (
+        <div className="flex items-center gap-x-3 border-t border-line pt-4 text-xs text-ink-faint">
+          <span className="font-medium text-ink-muted">{GPU_LABELS[gpu_type] ?? gpu_type.toUpperCase()}</span>
           <span className="text-ink-faint/50">·</span>
           <span>RunPod community</span>
         </div>
@@ -352,11 +353,6 @@ export function StreamManager() {
             <span className="text-amber-400"> Yes, keep streaming</span> in the OBS plugin.
           </div>
         </div>
-      )}
-
-      {/* Live preview player */}
-      {hls_available && token && (
-        <PreviewPanel token={token} />
       )}
     </div>
   )

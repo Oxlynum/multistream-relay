@@ -2,11 +2,16 @@ import { createServerClient } from '@/lib/supabase'
 import { authenticateUserOrAgent } from '@/lib/agent-auth'
 import { encryptSecret } from '@/lib/crypto'
 
+// Twitch + TikTok use RTMPS (port 443) instead of plain RTMP (port 1935).
+// RunPod community cloud nodes are on ISP networks that frequently block
+// outbound port 1935. Port 443 (TLS) is never blocked. Twitch documents
+// rtmps://live.twitch.tv:443/app as the preferred secure ingest.
 const PLATFORM_DEFAULTS: Record<string, { rtmp_url: string; max_bitrate: number; orientation: string }> = {
-  twitch:   { rtmp_url: 'rtmp://live.twitch.tv/app',        max_bitrate: 8000, orientation: 'landscape' },
+  twitch:   { rtmp_url: 'rtmps://live.twitch.tv:443/app',   max_bitrate: 8000, orientation: 'landscape' },
   kick:     { rtmp_url: 'rtmps://fa723fc1b171.global-contribute.live-video.net/app', max_bitrate: 8000, orientation: 'landscape' },
   youtube:  { rtmp_url: 'rtmp://a.rtmp.youtube.com/live2',  max_bitrate: 9000, orientation: 'landscape' },
-  tiktok:   { rtmp_url: 'rtmp://push.tiktok.com/live',      max_bitrate: 4500, orientation: 'portrait' },}
+  tiktok:   { rtmp_url: 'rtmp://push.tiktok.com/live',      max_bitrate: 4500, orientation: 'portrait' },
+}
 
 export async function POST(request: Request) {
   const supabase = createServerClient()
