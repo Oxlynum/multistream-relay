@@ -22,8 +22,12 @@ static void frontendEventCb(obs_frontend_event event, void *data)
     // QueuedConnection: keeps the HTTP call off OBS's event dispatch thread.
     switch (event) {
     case OBS_FRONTEND_EVENT_STREAMING_STARTING:
+        // Direct (synchronous) so we can abort the start BEFORE OBS connects to
+        // a not-yet-real server. Frontend events fire on the UI thread, same as
+        // the dock, so this is a plain in-thread call. The provision it kicks off
+        // is async, so it doesn't block.
         QMetaObject::invokeMethod(dock, "onObsStreamingStarting",
-                                  Qt::QueuedConnection);
+                                  Qt::DirectConnection);
         break;
     case OBS_FRONTEND_EVENT_STREAMING_STOPPED:
         QMetaObject::invokeMethod(dock, "onObsStreamingStopped",

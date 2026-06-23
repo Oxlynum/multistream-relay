@@ -38,6 +38,11 @@ static const QString C_FAINT = QStringLiteral("#6b7280");
 // SlimCast fans out to. (Facebook was dropped: its low cap dragged the shared
 // landscape encode down.)
 static const QStringList PLATFORM_NAMES = {"twitch", "kick", "youtube", "tiktok"};
+
+// Placeholder so OBS will allow Start before a pod exists (OBS rejects an empty
+// server). Never actually streamed to — the start is aborted and re-driven to
+// the real pod address once it boots.
+static const QString PLACEHOLDER_SERVER = QStringLiteral("rtmp://127.0.0.1:1935");
 static const QMap<QString, QString> PLATFORM_LABELS = {
     {"twitch",  "Twitch"}, {"kick", "Kick"}, {"youtube", "YouTube"}, {"tiktok", "TikTok"},
 };
@@ -85,11 +90,7 @@ RelayDock::RelayDock(QWidget *parent)
     connect(m_pollTimer, &QTimer::timeout, this, &RelayDock::onPollTick);
 
     if (m_api->hasApiKey()) {
-        showSetup(false);
-        m_pollTimer->start();
-        m_api->fetchGpuStatus();
-        m_api->fetchPlatforms();
-        m_api->fetchEncode();
+        enterActive();
     } else {
         showSetup(true);
     }
@@ -414,6 +415,20 @@ void RelayDock::enterActive()
 {
     showSetup(false);
     setStatus("Connecting…", C_WARN);
+
+    // If OBS is stuck on a Custom service with an EMPTY server (e.g. left over
+    // from a prior session), OBS would refuse Start ("stream URL is missing").
+    // Drop in the placeholder so Start works; we leave presets (Twitch/YouTube)
+    // alone — those have a server and our STREAMING_STARTING hook handles them.
+    obs_service_t *svc = obs_frontend_get_streaming_service();
+    const char *type = svc ? obs_service_get_type(svc) : nullptr;
+    if (type && strcmp(type, "rtmp_custom") == 0) {
+        obs_data_t *s = obs_service_get_settings(svc);
+        const QString server = QString::fromUtf8(obs_data_get_string(s, "server"));
+        obs_data_release(s);
+        if (server.isEmpty()) setSlimcastService(PLACEHOLDER_SERVER, "slimcast");
+    }
+
     m_pollTimer->start();
     m_api->fetchGpuStatus();
     m_api->fetchPlatforms();
@@ -500,8 +515,10 @@ void RelayDock::onObsStreamingStarting()
         return;
     }
 
-    obs_frontend_streaming_stop();
+    // Set the flag BEFORE stopping: the synchronous stop re-enters our event
+    // callback with STREAMING_STOPPED, which must be ignored mid-launch.
     m_autoLaunching = true;
+    obs_frontend_streaming_stop();
     setStatus("Starting…", C_WARN);
     m_api->provisionGpu();
 }
@@ -850,11 +867,21 @@ void RelayDock::applyObsStreamUrl(const QString &server, const QString &key)
 // Custom we leave it alone (don't wipe a server that may already be set).
 void RelayDock::ensureCustomService()
 {
+    // OBS refuses to start with an empty server ("stream URL is missing"), and
+    // we need it to start so our STREAMING_STARTING hook can provision. So set a
+    // placeholder server (never actually connected to — the start is aborted and
+    // re-driven to the real pod once it boots). A non-empty server is the point.
     obs_service_t *svc = obs_frontend_get_streaming_service();
     const char *type = svc ? obs_service_get_type(svc) : nullptr;
-    if (type && strcmp(type, "rtmp_custom") == 0) return;
-    // Flip off a Twitch/preset onto Custom; server + per-pod key fill in on Start.
-    setSlimcastService("", "");
+    obs_data_t *settings = svc ? obs_service_get_settings(svc) : nullptr;
+    const QString curServer = settings
+        ? QString::fromUtf8(obs_data_get_string(settings, "server")) : QString();
+    if (settings) obs_data_release(settings);
+
+    // Already Custom with some server → leave it (don't stomp a real/placeholder one).
+    if (type && strcmp(type, "rtmp_custom") == 0 && !curServer.isEmpty()) return;
+
+    setSlimcastService(PLACEHOLDER_SERVER, "slimcast");
 }
 
 // Returns a warning if OBS's stream output isn't pointed at SlimCast, else "".
