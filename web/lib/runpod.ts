@@ -49,23 +49,19 @@ export async function createPod(params: {
   cloudType?: string
   dataCenterIds?: string[]
 }): Promise<{ podId: string; costPerHr?: number }> {
-  const registryAuthId = process.env.RUNPOD_REGISTRY_AUTH_ID
-
   const pod = await request<RunPodPod>('POST', '/pods', {
     name: params.name,
     imageName: params.imageTag,
     gpuTypeId: params.gpuTypeId,
     cloudType: params.cloudType ?? 'COMMUNITY',
     containerDiskInGb: 15,
-    volumeInGb: 0,
+    // No persistent volume needed — the pod is ephemeral (destroyed on stream stop).
     // Only expose the RTMP ingest publicly. The FastAPI debug panel on :8080
-    // handles stream keys and must never be reachable from the internet — the
-    // agent talks to Vercel, nothing external talks to the pod except OBS→RTMP.
+    // handles stream keys and must never be reachable from the internet.
     ports: '1935/tcp',
     env: params.env,
-    // Restrict to the supplied datacenters (proximity-ordered by the broker).
-    ...(params.dataCenterIds?.length ? { dataCenterIds: params.dataCenterIds } : {}),
-    ...(registryAuthId ? { containerRegistryAuthId: registryAuthId } : {}),
+    // v1 REST API uses dataCenterId (singular string), not dataCenterIds[].
+    ...(params.dataCenterIds?.[0] ? { dataCenterId: params.dataCenterIds[0] } : {}),
   })
   return { podId: pod.id, costPerHr: pod.costPerHr }
 }
