@@ -517,6 +517,17 @@ void RelayDock::onObsStreamingStopped()
 void RelayDock::onGpuStatusUpdated(GpuInfo info)
 {
     m_lastGpuInfo = info;
+
+    // If OBS opens and finds a pod already in 'provisioning' state (e.g. from a
+    // previous Go Live that was interrupted or whose dock timed out), auto-resume
+    // waiting so Cancel works and the 6-min timer runs. If the agent pairs in
+    // time, OBS goes live automatically. If not, the timer fires and cleans up.
+    if (!m_autoLaunching && !m_shuttingDown && info.status == "provisioning") {
+        m_autoLaunching = true;
+        m_launchStartMs = QDateTime::currentMSecsSinceEpoch();
+        if (m_launchTimeout) m_launchTimeout->start();
+    }
+
     render(info);
 
     // Agent paired → status flips 'provisioning' → 'running'. That means
