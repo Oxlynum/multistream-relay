@@ -30,6 +30,7 @@ export async function POST(request: NextRequest) {
     outputs: OutputStatus[]
     streaming: boolean
   }
+  console.log(`[agent/status] label=${label} streaming=${streaming} outputs=${outputs.length}`)
 
   const supabase = createServerClient()
 
