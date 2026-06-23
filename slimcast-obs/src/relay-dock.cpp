@@ -98,7 +98,7 @@ RelayDock::RelayDock(QWidget *parent)
     // If we don't reach Live within this, we give up and clean up.
     m_launchTimeout = new QTimer(this);
     m_launchTimeout->setSingleShot(true);
-    m_launchTimeout->setInterval(240000);   // 4 min (cold-start Docker pull ~90s + agent init)
+    m_launchTimeout->setInterval(360000);   // 6 min from pod creation: Docker pull + agent pair
     connect(m_launchTimeout, &QTimer::timeout, this, [this]() {
         abortLaunch("Couldn't get a server online in time. Please try Go Live again.");
     });

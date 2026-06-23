@@ -7,8 +7,10 @@ import { buildAgentOutputs, type PlatformRow } from '@/lib/agent-config'
 export async function POST(request: NextRequest) {
   const userId = await authenticateAgent(request)
   if (!userId) {
+    console.warn('[agent/pair] Unauthorized pair attempt')
     return Response.json({ error: 'Unauthorized' }, { status: 401 })
   }
+  console.log('[agent/pair] Agent paired, userId=', userId)
 
   const supabase = createServerClient()
 
