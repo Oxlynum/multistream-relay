@@ -608,7 +608,11 @@ void RelayDock::render(const GpuInfo &info)
     } else if (info.status == "provisioning") {
         text = "Starting up…";                         color = C_WARN;
     } else if (info.status == "running") {
-        text  = info.streaming ? "Live" : "Ready";     color = C_LIVE;
+        if (info.streaming) {
+            text = "Live";             color = C_LIVE;
+        } else {
+            text = "Waiting for OBS…"; color = C_WARN;
+        }
         m_launchStartMs = 0;                            // startup finished
     } else {
         text = "Idle";                                 color = C_IDLE;
