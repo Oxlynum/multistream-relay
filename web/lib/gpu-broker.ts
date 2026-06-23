@@ -31,6 +31,7 @@ import {
   RUNPOD_DATACENTERS, GPU_CATALOG, PRICE_CEILING, ADA_SORT_BONUS,
   LATENCY_NEAR_MS, LATENCY_MID_MS, CLOUD_TYPES,
   READINESS_TIMEOUT_MS, READINESS_POLL_MS, MAX_BOOT_ATTEMPTS,
+  MAX_PROVISION_RTT_MS,
   type Datacenter,
 } from '@/lib/datacenters'
 import { ACTIVE_PROVIDERS } from '@/lib/providers/runpod'
@@ -71,9 +72,19 @@ export function rankCandidates(lat: number, lon: number): GpuCandidate[] {
   const byTier: Record<'near' | 'mid' | 'far', Array<Datacenter & { rtt: number }>> = {
     near: [], mid: [], far: [],
   }
+  let anyWithinBound = false
   for (const dc of RUNPOD_DATACENTERS) {
     const rtt = estimateRttMs(haversineKm(lat, lon, dc.lat, dc.lon))
+    if (rtt <= MAX_PROVISION_RTT_MS) anyWithinBound = true
     byTier[tierFor(rtt)].push({ ...dc, rtt })
+  }
+
+  // Region beats price: exclude any DC over the RTT ceiling unless there are
+  // no in-bound DCs at all (VPN / unusual geo → allow the nearest far DC).
+  if (anyWithinBound) {
+    for (const tier of ['near', 'mid', 'far'] as const) {
+      byTier[tier] = byTier[tier].filter(dc => dc.rtt <= MAX_PROVISION_RTT_MS)
+    }
   }
 
   const gpus = GPU_CATALOG
@@ -110,12 +121,12 @@ export function rankCandidates(lat: number, lon: number): GpuCandidate[] {
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 
 /** Poll until the pod reports a public IP + mapped RTMP port (booted), or time out. */
-async function waitForIp(provider: GpuProvider, podId: string): Promise<{ ip: string; port: number; hlsPort: number | null } | null> {
+async function waitForIp(provider: GpuProvider, podId: string): Promise<{ ip: string; port: number; hlsPort: number | null; dataCenterId: string | null } | null> {
   const deadline = Date.now() + READINESS_TIMEOUT_MS
   while (Date.now() < deadline) {
     try {
       const s = await provider.getStatus(podId)
-      if (s.ip && s.port) return { ip: s.ip, port: s.port, hlsPort: s.hlsPort ?? null }
+      if (s.ip && s.port) return { ip: s.ip, port: s.port, hlsPort: s.hlsPort ?? null, dataCenterId: s.dataCenterId ?? null }
       if (s.status === 'error' || s.status === 'terminated') return null
     } catch {
       // transient API error — keep polling within the budget
@@ -203,6 +214,23 @@ export async function provisionGpu(args: {
           }
           continue
         }
+
+        // DC allowlist check: RunPod community cloud often ignores dataCenterIds
+        // and places pods wherever it has capacity (EU-SE-1, EU-CZ-1, etc.).
+        // We ask RunPod's own GraphQL for the pod's actual dataCenterId and
+        // reject any DC not in our catalog (US/CA only). No external API needed.
+        // Doesn't count against the boot budget — this is RunPod's mistake.
+        if (addr.dataCenterId) {
+          const inCatalog = RUNPOD_DATACENTERS.some(dc => dc.id === addr.dataCenterId)
+          if (!inCatalog) {
+            console.warn(`[broker] pod ${podId} landed in ${addr.dataCenterId} (not in acceptable DC catalog) — RunPod ignored dataCenterIds, destroying and cascading`)
+            try { await provider.destroy(podId) } catch { /* best effort */ }
+            lastError = `pod placed in unacceptable datacenter: ${addr.dataCenterId}`
+            bootAttempts--
+            continue
+          }
+        }
+
         return {
           ok: true,
           provider: provider.name,

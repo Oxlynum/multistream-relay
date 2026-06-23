@@ -13,6 +13,7 @@ interface RunPodPod {
 interface GqlPod {
   id: string
   desiredStatus: string
+  machine?: { dataCenterId?: string | null }
   runtime?: {
     ports?: Array<{ ip: string; isIpPublic: boolean; privatePort: number; publicPort: number }>
   }
@@ -108,25 +109,27 @@ export async function listPods(): Promise<Array<{ id: string; name: string }>> {
 // runtime.ports (public IP + mapped port) for community cloud pods.
 // The v1 REST GET /pods/{id} response omits portMappings/runtime for community
 // pods, so we'd time out waiting for a port that never appears there.
-export async function getPodStatus(podId: string): Promise<{ status: string; ip: string | null; port: number | null; hlsPort: number | null }> {
+export async function getPodStatus(podId: string): Promise<{ status: string; ip: string | null; port: number | null; hlsPort: number | null; dataCenterId: string | null }> {
   const data = await gqlRequest<{ pod: GqlPod }>(
-    `query { pod(input: {podId: "${podId}"}) { id desiredStatus runtime { ports { ip isIpPublic privatePort publicPort } } } }`
+    `query { pod(input: {podId: "${podId}"}) { id desiredStatus machine { dataCenterId } runtime { ports { ip isIpPublic privatePort publicPort } } } }`
   )
   const pod = data.pod
   const ports = pod?.runtime?.ports ?? []
   const rtmpObj = ports.find(p => p.isIpPublic && p.privatePort === 1935)
   const hlsObj  = ports.find(p => p.isIpPublic && p.privatePort === 8888)
 
-  const ip      = rtmpObj?.ip ?? null
-  const port    = rtmpObj?.publicPort ?? null
-  const hlsPort = hlsObj?.publicPort ?? null
+  const ip           = rtmpObj?.ip ?? null
+  const port         = rtmpObj?.publicPort ?? null
+  const hlsPort      = hlsObj?.publicPort ?? null
+  const dataCenterId = pod?.machine?.dataCenterId ?? null
 
-  console.log(`[runpod/gql] pod ${podId} status=${pod?.desiredStatus} ip=${ip} rtmp=${port} hls=${hlsPort}`)
+  console.log(`[runpod/gql] pod ${podId} status=${pod?.desiredStatus} dc=${dataCenterId} ip=${ip} rtmp=${port} hls=${hlsPort}`)
 
   return {
     status: pod?.desiredStatus ?? 'unknown',
     ip,
     port,
     hlsPort,
+    dataCenterId,
   }
 }

@@ -100,6 +100,14 @@ export const READINESS_POLL_MS = 5_000
 // are fast and don't count — only real-but-dead boots do).
 export const MAX_BOOT_ATTEMPTS = 2
 
+// Hard RTT ceiling for provisioning. Any datacenter whose estimated round-trip
+// from the user exceeds this is excluded from the candidate list entirely —
+// region always beats price. 100ms covers all of North America from any US/CA
+// user; European DCs are 130ms+ from the US coast so they're never reached.
+// If no DC is within this bound (VPN, unusual geo), the broker falls back to
+// the nearest available regardless.
+export const MAX_PROVISION_RTT_MS = 100
+
 // Default location when the request carries no geo headers (local dev, VPNs):
 // central US minimizes worst-case latency for an unknown US user.
 export const FALLBACK_LAT = 39.0

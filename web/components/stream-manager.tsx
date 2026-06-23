@@ -91,8 +91,19 @@ function HlsPlayer({ authToken, streaming }: HlsPlayerProps) {
         const hls = new Hls({
           maxBufferLength: 10,
           backBufferLength: 0,
+          // xhrSetup covers the default XHR loader; fetchSetup covers fetch-based
+          // loaders used in some environments (both needed for hls.js 1.6.x).
           xhrSetup(xhr) {
             xhr.setRequestHeader('Authorization', `Bearer ${authToken}`)
+          },
+          fetchSetup(context: { url: string }, initParams: RequestInit) {
+            return new Request(context.url, {
+              ...initParams,
+              headers: {
+                ...(initParams?.headers ?? {}),
+                Authorization: `Bearer ${authToken}`,
+              },
+            })
           },
         })
         hlsRef.current = hls
