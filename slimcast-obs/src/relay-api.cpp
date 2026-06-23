@@ -103,7 +103,7 @@ void RelayApi::provisionGpu()
     QNetworkRequest req(QUrl(BASE_URL + "/api/gpu/provision"));
     req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
     req.setRawHeader("Authorization", ("Bearer " + m_apiKey).toUtf8());
-    req.setTransferTimeout(120000);
+    req.setTransferTimeout(180000);   // 3 min for broker + RunPod boot
 
     QNetworkReply *reply = m_nam->post(req, QByteArray("{}"));
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
