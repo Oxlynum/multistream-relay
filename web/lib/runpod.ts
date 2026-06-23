@@ -56,13 +56,12 @@ export async function createPod(params: {
     cloudType: params.cloudType ?? 'COMMUNITY',
     containerDiskInGb: 15,
     // No persistent volume needed — the pod is ephemeral (destroyed on stream stop).
-    // Only expose the RTMP ingest publicly. The FastAPI debug panel on :8080
-    // handles stream keys and must never be reachable from the internet.
-    ports: '1935/tcp',
-    env: params.env,
-    // Datacenter selection via the v1 REST API may not be supported (it's available
-    // in the GraphQL API). Omitting it lets RunPod auto-select based on cloudType.
-    // TODO: revisit when confirmed against the live v1 OpenAPI spec.
+    // v1 REST: ports is an array, not a string.
+    ports: ['1935/tcp'],
+    // v1 REST: env is a plain object { KEY: value }, not [{key, value}] (GraphQL shape).
+    env: Object.fromEntries(params.env.map(e => [e.key, e.value])),
+    // Datacenter selection via v1 REST is not supported (GraphQL-only).
+    // Let RunPod auto-select within the requested cloudType.
   })
   return { podId: pod.id, costPerHr: pod.costPerHr }
 }
