@@ -532,13 +532,19 @@ void RelayDock::onGpuStatusUpdated(GpuInfo info)
 
     // Agent paired → status flips 'provisioning' → 'running'. That means
     // MediaMTX is up and RTMP is accepting. Set OBS's URL and start streaming.
-    if (m_autoLaunching && info.status == "running" && !info.rtmpUrl.isEmpty()) {
+    if (m_autoLaunching && info.status == "running") {
         if (m_launchTimeout) m_launchTimeout->stop();
         m_autoLaunching  = false;
-        m_resumingStream = true;
-        setStatus("Connecting…", C_WARN);
-        applyObsStreamUrl(info.rtmpUrl, info.ingestKey);
-        obs_frontend_streaming_start();
+        if (!info.rtmpUrl.isEmpty()) {
+            m_resumingStream = true;
+            setStatus("Connecting…", C_WARN);
+            applyObsStreamUrl(info.rtmpUrl, info.ingestKey);
+            obs_frontend_streaming_start();
+        } else {
+            // Server is up but we don't have the mapped port yet — should be
+            // extremely rare. User can Stop and Go Live again to reprovision.
+            setStatus("Ready (reconnect OBS manually)", C_WARN);
+        }
         return;
     }
 

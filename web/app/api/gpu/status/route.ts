@@ -72,6 +72,7 @@ export async function GET(request: Request) {
   const server = instance.ip_address && instance.ingest_port
     ? `rtmp://${instance.ip_address}:${instance.ingest_port}`
     : null
+  console.log(`[gpu/status] effectiveStatus=${effectiveStatus} ip=${instance.ip_address} port=${instance.ingest_port} key=${instance.ingest_key ? instance.ingest_key.slice(0,8)+'…' : 'null'} rtmp_url=${server}`)
 
   return Response.json({
     status: effectiveStatus,
