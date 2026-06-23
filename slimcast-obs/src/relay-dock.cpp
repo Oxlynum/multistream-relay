@@ -3,6 +3,7 @@
 #include <obs.h>
 #include <obs-module.h>
 #include <obs-frontend-api.h>
+#include <util/config-file.h>
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
