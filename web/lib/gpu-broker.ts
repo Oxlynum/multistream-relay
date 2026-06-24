@@ -34,6 +34,7 @@ import {
   MAX_PROVISION_RTT_MS, MAX_RTT_REJECTIONS,
   type Datacenter,
 } from '@/lib/datacenters'
+import { fetchDatacenterIds } from '@/lib/runpod'
 import { ACTIVE_PROVIDERS } from '@/lib/providers/runpod'
 import type { GpuCandidate, GpuProvider, PodEnv } from '@/lib/providers/types'
 import { requiredNvencSessions, type UserOutputConfig } from '@/lib/nvenc-utils'
@@ -69,13 +70,13 @@ function gpuSortScore(pricePerHr: number, gen: string): number {
 }
 
 /** Build the ranked candidate list for a user at (lat, lon). */
-export function rankCandidates(lat: number, lon: number, needsProfessionalGpu = false): GpuCandidate[] {
+export function rankCandidates(lat: number, lon: number, needsProfessionalGpu = false, datacenters: Datacenter[] = RUNPOD_DATACENTERS): GpuCandidate[] {
   // Annotate each datacenter with its tier + rtt, grouped by tier.
   const byTier: Record<'near' | 'mid' | 'far', Array<Datacenter & { rtt: number }>> = {
     near: [], mid: [], far: [],
   }
   let anyWithinBound = false
-  for (const dc of RUNPOD_DATACENTERS) {
+  for (const dc of datacenters) {
     const rtt = estimateRttMs(haversineKm(lat, lon, dc.lat, dc.lon))
     if (rtt <= MAX_PROVISION_RTT_MS) anyWithinBound = true
     byTier[tierFor(rtt)].push({ ...dc, rtt })
@@ -174,7 +175,22 @@ export async function provisionGpu(args: {
   if (needsProfessionalGpu) {
     console.log(`[broker] user needs ${nvencSessions} NVENC sessions — skipping consumer GPUs`)
   }
-  const candidates = rankCandidates(args.lat, args.lon, needsProfessionalGpu)
+
+  // Fetch the live set of valid datacenter IDs from RunPod so we never send
+  // an ID the API no longer recognises (causes a 400 for the whole request).
+  // On failure we fall back to omitting dataCenterIds (RunPod places freely;
+  // the RTT gate below still rejects wrong-region pods after the fact).
+  const liveDcIds = await fetchDatacenterIds()
+  const datacenters = liveDcIds
+    ? RUNPOD_DATACENTERS.filter(dc => liveDcIds.has(dc.id))
+    : RUNPOD_DATACENTERS
+  if (liveDcIds) {
+    console.log(`[broker] live DCs from RunPod: ${datacenters.length} of ${RUNPOD_DATACENTERS.length} in our map`)
+  } else {
+    console.warn('[broker] could not fetch live DC list from RunPod — proceeding without DC filter')
+  }
+
+  const candidates = rankCandidates(args.lat, args.lon, needsProfessionalGpu, datacenters)
   let attempts = 0
   let bootAttempts = 0
   let rttRejections = 0

@@ -57,6 +57,20 @@ async function gqlRequest<T>(query: string): Promise<T> {
   return body.data
 }
 
+// Fetch the set of datacenter IDs RunPod currently accepts for pod creation.
+// Returns null on any failure so the caller can fall back gracefully.
+export async function fetchDatacenterIds(): Promise<Set<string> | null> {
+  try {
+    const data = await gqlRequest<{ dataCenters: Array<{ id: string }> }>(
+      'query { dataCenters { id } }'
+    )
+    const ids = (data.dataCenters ?? []).map(dc => dc.id).filter(Boolean)
+    return ids.length > 0 ? new Set(ids) : null
+  } catch {
+    return null
+  }
+}
+
 export interface PodEnv { key: string; value: string }
 
 // Low-level pod create for one specific candidate (gpu type + cloud + DC).
