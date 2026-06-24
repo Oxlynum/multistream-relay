@@ -31,7 +31,7 @@ import {
   RUNPOD_DATACENTERS, GPU_CATALOG, PRICE_CEILING, ADA_SORT_BONUS,
   LATENCY_NEAR_MS, LATENCY_MID_MS, CLOUD_TYPES,
   READINESS_TIMEOUT_MS, READINESS_POLL_MS, MAX_BOOT_ATTEMPTS,
-  MAX_PROVISION_RTT_MS,
+  MAX_PROVISION_RTT_MS, MAX_RTT_REJECTIONS,
   type Datacenter,
 } from '@/lib/datacenters'
 import { ACTIVE_PROVIDERS } from '@/lib/providers/runpod'
@@ -93,25 +93,28 @@ export function rankCandidates(lat: number, lon: number): GpuCandidate[] {
 
   const candidates: GpuCandidate[] = []
   for (const tier of ['near', 'mid', 'far'] as const) {
-    // Sort DCs nearest-first within the tier. Each DC gets its own candidate so
-    // the broker tries DC1 (nearest) before DC2, etc. Previously all DCs were
-    // bundled into one candidate and the datacenterIds array was never forwarded
-    // to RunPod — letting RunPod pick any DC worldwide (e.g. France from Florida).
     const sortedDcs = byTier[tier].sort((a, b) => a.rtt - b.rtt)
     if (sortedDcs.length === 0) continue
-    for (const dc of sortedDcs) {
-      for (const cloudType of CLOUD_TYPES) {
-        for (const gpu of gpus) {
-          candidates.push({
-            gpuKey: gpu.key,
-            gpuTypeId: gpu.runpodId,
-            gen: gpu.gen,
-            pricePerHr: gpu.pricePerHr,
-            cloudType,
-            datacenterIds: [dc.id],
-            tier,
-          })
-        }
+    // Bundle ALL acceptable DCs for this tier into every candidate. RunPod
+    // community cloud ignores single-DC requests and places pods wherever it has
+    // inventory — but providing the full acceptable list gives it the best chance
+    // of landing in the right region. The actual DC is verified by RTT check
+    // post-boot. One candidate per GPU type instead of one per DC×GPU: reduces
+    // the candidate list from ~275 to ~11 for a typical user, preventing the
+    // broker from cycling through hundreds of identical-to-RunPod requests and
+    // burning the Vercel 300s function timeout on wrong-region pod detection.
+    const dcIds = sortedDcs.map(dc => dc.id)
+    for (const cloudType of CLOUD_TYPES) {
+      for (const gpu of gpus) {
+        candidates.push({
+          gpuKey: gpu.key,
+          gpuTypeId: gpu.runpodId,
+          gen: gpu.gen,
+          pricePerHr: gpu.pricePerHr,
+          cloudType,
+          datacenterIds: dcIds,
+          tier,
+        })
       }
     }
   }
@@ -165,6 +168,7 @@ export async function provisionGpu(args: {
   const candidates = rankCandidates(args.lat, args.lon)
   let attempts = 0
   let bootAttempts = 0
+  let rttRejections = 0
   let lastError: string | undefined
 
   // Hard latency rule: the pod RunPod actually gives us must be within this
@@ -248,10 +252,14 @@ export async function provisionGpu(args: {
 
         const actualRttMs = estimateRttMs(haversineKm(args.lat, args.lon, actualDc.lat, actualDc.lon))
         if (actualRttMs > rttAcceptanceMs) {
-          console.warn(`[broker] pod ${podId} placed in ${addr.dataCenterId} (${actualRttMs.toFixed(0)}ms from user, limit ${rttAcceptanceMs.toFixed(0)}ms) — RunPod ignored dataCenterIds, cascading`)
+          rttRejections++
+          console.warn(`[broker] pod ${podId} placed in ${addr.dataCenterId} (${actualRttMs.toFixed(0)}ms, limit ${rttAcceptanceMs.toFixed(0)}ms) — wrong region (rejection ${rttRejections}/${MAX_RTT_REJECTIONS})`)
           try { await provider.destroy(podId) } catch { /* best effort */ }
-          lastError = `pod too far from user: ${addr.dataCenterId} at ${actualRttMs.toFixed(0)}ms (limit ${rttAcceptanceMs.toFixed(0)}ms)`
+          lastError = `pod too far: ${addr.dataCenterId} at ${actualRttMs.toFixed(0)}ms`
           bootAttempts--
+          if (rttRejections >= MAX_RTT_REJECTIONS) {
+            return { ok: false, attempts, error: `No GPU capacity in your region. RunPod placed ${rttRejections} pods outside your area — try again in a few minutes when local inventory refreshes.` }
+          }
           continue
         }
 

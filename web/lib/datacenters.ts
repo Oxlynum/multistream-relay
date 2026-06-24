@@ -128,6 +128,11 @@ export const READINESS_POLL_MS = 5_000
 // RunPod repeatedly misplacing pods in EU before landing on a US DC.
 export const MAX_BOOT_ATTEMPTS = 5
 
+// How many times RunPod can place a pod in the wrong region before we give up
+// and tell the user to retry later. Each wrong-region pod takes ~90s to detect
+// and destroy — 3 rejections = ~270s, safely within Vercel's 300s limit.
+export const MAX_RTT_REJECTIONS = 3
+
 // Hard RTT ceiling for provisioning. Any datacenter whose estimated RTT from
 // the user exceeds this is excluded from the candidate list and rejected if
 // RunPod ignores dataCenterIds and places the pod there anyway. Works globally:

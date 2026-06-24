@@ -63,6 +63,9 @@ HEARTBEAT_FAIL_LIMIT = int(os.environ.get("AGENT_HB_FAIL_LIMIT", "6"))   # ~60s
 # Seconds after OBS disconnects before we stop encoders and terminate the pod.
 # A reconnect within this window (network blip, OBS restart) cancels the timer.
 DISCONNECT_GRACE_S = int(os.environ.get("RELAY_DISCONNECT_GRACE", "20"))
+# If OBS never connects within this many seconds of the pod being ready, terminate.
+# Prevents paying for a pod that OBS can't reach (wrong region, port issue, etc.)
+STARTUP_TIMEOUT_S = int(os.environ.get("RELAY_STARTUP_TIMEOUT", "120"))
 
 if not API_KEY:
     log.error("SLIMCAST_API_KEY is not set — cannot authenticate with Vercel.")
@@ -225,6 +228,8 @@ def main() -> None:
 
     streaming = False
     hb_failures = 0
+    first_obs_connection = False
+    startup_deadline = time.time() + STARTUP_TIMEOUT_S
 
     while True:
         # Restart MediaMTX if it died.
@@ -254,12 +259,21 @@ def main() -> None:
                 streaming = False
 
         # ── OBS connection state (hook.sh writes/clears /tmp/obs_connected) ──
+        # ── Startup timeout ───────────────────────────────────────────────────
+        # If OBS never connects within STARTUP_TIMEOUT_S of the pod being ready,
+        # terminate — the pod is unreachable (wrong region, port issue, etc.).
+        if not first_obs_connection and time.time() > startup_deadline:
+            log.warning("OBS did not connect within %ds of pod ready — terminating.", STARTUP_TIMEOUT_S)
+            _api("POST", "/api/agent/terminate", {"reason": "startup_timeout"})
+            break
+
         obs_connected = os.path.exists(OBS_FLAG)
         if obs_connected and not prev_obs_connected:
             # OBS just connected (SIGUSR1 woke us instantly from hook.sh).
             # Cancel any pending grace-terminate from a previous disconnect,
             # then start encoders immediately with the cached config.
             log.info("OBS connected — starting encoders immediately.")
+            first_obs_connection = True
             _cancel_terminate()
             sup.cancel_pending_stop()
             if last_known_config:

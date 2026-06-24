@@ -61,7 +61,10 @@ export async function POST(request: NextRequest) {
     const elapsed = Math.min(Math.max(0, (now - last) / 1000), MAX_BILL_INTERVAL_S)
     const deduct = Math.round(burnRate * elapsed)
 
-    if (deduct > 0) {
+    // DEV: SLIMCAST_DEV_NO_BILLING_USER_ID skips credit deduction for one account
+    // (server-side Vercel env only — never exposed to clients). Safe for testing.
+    const devNoBilling = process.env.SLIMCAST_DEV_NO_BILLING_USER_ID === userId
+    if (deduct > 0 && !devNoBilling) {
       creditsSeconds = Math.max(0, creditsSeconds - deduct)
       await supabase
         .from('profiles')
