@@ -107,7 +107,7 @@ function HlsPlayer({ authToken, streaming }: HlsPlayerProps) {
           },
         })
         hlsRef.current = hls
-        hls.loadSource('/api/gpu/hls/index.m3u8')
+        hls.loadSource(`/api/gpu/hls/index.m3u8?token=${encodeURIComponent(authToken)}`)
         hls.attachMedia(video)
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
           video.play().catch(() => {})
