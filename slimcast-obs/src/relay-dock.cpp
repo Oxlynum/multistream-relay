@@ -56,13 +56,12 @@ static QString goLiveStyle(const QString &bg)
         "QPushButton:disabled{background:#2a313d; color:#6b7280;}").arg(bg);
 }
 
-static QString formatCredits(int seconds)
+static QString formatCredits(double tokens)
 {
-    if (seconds <= 0) return QStringLiteral("0m");
-    int h = seconds / 3600;
-    int m = (seconds % 3600) / 60;
-    if (h > 0) return QString("%1h %2m").arg(h).arg(m);
-    return QString("%1m").arg(m);
+    if (tokens <= 0) return QStringLiteral("0 tkn");
+    if (tokens >= 100) return QString("%1 tkn").arg(static_cast<int>(tokens));
+    if (tokens >= 10)  return QString("%1 tkn").arg(tokens, 0, 'f', 1);
+    return QString("%1 tkn").arg(tokens, 0, 'f', 3);
 }
 
 // A channel is a free HEVC passthrough only when it's YouTube in landscape.
@@ -671,9 +670,9 @@ void RelayDock::render(const GpuInfo &info)
         }
     }
 
-    m_creditsLabel->setText(formatCredits(info.creditsSeconds));
-    const QString cColor = info.creditsSeconds <= 0 ? C_ERR
-                         : info.creditsSeconds < 1800 ? C_WARN : C_LIVE;
+    m_creditsLabel->setText(formatCredits(info.creditsTokens));
+    const QString cColor = info.creditsTokens <= 0 ? C_ERR
+                         : info.creditsTokens < 0.5 ? C_WARN : C_LIVE;
     m_creditsLabel->setStyleSheet(QString("color:%1; font-size:13px; font-weight:600").arg(cColor));
 
     // Auto-engage the channel lock the moment a stream begins.

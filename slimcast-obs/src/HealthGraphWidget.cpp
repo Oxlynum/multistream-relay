@@ -193,7 +193,7 @@ void HealthGraphWidget::rebuildCombo()
     }
     for (const QString &plat : m_platforms) {
         Source s;
-        s.label = "→ " + plat[0].toUpper() + plat.mid(1);
+        s.label = QStringLiteral("→ ") + plat[0].toUpper() + plat.mid(1);
         s.key   = plat;
         for (const Source &old : m_sources)
             if (old.key == s.key) { s.pts = old.pts; break; }
