@@ -48,3 +48,43 @@ export async function teardownInstance(userId: string, reason: string): Promise<
   console.log(`[teardown] destroyed pod for ${userId}: ${reason}`)
   return true
 }
+
+// How long without a heartbeat before a pod is considered dead.
+const SWEEP_STALE_S = 150
+// Provisioned but never paired within this window → boot failed.
+const SWEEP_NEVER_PAIRED_S = 180
+const SWEEP_IDLE_GRACE_S = 5 * 60
+
+/**
+ * Inline reaper — no cron cost. Called opportunistically on every pod heartbeat
+ * and at provision time. Single DB read; teardowns only fire when truly stale.
+ * Idempotent: safe to call concurrently from multiple in-flight requests.
+ */
+export async function sweepStalePods(): Promise<void> {
+  const supabase = createServerClient()
+  const { data } = await supabase
+    .from('gpu_instances')
+    .select('user_id, last_seen_at, created_at, idle_since, streaming')
+    .neq('status', 'stopped')
+
+  const now = Date.now()
+  for (const inst of data ?? []) {
+    const lastSeen  = inst.last_seen_at ? new Date(inst.last_seen_at).getTime() : null
+    const createdAt = inst.created_at   ? new Date(inst.created_at).getTime()   : now
+    const idleSince = inst.idle_since   ? new Date(inst.idle_since).getTime()   : null
+
+    let reason = ''
+    if (!lastSeen && (now - createdAt) / 1000 > SWEEP_NEVER_PAIRED_S) {
+      reason = 'never_paired'
+    } else if (lastSeen && (now - lastSeen) / 1000 > SWEEP_STALE_S) {
+      reason = 'stale_heartbeat'
+    } else if (!inst.streaming && idleSince && (now - idleSince) / 1000 > SWEEP_IDLE_GRACE_S) {
+      reason = 'idle_timeout'
+    }
+
+    if (reason) {
+      console.log(`[sweep] tearing down stale pod for ${inst.user_id}: ${reason}`)
+      await teardownInstance(inst.user_id, `sweep:${reason}`)
+    }
+  }
+}

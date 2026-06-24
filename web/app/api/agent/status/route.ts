@@ -2,7 +2,7 @@ import type { NextRequest } from 'next/server'
 import { authenticateAgentDetailed } from '@/lib/agent-auth'
 import { createServerClient } from '@/lib/supabase'
 import { triggerAutoRefill } from '@/app/api/credits/auto-refill/route'
-import { teardownInstance } from '@/lib/pod-teardown'
+import { teardownInstance, sweepStalePods } from '@/lib/pod-teardown'
 import { transcodeCount, burnRatePerSec, type OutputStatus } from '@/lib/billing'
 
 // Never bill more than this many seconds per heartbeat, even if the previous
@@ -168,6 +168,12 @@ export async function POST(request: NextRequest) {
       return Response.json({ command: 'stop', reason: killReason, credits_seconds: creditsSeconds, burn_rate: 0 })
     }
   }
+
+  // Inline sweep: catch dead pods from other users without a paid cron.
+  // Runs on every pod heartbeat (every 10s per active pod). Fast single DB
+  // read; teardowns only fire for truly stale pods. Don't await — the sweep
+  // must not block the heartbeat response that the agent is waiting for.
+  if (isPodAgent) sweepStalePods().catch(e => console.error('[sweep] error:', e))
 
   // Check for a pending manual control command.
   const { data: cmd } = await supabase

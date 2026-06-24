@@ -1,7 +1,7 @@
 import { createServerClient } from '@/lib/supabase'
 import { generateApiKey, hashApiKey, authenticateUserOrAgent } from '@/lib/agent-auth'
 import { provisionGpu } from '@/lib/gpu-broker'
-import { teardownInstance } from '@/lib/pod-teardown'
+import { teardownInstance, sweepStalePods } from '@/lib/pod-teardown'
 import { checkRateLimit } from '@/lib/rate-limit'
 import { FALLBACK_LAT, FALLBACK_LON } from '@/lib/datacenters'
 
@@ -22,6 +22,13 @@ export async function POST(request: Request) {
   if (!userId) {
     return Response.json({ error: 'Unauthorized' }, { status: 401 })
   }
+
+  // Audit log: surfaces random/unexpected provision calls in Vercel logs.
+  console.log(`[provision] user=${userId} ua=${request.headers.get('user-agent') ?? 'unknown'}`)
+
+  // Opportunistic sweep: destroy any stale pods across all users before we
+  // create a new one. Covers the daily-cron gap without paid cron calls.
+  await sweepStalePods()
 
   // Rate limit: a handful of provisions per minute per user is plenty for a
   // human; this caps any scripted spam that would create orphan pods.

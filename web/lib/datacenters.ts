@@ -8,9 +8,11 @@ export interface Datacenter {
   lon: number
 }
 
-// RunPod US/CA datacenters with approximate coordinates. Coordinates only need
-// to be close enough to rank by proximity; exact city is not important.
+// All RunPod datacenters with approximate coordinates. Verified against the
+// RunPod dataCenters GraphQL API — add new DCs here as RunPod expands.
+// Coordinates only need to be close enough to rank by proximity.
 export const RUNPOD_DATACENTERS: Datacenter[] = [
+  // North America — US
   { id: 'US-GA-1', lat: 33.75, lon: -84.39 },  // Atlanta
   { id: 'US-GA-2', lat: 33.75, lon: -84.39 },
   { id: 'US-NC-1', lat: 35.23, lon: -80.84 },  // Charlotte
@@ -36,10 +38,32 @@ export const RUNPOD_DATACENTERS: Datacenter[] = [
   { id: 'US-WA-1', lat: 47.61, lon: -122.33 }, // Seattle
   { id: 'US-OR-1', lat: 45.52, lon: -122.68 }, // Portland
   { id: 'US-OR-2', lat: 45.52, lon: -122.68 },
+  // North America — Canada
   { id: 'CA-MTL-1', lat: 45.50, lon: -73.57 }, // Montreal
   { id: 'CA-MTL-2', lat: 45.50, lon: -73.57 },
   { id: 'CA-MTL-3', lat: 45.50, lon: -73.57 },
   { id: 'CA-MTL-4', lat: 45.50, lon: -73.57 },
+  // Europe
+  { id: 'EU-CZ-1',  lat: 50.08, lon:  14.43 }, // Prague
+  { id: 'EU-DK-1',  lat: 55.68, lon:  12.57 }, // Copenhagen
+  { id: 'EU-FR-1',  lat: 48.85, lon:   2.35 }, // Paris
+  { id: 'EU-NL-1',  lat: 52.37, lon:   4.90 }, // Amsterdam
+  { id: 'EU-RO-1',  lat: 44.43, lon:  26.10 }, // Bucharest
+  { id: 'EU-SE-1',  lat: 59.33, lon:  18.07 }, // Stockholm
+  { id: 'EU-SE-2',  lat: 59.33, lon:  18.07 },
+  { id: 'EUR-IS-1', lat: 64.13, lon: -21.93 }, // Reykjavik
+  { id: 'EUR-IS-2', lat: 64.13, lon: -21.93 },
+  { id: 'EUR-IS-3', lat: 64.13, lon: -21.93 },
+  { id: 'EUR-IS-4', lat: 64.13, lon: -21.93 },
+  { id: 'EUR-IS-5', lat: 64.13, lon: -21.93 },
+  { id: 'EUR-NO-1', lat: 59.91, lon:  10.75 }, // Oslo
+  { id: 'EUR-NO-2', lat: 59.91, lon:  10.75 },
+  // Asia Pacific
+  { id: 'AP-IN-1',  lat: 19.08, lon:  72.88 }, // Mumbai
+  { id: 'AP-JP-1',  lat: 35.68, lon: 139.69 }, // Tokyo
+  { id: 'SEA-SG-1', lat:  1.35, lon: 103.82 }, // Singapore
+  // Oceania
+  { id: 'OC-AU-1',  lat: -33.87, lon: 151.21 }, // Sydney
 ]
 
 export type GpuGen = 'ada' | 'ampere' | 'blackwell'
@@ -104,12 +128,14 @@ export const READINESS_POLL_MS = 5_000
 // RunPod repeatedly misplacing pods in EU before landing on a US DC.
 export const MAX_BOOT_ATTEMPTS = 5
 
-// Hard RTT ceiling for provisioning. Any datacenter whose estimated round-trip
-// from the user exceeds this is excluded from the candidate list entirely —
-// region always beats price. 100ms covers all of North America from any US/CA
-// user; European DCs are 130ms+ from the US coast so they're never reached.
-// If no DC is within this bound (VPN, unusual geo), the broker falls back to
-// the nearest available regardless.
+// Hard RTT ceiling for provisioning. Any datacenter whose estimated RTT from
+// the user exceeds this is excluded from the candidate list and rejected if
+// RunPod ignores dataCenterIds and places the pod there anyway. Works globally:
+// US users stay in US/CA DCs, EU users stay in EU DCs, AP users stay in AP DCs.
+// 100ms covers all of each continent from within it; cross-continental DCs are
+// 130ms+ from the other side so they're always excluded.
+// If no DC is within this bound (VPN, ship, unusual geo), the broker falls back
+// to the nearest available DC with a 1.5× proportional acceptance floor.
 export const MAX_PROVISION_RTT_MS = 100
 
 // Default location when the request carries no geo headers (local dev, VPNs):

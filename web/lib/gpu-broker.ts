@@ -167,6 +167,17 @@ export async function provisionGpu(args: {
   let bootAttempts = 0
   let lastError: string | undefined
 
+  // Hard latency rule: the pod RunPod actually gives us must be within this
+  // many ms of the user. Proportional floor for users in regions with no nearby
+  // DC (e.g. a Pacific island where the nearest DC is 130ms away — we allow
+  // 1.5× that rather than permanently failing).
+  const minPossibleRttMs = Math.min(
+    ...RUNPOD_DATACENTERS.map(dc =>
+      estimateRttMs(haversineKm(args.lat, args.lon, dc.lat, dc.lon))
+    )
+  )
+  const rttAcceptanceMs = Math.max(MAX_PROVISION_RTT_MS, minPossibleRttMs * 1.5)
+
   for (const provider of ACTIVE_PROVIDERS) {
     for (const candidate of candidates) {
       attempts++
@@ -215,19 +226,31 @@ export async function provisionGpu(args: {
           continue
         }
 
-        // DC allowlist check: RunPod community cloud often ignores dataCenterIds
-        // and places pods wherever it has capacity (EU-SE-1, EU-CZ-1, etc.).
-        // We ask RunPod's own GraphQL for the pod's actual dataCenterId and
-        // reject any DC not in our catalog (US/CA only). No external API needed.
-        // Fail-closed: if RunPod returns null for dataCenterId we can't verify
-        // the pod's region — treat as unacceptable and cascade (same as EU-*).
-        // Doesn't count against the boot budget — this is RunPod's mistake.
-        const inCatalog = addr.dataCenterId != null &&
-          RUNPOD_DATACENTERS.some(dc => dc.id === addr.dataCenterId)
-        if (!inCatalog) {
-          console.warn(`[broker] pod ${podId} landed in ${addr.dataCenterId ?? 'unknown DC'} (not in acceptable DC catalog) — RunPod ignored dataCenterIds, destroying and cascading`)
+        // Hard latency rule: verify the pod's actual DC is close enough to the
+        // user. RunPod community cloud routinely ignores dataCenterIds and places
+        // pods on whatever continent has spare capacity. We look up the actual DC
+        // in our global catalog and reject it if the RTT from the user exceeds
+        // rttAcceptanceMs. This works globally — a Swedish user gets EU-SE, a
+        // Tokyo user gets AP-JP, etc. Doesn't count against the boot budget.
+        // Fail-closed on null/unknown DC: if we can't identify where the pod is,
+        // we can't guarantee the latency rule, so we reject it.
+        const actualDc = addr.dataCenterId != null
+          ? RUNPOD_DATACENTERS.find(dc => dc.id === addr.dataCenterId)
+          : null
+
+        if (!actualDc) {
+          console.warn(`[broker] pod ${podId} has unrecognized DC ${addr.dataCenterId ?? 'null'} — cannot verify placement, cascading`)
           try { await provider.destroy(podId) } catch { /* best effort */ }
-          lastError = `pod placed in unacceptable datacenter: ${addr.dataCenterId ?? 'unknown'}`
+          lastError = `unrecognized datacenter: ${addr.dataCenterId ?? 'null'}`
+          bootAttempts--
+          continue
+        }
+
+        const actualRttMs = estimateRttMs(haversineKm(args.lat, args.lon, actualDc.lat, actualDc.lon))
+        if (actualRttMs > rttAcceptanceMs) {
+          console.warn(`[broker] pod ${podId} placed in ${addr.dataCenterId} (${actualRttMs.toFixed(0)}ms from user, limit ${rttAcceptanceMs.toFixed(0)}ms) — RunPod ignored dataCenterIds, cascading`)
+          try { await provider.destroy(podId) } catch { /* best effort */ }
+          lastError = `pod too far from user: ${addr.dataCenterId} at ${actualRttMs.toFixed(0)}ms (limit ${rttAcceptanceMs.toFixed(0)}ms)`
           bootAttempts--
           continue
         }
