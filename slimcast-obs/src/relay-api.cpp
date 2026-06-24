@@ -124,13 +124,12 @@ void RelayApi::provisionGpu()
         const QByteArray data = reply->readAll();
         if (reply->error() != QNetworkReply::NoError) {
             const auto obj = QJsonDocument::fromJson(data).object();
-            QString err = obj["error"].toString();
-            const QString detail = obj["detail"].toString();
-            const QString message = obj["message"].toString();
-            if (err.isEmpty()) err = reply->errorString();
-            if (!message.isEmpty()) err = message;
-            if (!detail.isEmpty()) err += "\n\nDetails: " + detail;
-            emit gpuProvisionFailed(err);
+            // Use the server's plain-English message if present; fall back to a
+            // generic string. Never surface raw provider / HTTP detail to the user.
+            const QString message = obj["message"].toString().trimmed();
+            emit gpuProvisionFailed(message.isEmpty()
+                ? QStringLiteral("Couldn't start a server — please try again.")
+                : message);
             return;
         }
         emit gpuProvisioned();

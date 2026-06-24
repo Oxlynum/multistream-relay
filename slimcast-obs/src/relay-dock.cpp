@@ -958,9 +958,9 @@ void RelayDock::onPollTick()
     if (!m_haveEncode) m_api->fetchEncode();
 }
 
-void RelayDock::onNetworkError(QString message)
+void RelayDock::onNetworkError(QString /*message*/)
 {
-    m_totalLabel->setText("Network error: " + message);
+    m_totalLabel->setText("Can't reach SlimCast — check your internet connection.");
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
