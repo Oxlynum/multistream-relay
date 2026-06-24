@@ -55,8 +55,7 @@ export async function POST(request: NextRequest) {
   // (The dashboard / OBS dock also poll this endpoint with the 'user' key — they
   //  must read state but never advance the clock, deduct, or tear anything down.)
   if (isPodAgent) {
-    const enhancedActive = outputs.some(o => o.state === 'running' && o.mode === 'enhanced')
-    burnRate = burnRatePerSec(transcodeCount(outputs), streaming, enhancedActive)
+    burnRate = burnRatePerSec(transcodeCount(outputs), streaming)
 
     const last = instance?.last_seen_at ? new Date(instance.last_seen_at).getTime() : now
     const elapsed = Math.min(Math.max(0, (now - last) / 1000), MAX_BILL_INTERVAL_S)

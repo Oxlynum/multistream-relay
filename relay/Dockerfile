@@ -10,10 +10,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # --- FFmpeg (jellyfin-ffmpeg: NVENC + CUDA filters, matches mainstream drivers) ---
-# 8.1.1-4: FFmpeg 8.1 — includes Enhanced FLV v2 multitrack video output support.
-# Uses nv-codec-headers at NVENC API 12.0 (driver 520+ required). Verified on
-# RunPod driver 550.x. BtbN "latest" needs driver 610+ — do not swap for that.
-ARG JF_VER=8.1.1-4
+# Pinned: the BtbN "latest" build needs NVIDIA driver 610+; typical cloud GPUs
+# run driver ~550 (NVENC API 12.2). This version is verified on driver 550.x.
+ARG JF_VER=7.1.4-3
 RUN wget -qO /tmp/jf.tar.xz \
       https://github.com/jellyfin/jellyfin-ffmpeg/releases/download/v${JF_VER}/jellyfin-ffmpeg_${JF_VER}_portable_linux64-gpl.tar.xz \
     && mkdir -p /opt/jffmpeg && tar -xJf /tmp/jf.tar.xz -C /opt/jffmpeg \

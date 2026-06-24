@@ -208,65 +208,6 @@ def _group_fps(outputs: list[dict]) -> int:
     return min((int(o.get("fps", 60)) for o in outputs), default=60)
 
 
-def build_enhanced_twitch_cmd(out: dict, source: str = LOCAL_SOURCE) -> list[str]:
-    """
-    Three-tier H.264 quality ladder sent in ONE RTMP connection using Enhanced
-    FLV v2 multitrack (FFmpeg 8.1+). Twitch presents all tiers as ABR to viewers.
-
-    How this works: FFmpeg 8.1's FLV muxer automatically writes Extended Video
-    packets (PacketTypeMultitrack) when multiple video streams are mapped to a
-    single output. No special flags needed — the output URL is the same standard
-    Twitch RTMPS URL. The server sees track 0 (1080p), track 1 (720p), track 2
-    (480p) within the single connection and enables viewer quality selection.
-
-    NVENC load: 3 encodes per frame. L4 has two NVENC engines, each handling
-    multiple sessions — headroom is ample at p6 quality for 3 simultaneous
-    H.264 encodes.
-
-    If Twitch rejects the standard ingest for multitrack, the next step is to call
-    ingest.twitch.tv/api/v3/GetClientConfiguration to get the enhanced ingest URL
-    (requires Twitch auth — wire that up later if needed).
-    """
-    rtmp_url = _full_rtmp_url(out)
-    cap = min(int(out.get("bitrate_kbps", 6000)), PLATFORM_MAX_BITRATE["twitch"])
-
-    return [
-        "ffmpeg", "-hide_banner", "-loglevel", "warning",
-        "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
-        *_input_args(source),
-        "-i", source,
-        # 1 NVDEC decode → split CUDA frames into 3 branches → scale tiers 2+3 on GPU
-        "-filter_complex",
-        "[0:v]split=3[v0][v1][v2];"
-        "[v1]scale_cuda=1280:720[v1s];"
-        "[v2]scale_cuda=854:480[v2s]",
-        # Map all 3 video streams + 1 audio into the single FLV output.
-        # FFmpeg's FLV muxer sees 3 video streams and auto-enables multitrack mode.
-        "-map", "[v0]", "-map", "[v1s]", "-map", "[v2s]", "-map", "0:a",
-        # Shared encode settings (applied to all video streams via :v specifier)
-        "-c:v", "h264_nvenc",
-        "-preset:v", "p6", "-tune:v", "hq", "-multipass:v", "fullres",
-        "-profile:v", "high",
-        "-bf:v", "3", "-b_ref_mode:v", "middle", "-rc-lookahead:v", "32",
-        "-spatial-aq:v", "1", "-temporal-aq:v", "1", "-aq-strength:v", "6",
-        "-rc:v", "cbr",
-        # ── Per-stream bitrate/fps (stream specifier :v:N) ───────────────────────
-        # Track 0: 1080p60
-        "-b:v:0", f"{cap}k", "-maxrate:v:0", f"{cap}k", "-bufsize:v:0", f"{cap * 2}k",
-        "-g:v:0", "120", "-r:v:0", "60",
-        # Track 1: 720p60
-        "-b:v:1", "4500k", "-maxrate:v:1", "4500k", "-bufsize:v:1", "9000k",
-        "-g:v:1", "120", "-r:v:1", "60",
-        # Track 2: 480p30
-        "-b:v:2", "1500k", "-maxrate:v:2", "1500k", "-bufsize:v:2", "3000k",
-        "-g:v:2", "60", "-r:v:2", "30",
-        # Audio (single track, shared by all renditions)
-        "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
-        # Single output URL — Enhanced FLV v2 multitrack packets go over one connection
-        "-f", "flv", rtmp_url,
-    ]
-
-
 def build_passthrough_cmd(out: dict, source: str = LOCAL_SOURCE) -> list[str]:
     """HEVC copy -> HLS PUT to YouTube's HLS ingest URL (no re-encode).
 
@@ -443,32 +384,16 @@ def plan_runners(cfg: dict) -> dict[str, dict]:
     Returns { key: {"cmd", "platforms", "mode"} }. Keys are stable so apply() can
     diff against currently-running processes:
       passthrough:<platform>   one HEVC copy per passthrough output
-      enhanced:twitch          3-tier NVENC → 3 RTMP connections (when enabled)
       group:landscape          shared landscape H.264 encode + tee
       group:portrait           shared portrait (cropped) H.264 encode + tee
     """
     outputs = [o for o in cfg.get("outputs", []) if o.get("enabled")]
     crop = cfg.get("crop") or {}
-    enhanced_twitch = cfg.get("enhanced_twitch", False)
 
     passthrough = [o for o in outputs if o.get("mode") == "passthrough"]
-    transcode   = [o for o in outputs if o.get("mode") != "passthrough"]
-
-    # When enhanced Twitch is enabled, pull landscape Twitch out of the shared
-    # tee group and route it through the three-tier encoder instead. Kick and
-    # any other landscape platforms keep their shared encode as before.
-    twitch_enhanced: dict | None = None
-    if enhanced_twitch:
-        twitch_list = [
-            o for o in transcode
-            if o.get("name") == "twitch" and o.get("orientation", "landscape") != "portrait"
-        ]
-        if twitch_list:
-            twitch_enhanced = twitch_list[0]
-            transcode = [o for o in transcode if o is not twitch_enhanced]
-
+    transcode = [o for o in outputs if o.get("mode") != "passthrough"]
     landscape = [o for o in transcode if o.get("orientation", "landscape") != "portrait"]
-    portrait  = [o for o in transcode if o.get("orientation") == "portrait"]
+    portrait = [o for o in transcode if o.get("orientation") == "portrait"]
 
     plan: dict[str, dict] = {}
 
@@ -477,13 +402,6 @@ def plan_runners(cfg: dict) -> dict[str, dict]:
             "cmd": build_passthrough_cmd(o),
             "platforms": [o["name"]],
             "mode": "passthrough",
-        }
-
-    if twitch_enhanced:
-        plan["enhanced:twitch"] = {
-            "cmd": build_enhanced_twitch_cmd(twitch_enhanced),
-            "platforms": ["twitch"],
-            "mode": "enhanced",
         }
 
     if landscape:
