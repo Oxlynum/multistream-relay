@@ -211,7 +211,7 @@ export default function SettingsPage() {
           </p>
 
           <div className="space-y-6">
-            <BitrateSlider
+            <BitrateInput
               label="Landscape encode"
               hint="Twitch · Kick"
               value={encode.landscape_bitrate_kbps}
@@ -219,7 +219,7 @@ export default function SettingsPage() {
               max={LIMITS.landscape.max}
               onChange={v => setEncode(e => ({ ...e, landscape_bitrate_kbps: v }))}
             />
-            <BitrateSlider
+            <BitrateInput
               label="Portrait encode"
               hint="TikTok · any portrait channel"
               value={encode.portrait_bitrate_kbps}
@@ -280,11 +280,26 @@ export default function SettingsPage() {
   )
 }
 
-function BitrateSlider({
+function BitrateInput({
   label, hint, value, min, max, onChange,
 }: {
   label: string; hint: string; value: number; min: number; max: number; onChange: (v: number) => void
 }) {
+  const [raw, setRaw] = useState(String(value))
+  const [invalid, setInvalid] = useState(false)
+
+  // Keep raw in sync when value changes externally (e.g. after load)
+  useEffect(() => { setRaw(String(value)) }, [value])
+
+  function commit(str: string) {
+    const n = parseInt(str, 10)
+    if (isNaN(n)) { setRaw(String(value)); setInvalid(false); return }
+    const clamped = Math.min(max, Math.max(min, n))
+    setInvalid(false)
+    setRaw(String(clamped))
+    onChange(clamped)
+  }
+
   return (
     <div>
       <div className="flex justify-between items-baseline mb-2">
@@ -292,20 +307,21 @@ function BitrateSlider({
           <span className="text-sm">{label}</span>
           <span className="text-xs text-ink-faint ml-2">{hint}</span>
         </div>
-        <span className="font-mono text-sm text-ink">{value.toLocaleString()} kbps</span>
+        <span className="text-xs text-ink-faint">{min.toLocaleString()}–{max.toLocaleString()} kbps</span>
       </div>
-      <input
-        type="range"
-        min={min}
-        max={max}
-        step={250}
-        value={value}
-        onChange={e => onChange(parseInt(e.target.value))}
-        className="w-full accent-accent"
-      />
-      <div className="flex justify-between text-xs text-ink-faint mt-1">
-        <span>{min.toLocaleString()}</span>
-        <span>{max.toLocaleString()}</span>
+      <div className="flex items-center gap-2">
+        <input
+          type="number"
+          min={min}
+          max={max}
+          step={250}
+          value={raw}
+          onChange={e => { setRaw(e.target.value); setInvalid(false) }}
+          onBlur={e => commit(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') commit((e.target as HTMLInputElement).value) }}
+          className={`w-full bg-base border rounded-lg px-3 py-2 text-sm font-mono text-ink focus:outline-none focus:ring-1 focus:ring-accent transition-colors ${invalid ? 'border-red-500' : 'border-line'}`}
+        />
+        <span className="text-sm text-ink-faint shrink-0">kbps</span>
       </div>
     </div>
   )
