@@ -66,9 +66,10 @@ They just aren't the brand. The brand is "stream everywhere, no setup."
    RTSP/RTP mangles Apple's temporal-layered HEVC → "Illegal temporal ID" →
    dropped frames → artifacts. Keep this SRT loopback. Do not switch to RTSP.
 
-3. **FFmpeg pinned to jellyfin-ffmpeg 7.1.4-3.** Generic BtbN "latest" needs
-   NVIDIA driver 610+. RunPod typically runs driver 550.x (NVENC API 12.2).
-   This version is verified. Do not swap for a bleeding-edge build.
+3. **FFmpeg pinned to jellyfin-ffmpeg 8.1.1-4.** Uses nv-codec-headers at
+   NVENC API 12.0 (driver 520+ required) — verified on RunPod driver 550.x.
+   FFmpeg 8.1 adds Enhanced FLV v2 multitrack output (needed for Enhanced Twitch).
+   BtbN "latest" needs driver 610+. Do not swap for that build.
 
 4. **Hardware codecs only.** NVDEC decode + NVENC H.264 encode. No software
    encode paths. CPU is used only for the portrait crop+scale (low-bitrate,

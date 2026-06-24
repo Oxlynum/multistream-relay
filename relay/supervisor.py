@@ -210,71 +210,60 @@ def _group_fps(outputs: list[dict]) -> int:
 
 def build_enhanced_twitch_cmd(out: dict, source: str = LOCAL_SOURCE) -> list[str]:
     """
-    Three-tier H.264 quality ladder for Twitch's relay multitrack ingest.
+    Three-tier H.264 quality ladder sent in ONE RTMP connection using Enhanced
+    FLV v2 multitrack (FFmpeg 8.1+). Twitch presents all tiers as ABR to viewers.
 
-    One NVDEC decode → split → three NVENC encodes (1080p60, 720p60, 480p30)
-    → three separate RTMP connections. Twitch presents all three to viewers as ABR.
+    How this works: FFmpeg 8.1's FLV muxer automatically writes Extended Video
+    packets (PacketTypeMultitrack) when multiple video streams are mapped to a
+    single output. No special flags needed — the output URL is the same standard
+    Twitch RTMPS URL. The server sees track 0 (1080p), track 1 (720p), track 2
+    (480p) within the single connection and enables viewer quality selection.
 
-    URL scheme: the 720p and 480p tiers append quality suffixes to the stream key
-    so Twitch's ingest can correlate them as a multitrack set. Verify exact suffix
-    format against Twitch's relay multitrack spec during the spike — adjust
-    _tier_url() below if Twitch uses a different naming convention.
+    NVENC load: 3 encodes per frame. L4 has two NVENC engines, each handling
+    multiple sessions — headroom is ample at p6 quality for 3 simultaneous
+    H.264 encodes.
 
-    NVENC load: ~3× the landscape group but still within L4 headroom (L4 has two
-    NVENC engines, each handling multiple simultaneous sessions at p6 quality).
+    If Twitch rejects the standard ingest for multitrack, the next step is to call
+    ingest.twitch.tv/api/v3/GetClientConfiguration to get the enhanced ingest URL
+    (requires Twitch auth — wire that up later if needed).
     """
-    base_url = out["url"].rstrip("/")
-    key = out.get("key", "").strip()
+    rtmp_url = _full_rtmp_url(out)
     cap = min(int(out.get("bitrate_kbps", 6000)), PLATFORM_MAX_BITRATE["twitch"])
-
-    def _tier_url(suffix: str) -> str:
-        # suffix is appended to the stream key (Twitch multitrack convention).
-        # Base tier uses the plain key; lower tiers add a quality identifier.
-        return f"{base_url}/{key}{suffix}" if key else base_url
 
     return [
         "ffmpeg", "-hide_banner", "-loglevel", "warning",
         "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
         *_input_args(source),
         "-i", source,
-        # Split decoded CUDA frames into three branches; scale tiers 2+3 on GPU.
+        # 1 NVDEC decode → split CUDA frames into 3 branches → scale tiers 2+3 on GPU
         "-filter_complex",
         "[0:v]split=3[v0][v1][v2];"
         "[v1]scale_cuda=1280:720[v1s];"
         "[v2]scale_cuda=854:480[v2s]",
-        # ── Tier 1: 1080p60 ─────────────────────────────────────────────────────
-        "-map", "[v0]", "-map", "0:a",
+        # Map all 3 video streams + 1 audio into the single FLV output.
+        # FFmpeg's FLV muxer sees 3 video streams and auto-enables multitrack mode.
+        "-map", "[v0]", "-map", "[v1s]", "-map", "[v2s]", "-map", "0:a",
+        # Shared encode settings (applied to all video streams via :v specifier)
         "-c:v", "h264_nvenc",
-        "-preset", "p6", "-tune", "hq", "-multipass", "fullres",
-        "-rc", "cbr", "-b:v", f"{cap}k", "-maxrate", f"{cap}k", "-bufsize", f"{cap * 2}k",
-        "-profile:v", "high", "-g", "120",
-        "-bf", "3", "-b_ref_mode", "middle", "-rc-lookahead", "32",
-        "-spatial-aq", "1", "-temporal-aq", "1", "-aq-strength", "6",
-        "-r", "60",
+        "-preset:v", "p6", "-tune:v", "hq", "-multipass:v", "fullres",
+        "-profile:v", "high",
+        "-bf:v", "3", "-b_ref_mode:v", "middle", "-rc-lookahead:v", "32",
+        "-spatial-aq:v", "1", "-temporal-aq:v", "1", "-aq-strength:v", "6",
+        "-rc:v", "cbr",
+        # ── Per-stream bitrate/fps (stream specifier :v:N) ───────────────────────
+        # Track 0: 1080p60
+        "-b:v:0", f"{cap}k", "-maxrate:v:0", f"{cap}k", "-bufsize:v:0", f"{cap * 2}k",
+        "-g:v:0", "120", "-r:v:0", "60",
+        # Track 1: 720p60
+        "-b:v:1", "4500k", "-maxrate:v:1", "4500k", "-bufsize:v:1", "9000k",
+        "-g:v:1", "120", "-r:v:1", "60",
+        # Track 2: 480p30
+        "-b:v:2", "1500k", "-maxrate:v:2", "1500k", "-bufsize:v:2", "3000k",
+        "-g:v:2", "60", "-r:v:2", "30",
+        # Audio (single track, shared by all renditions)
         "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
-        "-f", "flv", _tier_url(""),
-        # ── Tier 2: 720p60 ──────────────────────────────────────────────────────
-        "-map", "[v1s]", "-map", "0:a",
-        "-c:v", "h264_nvenc",
-        "-preset", "p6", "-tune", "hq", "-multipass", "fullres",
-        "-rc", "cbr", "-b:v", "4500k", "-maxrate", "4500k", "-bufsize", "9000k",
-        "-profile:v", "high", "-g", "120",
-        "-bf", "3", "-b_ref_mode", "middle", "-rc-lookahead", "32",
-        "-spatial-aq", "1", "-temporal-aq", "1", "-aq-strength", "6",
-        "-r", "60",
-        "-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2",
-        "-f", "flv", _tier_url("_720p60"),
-        # ── Tier 3: 480p30 ──────────────────────────────────────────────────────
-        "-map", "[v2s]", "-map", "0:a",
-        "-c:v", "h264_nvenc",
-        "-preset", "p6", "-tune", "hq", "-multipass", "fullres",
-        "-rc", "cbr", "-b:v", "1500k", "-maxrate", "1500k", "-bufsize", "3000k",
-        "-profile:v", "high", "-g", "60",
-        "-bf", "3", "-b_ref_mode", "middle", "-rc-lookahead", "32",
-        "-spatial-aq", "1", "-temporal-aq", "1", "-aq-strength", "6",
-        "-r", "30",
-        "-c:a", "aac", "-b:a", "96k", "-ar", "48000", "-ac", "2",
-        "-f", "flv", _tier_url("_480p30"),
+        # Single output URL — Enhanced FLV v2 multitrack packets go over one connection
+        "-f", "flv", rtmp_url,
     ]
 
 
