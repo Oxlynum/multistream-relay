@@ -1,5 +1,7 @@
 #include "relay-dock.hpp"
 
+#include <QTabWidget>
+
 #include <obs.h>
 #include <obs-module.h>
 #include <obs-frontend-api.h>
@@ -132,7 +134,23 @@ void RelayDock::buildUi()
 {
     m_pages = new QStackedWidget(this);
     m_pages->addWidget(buildSetupPage());   // index 0
-    m_pages->addWidget(buildActivePage());  // index 1
+
+    // Active panel: two tabs — Stream (existing controls) + Health (graph).
+    auto *tabs = new QTabWidget;
+    tabs->setStyleSheet(
+        "QTabWidget::pane{border:none; background:#0b0e14;}"
+        "QTabBar::tab{background:#161b26; color:#8a93a3; padding:7px 16px;"
+        " border:none; font-size:12px;}"
+        "QTabBar::tab:selected{background:#1a2035; color:#e7ebf2;"
+        " border-bottom:2px solid #4d8ef0;}"
+        "QTabBar::tab:hover:!selected{background:#1a1f2b;}");
+
+    tabs->addTab(buildActivePage(), "Stream");
+
+    m_healthWidget = new HealthGraphWidget;
+    tabs->addTab(m_healthWidget, "Health");
+
+    m_pages->addWidget(tabs);               // index 1
     setWidget(m_pages);
 }
 
@@ -439,6 +457,8 @@ void RelayDock::enterActive()
     m_api->fetchGpuStatus();
     m_api->fetchPlatforms();
     m_api->fetchEncode();
+    if (m_healthWidget)
+        m_healthWidget->setApiKey(m_apiKeyEdit->text().trimmed());
 }
 
 void RelayDock::onConnectClicked()
@@ -483,6 +503,7 @@ void RelayDock::onDisconnect()
     m_pollTimer->stop();
     m_api->setApiKey("");
     m_apiKeyEdit->clear();
+    if (m_healthWidget) m_healthWidget->setApiKey("");
 
     QSettings s("SlimCast", "obs-plugin");
     s.remove("apiKey");
@@ -665,6 +686,7 @@ void RelayDock::render(const GpuInfo &info)
     renderServiceBanner();
     renderChannels();
     updateTotals();
+    if (m_healthWidget) m_healthWidget->setStreaming(info.streaming);
 }
 
 void RelayDock::renderConfirm(const GpuInfo &info)
@@ -801,10 +823,14 @@ void RelayDock::updateTotals()
 void RelayDock::onPlatformsUpdated(QList<PlatformConfig> platforms)
 {
     m_platforms.clear();
-    for (const PlatformConfig &p : platforms)
+    QStringList platformIds;
+    for (const PlatformConfig &p : platforms) {
         m_platforms[p.platform] = p;
+        platformIds.append(p.platform);
+    }
     renderChannels();
     updateTotals();
+    if (m_healthWidget) m_healthWidget->setActivePlatforms(platformIds);
 }
 
 void RelayDock::onEncodeUpdated(EncodeConfig encode)

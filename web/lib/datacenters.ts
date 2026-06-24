@@ -73,6 +73,10 @@ export interface GpuSpec {
   runpodId: string    // RunPod gpuTypeId string
   gen: GpuGen
   pricePerHr: number
+  // GeForce consumer cards have a 3-concurrent-session NVENC hardware limit.
+  // Workstation/data-center cards (A4000, A5000, L4, A40, RTX PRO, RTX 6000, L40S)
+  // have no session cap. Set to true only for GeForce series.
+  consumerGpu?: boolean
 }
 
 // NVENC-capable cards only. A100/H100/H200/B200 are deliberately excluded —
@@ -84,13 +88,13 @@ export const GPU_CATALOG: GpuSpec[] = [
   { key: 'a5000',      runpodId: 'NVIDIA RTX A5000',                gen: 'ampere',    pricePerHr: 0.27 },
   { key: 'l4',         runpodId: 'NVIDIA L4',                       gen: 'ada',       pricePerHr: 0.39 },
   { key: 'a40',        runpodId: 'NVIDIA A40',                      gen: 'ampere',    pricePerHr: 0.44 },
-  { key: 'rtx3090',    runpodId: 'NVIDIA GeForce RTX 3090',         gen: 'ampere',    pricePerHr: 0.46 },
+  { key: 'rtx3090',    runpodId: 'NVIDIA GeForce RTX 3090',         gen: 'ampere',    pricePerHr: 0.46, consumerGpu: true },
   { key: 'rtxpro4000', runpodId: 'NVIDIA RTX PRO 4000',             gen: 'blackwell', pricePerHr: 0.57 },
-  { key: 'rtx4090',    runpodId: 'NVIDIA GeForce RTX 4090',         gen: 'ada',       pricePerHr: 0.69 },
+  { key: 'rtx4090',    runpodId: 'NVIDIA GeForce RTX 4090',         gen: 'ada',       pricePerHr: 0.69, consumerGpu: true },
   { key: 'rtxpro4500', runpodId: 'NVIDIA RTX PRO 4500',             gen: 'blackwell', pricePerHr: 0.74 },
   { key: 'rtx6000ada', runpodId: 'NVIDIA RTX 6000 Ada Generation', gen: 'ada',       pricePerHr: 0.77 },
   { key: 'l40s',       runpodId: 'NVIDIA L40S',                     gen: 'ada',       pricePerHr: 0.99 },
-  { key: 'rtx5090',    runpodId: 'NVIDIA GeForce RTX 5090',         gen: 'blackwell', pricePerHr: 0.99 },
+  { key: 'rtx5090',    runpodId: 'NVIDIA GeForce RTX 5090',         gen: 'blackwell', pricePerHr: 0.99, consumerGpu: true },
 ]
 
 // --- Broker policy knobs ----------------------------------------------------
@@ -147,3 +151,37 @@ export const MAX_PROVISION_RTT_MS = 100
 // central US minimizes worst-case latency for an unknown US user.
 export const FALLBACK_LAT = 39.0
 export const FALLBACK_LON = -95.0
+
+// Maps a RunPod datacenter ID to a user-friendly region name.
+// Strips the trailing numeric suffix (e.g. 'US-TX-3' → 'US-TX') for the lookup,
+// then falls back to parsing the geographic prefix for any unknown ID.
+export function dataCenterToRegion(dcId: string): string {
+  const REGION_MAP: Record<string, string> = {
+    'US-GA': 'US Southeast', 'US-NC': 'US Southeast',
+    'US-DE': 'US East',      'US-MD': 'US East',      'US-PA': 'US East',
+    'US-IL': 'US Midwest',
+    'US-KS': 'US Midwest',   'US-MO': 'US Midwest',   'US-NE': 'US Midwest',
+    'US-TX': 'US South',
+    'US-CA': 'US West',      'US-WA': 'US West',      'US-OR': 'US West',
+    'CA-MTL': 'Canada East',
+    'EU-CZ': 'EU Central',
+    'EU-DK': 'EU North',     'EU-SE': 'EU North',     'EUR-IS': 'EU North', 'EUR-NO': 'EU North',
+    'EU-FR': 'EU West',      'EU-NL': 'EU West',
+    'EU-RO': 'EU East',
+    'AP-IN': 'Asia South',
+    'AP-JP': 'Asia East',
+    'SEA-SG': 'Asia Southeast',
+    'OC-AU': 'Australia',
+  }
+
+  const regionCode = dcId.replace(/-\d+$/, '')
+  if (REGION_MAP[regionCode]) return REGION_MAP[regionCode]
+
+  const PREFIX_MAP: Record<string, string> = {
+    US: 'United States', EU: 'Europe', EUR: 'Europe',
+    AP: 'Asia Pacific',  CA: 'Canada', AU: 'Australia',
+    OC: 'Australia',     SEA: 'Asia Southeast',
+  }
+  const prefix = dcId.split('-')[0]
+  return PREFIX_MAP[prefix] ?? dcId
+}

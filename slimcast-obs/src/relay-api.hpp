@@ -12,17 +12,15 @@ class QTimer;
 
 struct GpuInfo {
     QString status;            // "provisioning" | "running" | "stopped"
-    QString ip;                // populated when running
-    QString rtmpUrl;           // server: rtmp://{ip}:{mapped-port}
-    QString ingestKey;         // per-pod secret RTMP path (the OBS stream key)
-    int     creditsSeconds = 0;
-    double  burnRate       = 0; // tokens/hr (== credit-seconds/sec); $2/token
-    bool    streaming      = false;
-    // "Still streaming?" prompt: set in the final 30m of the 12h session cap.
-    bool    confirmRequired = false;
-    qint64  confirmDeadlineMs = 0; // epoch ms of max_session_at (0 = none)
-    // platform id ("twitch","kick","youtube","tiktok") -> output state
-    // ("running","restarting","error",…). Absent = idle.
+    QString ip;
+    QString rtmpUrl;           // rtmp://{ip}:{port}
+    QString ingestKey;         // per-pod RTMP path secret
+    QString datacenter;        // RunPod DC id, e.g. "US-TX-3"
+    double  creditsTokens = 0; // balance in tokens (3dp)
+    double  burnRate      = 0; // tokens/hr
+    bool    streaming     = false;
+    bool    confirmRequired  = false;
+    qint64  confirmDeadlineMs = 0;
     QMap<QString, QString> platformStates;
 };
 

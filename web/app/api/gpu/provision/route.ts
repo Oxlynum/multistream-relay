@@ -1,6 +1,6 @@
 import { createServerClient } from '@/lib/supabase'
 import { generateApiKey, hashApiKey, authenticateUserOrAgent } from '@/lib/agent-auth'
-import { provisionGpu } from '@/lib/gpu-broker'
+import { provisionGpu, type UserOutputConfig } from '@/lib/gpu-broker'
 import { teardownInstance, sweepStalePods } from '@/lib/pod-teardown'
 import { checkRateLimit } from '@/lib/rate-limit'
 import { FALLBACK_LAT, FALLBACK_LON } from '@/lib/datacenters'
@@ -157,6 +157,45 @@ export async function POST(request: Request) {
   // can publish to the pod (no more open "live" ingest on a public port).
   const ingestKey = generateApiKey().slice(0, 24)
 
+  // Fetch the user's platform connections to determine how many simultaneous
+  // NVENC sessions their config requires. Consumer GPUs (GeForce RTX 3090/4090/5090)
+  // are capped at 3 concurrent sessions in hardware; if the user needs more the
+  // broker skips them automatically.
+  //
+  // NOTE: per-output resolution overrides (from the output-settings feature) are
+  // not yet wired here — when that lands, pull from the output_settings table and
+  // replace the hardcoded '1080p' default below with the per-platform value.
+  const [{ data: profileBitrates }, { data: platformRows }] = await Promise.all([
+    supabase
+      .from('profiles')
+      .select('landscape_bitrate_kbps, portrait_bitrate_kbps')
+      .eq('id', userId)
+      .single(),
+    supabase
+      .from('platform_connections')
+      .select('platform, orientation, enabled, bitrate_kbps')
+      .eq('user_id', userId),
+  ])
+
+  const landscapeCap: number = (profileBitrates as { landscape_bitrate_kbps?: number } | null)?.landscape_bitrate_kbps ?? 6000
+  const portraitCap: number  = (profileBitrates as { portrait_bitrate_kbps?: number } | null)?.portrait_bitrate_kbps ?? 4000
+
+  const userOutputs: UserOutputConfig[] = (platformRows ?? []).map((p: {
+    platform: string; orientation: string | null; enabled: boolean; bitrate_kbps: number | null
+  }) => {
+    const orientation = p.orientation ?? 'landscape'
+    // YouTube landscape is HEVC passthrough — no NVENC session needed.
+    const isPassthrough = p.platform === 'youtube' && orientation === 'landscape'
+    const bitrate = p.bitrate_kbps ?? (orientation === 'portrait' ? portraitCap : landscapeCap)
+    return {
+      orientation,
+      resolution: '1080p',
+      bitrate_kbps: bitrate,
+      mode: isPassthrough ? 'passthrough' : 'transcode',
+      enabled: p.enabled,
+    }
+  })
+
   const result = await provisionGpu({
     lat,
     lon,
@@ -167,6 +206,7 @@ export async function POST(request: Request) {
       { key: 'SLIMCAST_VERCEL_URL', value: callbackUrl },
       { key: 'SLIMCAST_INGEST_KEY', value: ingestKey },
     ],
+    userOutputs,
   })
 
   if (!result.ok) {

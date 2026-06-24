@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { createBrowserClient } from '@/lib/supabase'
 import { secondsRemaining, formatTokens } from '@/lib/billing'
+import { dataCenterToRegion } from '@/lib/datacenters'
 
 interface OutputStatus {
   name: string
@@ -47,13 +48,6 @@ function fmtElapsed(ms: number): string {
   const ss = s % 60
   if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(ss).padStart(2, '0')}`
   return `${m}:${String(ss).padStart(2, '0')}`
-}
-
-const GPU_LABELS: Record<string, string> = {
-  a4000: 'RTX A4000', a5000: 'RTX A5000', l4: 'L4',
-  a40: 'A40', rtx3090: 'RTX 3090', rtxpro4000: 'RTX PRO 4000',
-  rtx4090: 'RTX 4090', rtxpro4500: 'RTX PRO 4500',
-  rtx6000ada: 'RTX 6000 Ada', l40s: 'L40S', rtx5090: 'RTX 5090',
 }
 
 // ── HLS Preview Player ─────────────────────────────────────────────────────────
@@ -225,7 +219,7 @@ export function StreamManager() {
   if (!data) return null
 
   const { status, streaming, burn_rate, credits, outputs, gpu_type,
-          confirm_required, confirm_deadline, hls_available } = data
+          confirm_required, confirm_deadline, hls_available, datacenter } = data
 
   const states          = platformStateMap(outputs)
   const activePlatforms = PLATFORM_ORDER.filter(p => p in states)
@@ -243,7 +237,7 @@ export function StreamManager() {
         <div>
           <div className="text-sm font-semibold text-ink-muted mb-1">Idle — not streaming</div>
           <div className="text-xs text-ink-faint">
-            Press Go Live in OBS to start. Your GPU spins up automatically (~45 s).
+            Press Go Live in OBS to start. A server starts up automatically (~45 s).
           </div>
         </div>
       </div>
@@ -261,8 +255,7 @@ export function StreamManager() {
         <div>
           <div className="text-sm font-semibold text-amber-400 mb-1">Spinning up server…</div>
           <div className="text-xs text-ink-faint">
-            Finding the nearest GPU, booting your relay, and pulling the Docker image.
-            Usually ready in under a minute.
+            Finding the nearest available server. Usually ready in under a minute.
           </div>
         </div>
       </div>
@@ -281,7 +274,7 @@ export function StreamManager() {
           <div>
             <div className="text-sm font-semibold text-amber-400">Server ready · waiting for OBS</div>
             <div className="text-xs text-ink-faint mt-0.5">
-              GPU is online. Make sure OBS is set to H265 and click Go Live in the SlimCast panel.
+              Set OBS to HEVC and click Go Live in the SlimCast panel.
             </div>
           </div>
         </div>
@@ -293,11 +286,9 @@ export function StreamManager() {
           ))}
         </div>
 
-        {gpu_type && (
+        {datacenter && (
           <div className="text-xs text-ink-faint border-t border-line pt-3">
-            <span className="font-medium text-ink-muted">{GPU_LABELS[gpu_type] ?? gpu_type.toUpperCase()}</span>
-            <span className="mx-1.5 text-ink-faint/40">·</span>
-            RunPod community
+            Connected · {dataCenterToRegion(datacenter)}
           </div>
         )}
       </div>
@@ -358,12 +349,10 @@ export function StreamManager() {
         ))}
       </div>
 
-      {/* GPU badge */}
-      {gpu_type && (
-        <div className="flex items-center gap-x-2 border-t border-line pt-4 text-xs text-ink-faint">
-          <span className="font-medium text-ink-muted">{GPU_LABELS[gpu_type] ?? gpu_type.toUpperCase()}</span>
-          <span className="text-ink-faint/40">·</span>
-          <span>RunPod community</span>
+      {/* Region badge */}
+      {datacenter && (
+        <div className="border-t border-line pt-4 text-xs text-ink-faint">
+          Connected · {dataCenterToRegion(datacenter)}
         </div>
       )}
 

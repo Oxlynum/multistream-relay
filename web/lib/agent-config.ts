@@ -2,6 +2,7 @@
 // (polled) and agent/pair (boot) routes so they never drift apart.
 
 import { decryptSecret } from '@/lib/crypto'
+import type { OutputSettingsMap } from '@/lib/billing'
 
 export interface PlatformRow {
   platform: string
@@ -20,58 +21,77 @@ export function youtubeHlsUrl(streamKey: string): string {
   return `https://a.upload.youtube.com/http_upload_hls?cid=${encodeURIComponent(streamKey)}&copy=0&file=stream.m3u8`
 }
 
+// Legacy group bitrates kept for backward compat with the /api/encode route.
+// The new per-output settings take precedence when present.
 export interface GroupBitrates {
   landscape: number
   portrait: number
 }
 
-export function buildAgentOutputs(platforms: PlatformRow[], groups?: GroupBitrates) {
-  const landscapeCap = groups?.landscape ?? 6000
-  const portraitCap  = groups?.portrait ?? 4000
+const PLATFORM_BITRATE_DEFAULTS: Record<string, number> = {
+  twitch: 6000, kick: 6000, youtube: 6000, tiktok: 4000,
+}
+
+export function defaultBitrate(platform: string): number {
+  return PLATFORM_BITRATE_DEFAULTS[platform] ?? 6000
+}
+
+const PLATFORM_BITRATE_LIMITS: Record<string, { min: number; max: number }> = {
+  twitch:  { min: 2500, max: 8000 },
+  kick:    { min: 2500, max: 8000 },
+  youtube: { min: 2500, max: 8000 },
+  tiktok:  { min: 1000, max: 4500 },
+}
+
+export function bitrateRange(platform: string): { min: number; max: number } {
+  return PLATFORM_BITRATE_LIMITS[platform] ?? { min: 1000, max: 8000 }
+}
+
+export function buildAgentOutputs(
+  platforms: PlatformRow[],
+  outputSettings?: OutputSettingsMap,
+  groups?: GroupBitrates,
+) {
+  const landscapeGroupCap = groups?.landscape ?? 6000
+  const portraitGroupCap  = groups?.portrait ?? 4000
 
   return platforms.map(p => {
     const orientation = p.orientation ?? 'landscape'
-    // Decrypt the at-rest secret right before it goes to the agent. Legacy
-    // plaintext rows pass through unchanged (see decryptSecret fallback).
     const streamKey = decryptSecret(p.stream_key_encrypted)
 
-    // YouTube landscape → HEVC passthrough (no re-encode, best quality). The
-    // source HEVC is copied straight into HLS and PUT to YouTube's HLS ingest.
-    // Bitrate is irrelevant here (no encode). Portrait YouTube can't be
-    // passthrough (it's the cropped 9:16 feed), so it falls through to a normal
-    // transcode and joins the portrait encode group.
+    // Per-output settings (resolution + bitrate) override the group defaults.
+    const perOutput = outputSettings?.[p.platform]
+    const resolution = perOutput?.resolution ?? '1080p'
+
+    // YouTube landscape → HEVC passthrough (no re-encode, best quality).
     if (p.platform === 'youtube' && orientation === 'landscape') {
       return {
         name: p.platform,
         url: youtubeHlsUrl(streamKey),
         key: '',
-        bitrate_kbps: p.bitrate_kbps ?? defaultBitrate(p.platform),
+        bitrate_kbps: perOutput?.bitrate_kbps ?? (p.bitrate_kbps ?? defaultBitrate(p.platform)),
         fps: p.fps ?? 60,
         orientation,
         mode: 'passthrough',
+        resolution,
         enabled: p.enabled,
       }
     }
 
-    // Transcoded outputs inherit their orientation group's bitrate cap. The
-    // supervisor still floors this at each platform's hard max (e.g. TikTok
-    // 4500) when it computes the shared group bitrate.
+    // Per-output bitrate wins; fall back to group cap, then platform default.
+    const bitrate = perOutput?.bitrate_kbps
+      ?? (orientation === 'portrait' ? portraitGroupCap : landscapeGroupCap)
+
     return {
       name: p.platform,
       url: p.rtmp_url,
       key: streamKey,
-      bitrate_kbps: orientation === 'portrait' ? portraitCap : landscapeCap,
+      bitrate_kbps: bitrate,
       fps: p.fps ?? 60,
       orientation,
       mode: 'transcode',
+      resolution,
       enabled: p.enabled,
     }
   })
-}
-
-export function defaultBitrate(platform: string): number {
-  const defaults: Record<string, number> = {
-    twitch: 6000, kick: 6000, youtube: 6000, tiktok: 4000,
-  }
-  return defaults[platform] ?? 6000
 }

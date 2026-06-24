@@ -36,6 +36,8 @@ import {
 } from '@/lib/datacenters'
 import { ACTIVE_PROVIDERS } from '@/lib/providers/runpod'
 import type { GpuCandidate, GpuProvider, PodEnv } from '@/lib/providers/types'
+import { requiredNvencSessions, type UserOutputConfig } from '@/lib/nvenc-utils'
+export type { UserOutputConfig } from '@/lib/nvenc-utils'
 
 function haversineKm(aLat: number, aLon: number, bLat: number, bLon: number): number {
   const R = 6371
@@ -67,7 +69,7 @@ function gpuSortScore(pricePerHr: number, gen: string): number {
 }
 
 /** Build the ranked candidate list for a user at (lat, lon). */
-export function rankCandidates(lat: number, lon: number): GpuCandidate[] {
+export function rankCandidates(lat: number, lon: number, needsProfessionalGpu = false): GpuCandidate[] {
   // Annotate each datacenter with its tier + rtt, grouped by tier.
   const byTier: Record<'near' | 'mid' | 'far', Array<Datacenter & { rtt: number }>> = {
     near: [], mid: [], far: [],
@@ -89,6 +91,7 @@ export function rankCandidates(lat: number, lon: number): GpuCandidate[] {
 
   const gpus = GPU_CATALOG
     .filter(g => g.pricePerHr <= PRICE_CEILING)
+    .filter(g => !needsProfessionalGpu || !g.consumerGpu)
     .sort((a, b) => gpuSortScore(a.pricePerHr, a.gen) - gpuSortScore(b.pricePerHr, b.gen))
 
   const candidates: GpuCandidate[] = []
@@ -164,8 +167,14 @@ export async function provisionGpu(args: {
   name: string
   imageTag: string
   env: PodEnv[]
+  userOutputs?: UserOutputConfig[]
 }): Promise<ProvisionResult> {
-  const candidates = rankCandidates(args.lat, args.lon)
+  const nvencSessions = args.userOutputs ? requiredNvencSessions(args.userOutputs) : 0
+  const needsProfessionalGpu = nvencSessions > 3
+  if (needsProfessionalGpu) {
+    console.log(`[broker] user needs ${nvencSessions} NVENC sessions — skipping consumer GPUs`)
+  }
+  const candidates = rankCandidates(args.lat, args.lon, needsProfessionalGpu)
   let attempts = 0
   let bootAttempts = 0
   let rttRejections = 0

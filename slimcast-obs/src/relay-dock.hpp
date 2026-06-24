@@ -10,6 +10,7 @@
 #include <QWidget>
 #include <QPushButton>
 #include "relay-api.hpp"
+#include "HealthGraphWidget.h"
 
 // One channel control row: live dot + name + cost sub-line + on/off toggle.
 struct ChannelRow {
@@ -103,6 +104,9 @@ private:
     QPushButton    *m_serviceWarn   = nullptr;   // red "⚠" (hover/click): OBS drifted off SlimCast
 
     // ── Internal state ─────────────────────────────────────────────────────
+    // Health tab
+    HealthGraphWidget *m_healthWidget = nullptr;
+
     RelayApi *m_api;
     QTimer   *m_pollTimer;
     QTimer   *m_launchTimeout   = nullptr;   // overall Go Live timeout

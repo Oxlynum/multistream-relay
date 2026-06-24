@@ -28,6 +28,7 @@ add_library(slimcast-obs MODULE
     src/plugin-main.cpp
     src/relay-api.cpp
     src/relay-dock.cpp
+    src/HealthGraphWidget.cpp
 )
 
 set_target_properties(slimcast-obs PROPERTIES

@@ -3,18 +3,19 @@ import { authenticateAgentDetailed } from '@/lib/agent-auth'
 import { createServerClient } from '@/lib/supabase'
 import { triggerAutoRefill } from '@/app/api/credits/auto-refill/route'
 import { teardownInstance, sweepStalePods } from '@/lib/pod-teardown'
-import { transcodeCount, burnRatePerHr, type OutputStatus } from '@/lib/billing'
+import {
+  buildBillingContext,
+  computeBurnRate,
+  type OutputStatus,
+  type OutputSettingsMap,
+} from '@/lib/billing'
 
 // Never bill more than this many seconds per heartbeat, even if the previous
 // heartbeat was long ago (missed beats / restart) — avoids surprise overcharges.
 const MAX_BILL_INTERVAL_S = 60
 
-// ── Safety caps (the pod tears itself down when any of these trips) ───────────
 // A pod that's up but not streaming this long is abandoned → destroy it.
-const IDLE_GRACE_S = 5 * 60             // 5m
-// The 12h session cap is now a confirmable deadline (max_session_at). The dock
-// surfaces a "still streaming?" prompt during its final 30m via /api/gpu/status;
-// the heartbeat below only hard-kills once max_session_at has actually passed.
+const IDLE_GRACE_S = 5 * 60 // 5m
 
 // Agent posts heartbeats here every 10s with live stream status.
 export async function POST(request: NextRequest) {
@@ -34,17 +35,25 @@ export async function POST(request: NextRequest) {
 
   const supabase = createServerClient()
 
-  const { data: instance } = await supabase
-    .from('gpu_instances')
-    .select('last_seen_at, burn_rate, created_at, idle_since, session_id, max_session_at')
-    .eq('user_id', userId)
-    .maybeSingle()
-
-  const { data: profile } = await supabase
-    .from('profiles')
-    .select('streaming_credits')
-    .eq('id', userId)
-    .single()
+  const [{ data: instance }, { data: profile }, { data: platforms }] = await Promise.all([
+    supabase
+      .from('gpu_instances')
+      .select('id, last_seen_at, burn_rate, created_at, idle_since, session_id, max_session_at')
+      .eq('user_id', userId)
+      .maybeSingle(),
+    supabase
+      .from('profiles')
+      .select('streaming_credits, output_settings, has_2k_addon, landscape_bitrate_kbps, portrait_bitrate_kbps')
+      .eq('id', userId)
+      .single(),
+    // Only needed by the pod agent for billing; skip for dashboard/dock polls.
+    isPodAgent
+      ? supabase
+          .from('platform_connections')
+          .select('platform, orientation, enabled')
+          .eq('user_id', userId)
+      : Promise.resolve({ data: null }),
+  ])
 
   let credits = parseFloat(profile?.streaming_credits ?? '0') || 0
   let burnRate = instance?.burn_rate ?? 0
@@ -52,23 +61,22 @@ export async function POST(request: NextRequest) {
   const now = Date.now()
 
   // --- Billing: only the pod agent is the billing clock ---------------------
-  // (The dashboard / OBS dock also poll this endpoint with the 'user' key — they
-  //  must read state but never advance the clock, deduct, or tear anything down.)
   if (isPodAgent) {
-    burnRate = burnRatePerHr(transcodeCount(outputs), streaming)
+    const outputSettings: OutputSettingsMap = (profile?.output_settings as OutputSettingsMap) ?? {}
+    const has2kAddon = profile?.has_2k_addon ?? false
+
+    const ctx = buildBillingContext(
+      (platforms ?? []) as Array<{ platform: string; orientation: string; enabled: boolean }>,
+      outputSettings,
+      has2kAddon,
+      streaming,
+    )
+    burnRate = computeBurnRate(ctx, streaming)
 
     const last = instance?.last_seen_at ? new Date(instance.last_seen_at).getTime() : now
     const elapsed = Math.min(Math.max(0, (now - last) / 1000), MAX_BILL_INTERVAL_S)
-    // tokens = (tokens/hr) * (seconds / 3600), rounded to 3 decimal places
     const deduct = parseFloat((burnRate * elapsed / 3600).toFixed(3))
 
-    // DEV billing bypass — three explicit guards so this can ONLY ever match one
-    // specific account and can never be triggered by a blank/malformed env var:
-    //   1. Env var must be a well-formed UUID (rejects empty string, "undefined",
-    //      wildcards, or anything that isn't a real Supabase user ID).
-    //   2. userId must be truthy (guards against any auth edge case returning null).
-    //   3. Comparison is exact === equality — no prefix match, no type coercion.
-    // If the env var is not set, UUID_RE.test('') is false → bypass never fires.
     const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
     const devBypassId = process.env.SLIMCAST_DEV_NO_BILLING_USER_ID ?? ''
     const devNoBilling =
@@ -84,14 +92,11 @@ export async function POST(request: NextRequest) {
         .eq('id', userId)
     }
 
-    // idle_since: cleared while streaming, set the moment we stop streaming.
     const idleSince = streaming
       ? null
       : (instance?.idle_since ?? new Date(now).toISOString())
 
-    // --- Session recording (history + billing audit trail) -----------------
-    // Open on the first streaming beat, accumulate each beat, close on stop.
-    // The same heartbeat that bills also records, so the two never diverge.
+    // --- Session recording ------------------------------------------------
     let sessionId = instance?.session_id ?? null
     const livePlatforms = Array.from(
       new Set(outputs.flatMap(o => o.platforms ?? []))
@@ -127,12 +132,9 @@ export async function POST(request: NextRequest) {
           })
           .eq('id', sessionId)
       } else {
-        // Row vanished (history pruned) — stop tracking it.
         sessionId = null
       }
     } else if (!streaming && sessionId) {
-      // Stream stopped: close the session, keep the last accumulated duration
-      // (don't extend it across the idle gap).
       await supabase
         .from('stream_sessions')
         .update({ ended_at: new Date(now).toISOString() })
@@ -153,7 +155,6 @@ export async function POST(request: NextRequest) {
       })
       .eq('user_id', userId)
 
-    // Last-ditch credit save before we enforce exhaustion (< 1 token = < 1 hr left).
     if (streaming && credits < 1.0) {
       const refilled = await triggerAutoRefill(userId)
       if (refilled) {
@@ -166,11 +167,35 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // ── SAFETY: destroy the pod (don't just stop) on any hard condition ──────
+    // ── Connection metrics: write one inbound + one per active platform ────────
+    if (instance?.id) {
+      const instanceId = instance.id
+      const landscapeBitrate = (profile as { landscape_bitrate_kbps?: number })?.landscape_bitrate_kbps ?? 6000
+      const portraitBitrate = (profile as { portrait_bitrate_kbps?: number })?.portrait_bitrate_kbps ?? 4000
+
+      const inboundHealth = streaming ? 100 : 0
+      const metricsRows: Array<{
+        instance_id: string; user_id: string; direction: string;
+        platform: string | null; bitrate_kbps: number | null; health_score: number; dropped_frames: number;
+      }> = [
+        { instance_id: instanceId, user_id: userId, direction: 'inbound', platform: null,
+          bitrate_kbps: null, health_score: inboundHealth, dropped_frames: 0 },
+      ]
+
+      for (const o of outputs) {
+        const health = o.state === 'running' ? 100 : o.state === 'restarting' ? 50 : 0
+        const bitrate = o.mode === 'portrait' ? portraitBitrate : landscapeBitrate
+        for (const p of o.platforms ?? []) {
+          metricsRows.push({ instance_id: instanceId, user_id: userId, direction: 'outbound',
+            platform: p, bitrate_kbps: bitrate, health_score: health, dropped_frames: 0 })
+        }
+      }
+
+      supabase.from('connection_metrics').insert(metricsRows).then(() => {})
+    }
+
+    // ── SAFETY: destroy the pod on any hard condition ───────────────────────
     const idleFor = idleSince ? (now - new Date(idleSince).getTime()) / 1000 : 0
-    // The 12h cap is now a confirmable deadline: we only kill once it's actually
-    // passed. The "still streaming?" prompt during the final 30m is surfaced by
-    // /api/gpu/status (what the dock polls); confirming pushes max_session_at out.
     const maxSessionAt = instance?.max_session_at ? new Date(instance.max_session_at).getTime() : null
 
     let killReason = ''
@@ -184,13 +209,8 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  // Inline sweep: catch dead pods from other users without a paid cron.
-  // Runs on every pod heartbeat (every 10s per active pod). Fast single DB
-  // read; teardowns only fire for truly stale pods. Don't await — the sweep
-  // must not block the heartbeat response that the agent is waiting for.
   if (isPodAgent) sweepStalePods().catch(e => console.error('[sweep] error:', e))
 
-  // Check for a pending manual control command.
   const { data: cmd } = await supabase
     .from('agent_commands')
     .select('id, command')

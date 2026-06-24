@@ -75,7 +75,13 @@ void RelayApi::fetchGpuStatus()
         info.ip             = obj["ip"].toString();
         info.rtmpUrl        = obj["rtmp_url"].toString();
         info.ingestKey      = obj["ingest_key"].toString();
-        info.creditsSeconds = obj["credits_seconds"].toInt(0);
+        info.datacenter     = obj["datacenter"].toString();
+        // Prefer the token field (3dp float); fall back to credits_seconds ÷ 3600
+        // for older server versions that hadn't done the tokenize migration yet.
+        if (obj.contains("credits"))
+            info.creditsTokens = obj["credits"].toDouble(0);
+        else
+            info.creditsTokens = obj["credits_seconds"].toInt(0) / 3600.0;
         info.burnRate       = obj["burn_rate"].toDouble(0);
         info.streaming      = obj["streaming"].toBool(false);
         info.confirmRequired = obj["confirm_required"].toBool(false);
