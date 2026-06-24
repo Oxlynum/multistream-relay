@@ -151,7 +151,7 @@ void RelayDock::buildUi()
     tabs->addTab(m_healthWidget, "Health");
 
     tabs->addTab(buildOutputsTab(), "Outputs");
-    tabs->addTab(buildSlimSyncTab(), "SlimSync");
+    tabs->addTab(buildSlimSyncTab(), "Account");
 
     m_pages->addWidget(tabs);               // index 1
     setWidget(m_pages);
