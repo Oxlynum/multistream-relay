@@ -30,12 +30,13 @@
 #include <cstring>
 
 // ── palette ─────────────────────────────────────────────────────────────────
-static const QString C_LIVE = QStringLiteral("#37d67a");
-static const QString C_WARN = QStringLiteral("#ffb020");
-static const QString C_ERR  = QStringLiteral("#ff5470");
-static const QString C_IDLE = QStringLiteral("#555e6e");
-static const QString C_MUTE = QStringLiteral("#8a93a3");
-static const QString C_FAINT = QStringLiteral("#6b7280");
+static const QString C_LIVE  = QStringLiteral("#37d67a");  // green — ONLY when actually streaming
+static const QString C_WARN  = QStringLiteral("#ffb020");  // amber — transitioning / low credits
+static const QString C_ERR   = QStringLiteral("#ff5470");  // red — error / stop
+static const QString C_IDLE  = QStringLiteral("#555e6e");  // dim — idle/stopped
+static const QString C_MUTE  = QStringLiteral("#8a93a3");  // light muted — neutral labels
+static const QString C_FAINT = QStringLiteral("#6b7280");  // dim muted — fine print
+static const QString C_CTA   = QStringLiteral("#e7ebf2");  // near-white — Go Live button (not live yet)
 
 // Landscape tee group, portrait tee group, YouTube passthrough — every platform
 // SlimCast fans out to. (Facebook was dropped: its low cap dragged the shared
@@ -255,7 +256,7 @@ QWidget *RelayDock::buildActivePage()
     headRow->addWidget(m_serviceWarn);
     headRow->addStretch();
     m_creditsLabel = new QLabel("—");
-    m_creditsLabel->setStyleSheet(QString("color:%1; font-size:13px; font-weight:600").arg(C_LIVE));
+    m_creditsLabel->setStyleSheet(QString("color:%1; font-size:13px; font-weight:600").arg(C_MUTE));
     headRow->addWidget(m_creditsLabel);
     ly->addLayout(headRow);
 
@@ -348,38 +349,34 @@ QWidget *RelayDock::buildActivePage()
     capNote->setStyleSheet(QString("color:%1; font-size:10px").arg(C_FAINT));
     ly->addWidget(capNote);
 
-    auto addCap = [&](const QString &label, QSlider *&slider, QLabel *&val) {
+    auto addCap = [&](const QString &label, QSpinBox *&spin) {
         auto *row = new QHBoxLayout;
         row->setSpacing(8);
         auto *l = new QLabel(label);
         l->setStyleSheet(QString("color:%1; font-size:11px").arg(C_MUTE));
         l->setFixedWidth(64);
-        slider = new QSlider(Qt::Horizontal);
-        val = new QLabel("—");
-        val->setStyleSheet("color:#cbd2dd; font-size:11px; font-family:monospace");
-        val->setFixedWidth(64);
-        val->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        spin = new QSpinBox;
+        spin->setSuffix(" kbps");
+        spin->setSingleStep(250);
+        spin->setStyleSheet(
+            "QSpinBox { color:#cbd2dd; background:#1a2035; border:1px solid #2a3555;"
+            " border-radius:4px; padding:2px 4px; font-size:11px; font-family:monospace; }"
+            "QSpinBox::up-button, QSpinBox::down-button { width:16px; }"
+        );
         row->addWidget(l);
-        row->addWidget(slider, 1);
-        row->addWidget(val);
+        row->addWidget(spin, 1);
         ly->addLayout(row);
     };
-    addCap("Landscape", m_landscapeSlider, m_landscapeVal);
-    addCap("Portrait",  m_portraitSlider,  m_portraitVal);
+    addCap("Landscape", m_landscapeSpin);
+    addCap("Portrait",  m_portraitSpin);
 
-    m_landscapeSlider->setRange(m_encode.landscapeMin, m_encode.landscapeMax);
-    m_portraitSlider->setRange(m_encode.portraitMin, m_encode.portraitMax);
-    m_landscapeSlider->setSingleStep(250);
-    m_portraitSlider->setSingleStep(250);
+    m_landscapeSpin->setRange(m_encode.landscapeMin, m_encode.landscapeMax);
+    m_portraitSpin->setRange(m_encode.portraitMin, m_encode.portraitMax);
+    m_landscapeSpin->setValue(m_encode.landscape);
+    m_portraitSpin->setValue(m_encode.portrait);
 
-    connect(m_landscapeSlider, &QSlider::valueChanged, this, [this](int v) {
-        m_landscapeVal->setText(QString("%1k").arg(v));
-    });
-    connect(m_portraitSlider, &QSlider::valueChanged, this, [this](int v) {
-        m_portraitVal->setText(QString("%1k").arg(v));
-    });
-    connect(m_landscapeSlider, &QSlider::sliderReleased, this, &RelayDock::onBitrateReleased);
-    connect(m_portraitSlider,  &QSlider::sliderReleased, this, &RelayDock::onBitrateReleased);
+    connect(m_landscapeSpin, &QSpinBox::editingFinished, this, &RelayDock::onBitrateReleased);
+    connect(m_portraitSpin,  &QSpinBox::editingFinished, this, &RelayDock::onBitrateReleased);
 
     ly->addWidget(makeSep());
 
@@ -630,14 +627,16 @@ void RelayDock::render(const GpuInfo &info)
         text = "Spinning up server…";                    color = C_WARN;
     } else if (info.status == "running") {
         if (info.streaming) {
-            bool anyErr = false, anyRestart = false;
+            bool anyRunning = false, anyErr = false, anyRestart = false;
             for (const QString &st : info.platformStates) {
-                if (st == "error")      anyErr     = true;
+                if (st == "running")         anyRunning = true;
+                if (st == "error")           anyErr     = true;
                 else if (st == "restarting") anyRestart = true;
             }
-            if (anyErr)      { text = "Live · platform error";  color = C_ERR;  }
-            else if (anyRestart) { text = "Live · reconnecting…"; color = C_WARN; }
-            else             { text = "Live";                   color = C_LIVE; }
+            if (!anyRunning)   { text = "OBS connected · starting…"; color = C_WARN; }
+            else if (anyErr)   { text = "Live · platform error";      color = C_ERR;  }
+            else if (anyRestart) { text = "Live · reconnecting…";     color = C_WARN; }
+            else               { text = "Live";                        color = C_LIVE; }
         } else {
             text = "Server ready · waiting for OBS";     color = C_WARN;
         }
@@ -666,13 +665,16 @@ void RelayDock::render(const GpuInfo &info)
         } else {
             m_goLiveBtn->setEnabled(true);
             m_goLiveBtn->setText("Go Live");
-            m_goLiveBtn->setStyleSheet(goLiveStyle(C_LIVE));
+            m_goLiveBtn->setStyleSheet(goLiveStyle(C_CTA));
         }
     }
 
     m_creditsLabel->setText(formatCredits(info.creditsTokens));
-    const QString cColor = info.creditsTokens <= 0 ? C_ERR
-                         : info.creditsTokens < 0.5 ? C_WARN : C_LIVE;
+    // Green only when streaming with a healthy balance; neutral otherwise.
+    const QString cColor = info.creditsTokens <= 0  ? C_ERR
+                         : info.creditsTokens < 0.5 ? C_WARN
+                         : info.streaming            ? C_LIVE
+                                                     : C_MUTE;
     m_creditsLabel->setStyleSheet(QString("color:%1; font-size:13px; font-weight:600").arg(cColor));
 
     // Auto-engage the channel lock the moment a stream begins.
@@ -837,18 +839,14 @@ void RelayDock::onEncodeUpdated(EncodeConfig encode)
     m_encode = encode;
     m_haveEncode = true;
 
-    m_landscapeSlider->setRange(encode.landscapeMin, encode.landscapeMax);
-    m_portraitSlider->setRange(encode.portraitMin, encode.portraitMax);
+    m_landscapeSpin->setRange(encode.landscapeMin, encode.landscapeMax);
+    m_portraitSpin->setRange(encode.portraitMin, encode.portraitMax);
 
-    // Don't fight the user mid-drag.
-    if (!m_landscapeSlider->isSliderDown()) {
-        m_landscapeSlider->setValue(encode.landscape);
-        m_landscapeVal->setText(QString("%1k").arg(encode.landscape));
-    }
-    if (!m_portraitSlider->isSliderDown()) {
-        m_portraitSlider->setValue(encode.portrait);
-        m_portraitVal->setText(QString("%1k").arg(encode.portrait));
-    }
+    // Don't overwrite a value the user is currently editing.
+    if (!m_landscapeSpin->hasFocus())
+        m_landscapeSpin->setValue(encode.landscape);
+    if (!m_portraitSpin->hasFocus())
+        m_portraitSpin->setValue(encode.portrait);
 }
 
 void RelayDock::onChannelToggled(const QString &platform, bool enabled)
@@ -868,7 +866,7 @@ void RelayDock::onLockToggled(bool /*locked*/)
 void RelayDock::onBitrateReleased()
 {
     if (!m_haveEncode) return;
-    m_api->setEncode(m_landscapeSlider->value(), m_portraitSlider->value());
+    m_api->setEncode(m_landscapeSpin->value(), m_portraitSpin->value());
 }
 
 void RelayDock::onGpuProvisioned()

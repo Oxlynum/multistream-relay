@@ -3,7 +3,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QCheckBox>
-#include <QSlider>
+#include <QSpinBox>
 #include <QStackedWidget>
 #include <QTimer>
 #include <QMap>
@@ -92,10 +92,8 @@ private:
     QPushButton    *m_goLiveBtn    = nullptr;   // dock-driven Go Live / Stop
     QMap<QString, ChannelRow> m_channels;
     QCheckBox      *m_lockCheck    = nullptr;
-    QSlider        *m_landscapeSlider = nullptr;
-    QLabel         *m_landscapeVal    = nullptr;
-    QSlider        *m_portraitSlider  = nullptr;
-    QLabel         *m_portraitVal     = nullptr;
+    QSpinBox       *m_landscapeSpin   = nullptr;
+    QSpinBox       *m_portraitSpin    = nullptr;
     QLabel         *m_totalLabel   = nullptr;
     QLabel         *m_helperLabel  = nullptr;
     QWidget        *m_confirmBanner = nullptr;

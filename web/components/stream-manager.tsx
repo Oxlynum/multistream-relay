@@ -26,6 +26,23 @@ interface GpuStatus {
   hls_available: boolean
 }
 
+type StreamPhase = 'idle' | 'provisioning' | 'waiting' | 'connecting' | 'live'
+
+function streamPhase(data: GpuStatus): StreamPhase {
+  if (data.status === 'stopped') return 'idle'
+  if (data.status === 'provisioning') return 'provisioning'
+  if (!data.streaming) return 'waiting'
+  if (!data.outputs.some(o => o.state === 'running')) return 'connecting'
+  return 'live'
+}
+
+// Poll aggressively during transitions, relax when stable
+function pollMs(phase: StreamPhase): number {
+  if (phase === 'provisioning' || phase === 'connecting') return 2000
+  if (phase === 'waiting') return 3000
+  return 5000
+}
+
 const PLATFORM_ORDER = ['twitch', 'kick', 'youtube', 'tiktok'] as const
 const PLATFORM_LABELS: Record<string, string> = {
   twitch: 'Twitch', kick: 'Kick', youtube: 'YouTube', tiktok: 'TikTok',
@@ -85,8 +102,6 @@ function HlsPlayer({ authToken, streaming }: HlsPlayerProps) {
         const hls = new Hls({
           maxBufferLength: 10,
           backBufferLength: 0,
-          // xhrSetup covers the default XHR loader; fetchSetup covers fetch-based
-          // loaders used in some environments (both needed for hls.js 1.6.x).
           xhrSetup(xhr) {
             xhr.setRequestHeader('Authorization', `Bearer ${authToken}`)
           },
@@ -175,13 +190,26 @@ function PlatformTile({ platform, state, active }: { platform: string; state: st
   )
 }
 
+// ── Spinner dot ────────────────────────────────────────────────────────────────
+function PingDot({ color }: { color: string }) {
+  return (
+    <span className="relative flex h-2.5 w-2.5 flex-shrink-0">
+      <span className={`absolute inline-flex h-full w-full rounded-full opacity-60 animate-ping`}
+        style={{ backgroundColor: color }} />
+      <span className={`relative inline-flex h-2.5 w-2.5 rounded-full`}
+        style={{ backgroundColor: color }} />
+    </span>
+  )
+}
+
 // ── Main Component ────────────────────────────────────────────────────────────
 export function StreamManager() {
   const [data, setData] = useState<GpuStatus | null>(null)
   const [elapsed, setElapsed] = useState(0)
   const [authToken, setAuthToken] = useState<string | null>(null)
-  const streamStartRef = useRef<number | null>(null)
-  const prevStreaming = useRef(false)
+  const liveStartRef = useRef<number | null>(null)   // starts when first output runs, not on OBS connect
+  const prevPhase = useRef<StreamPhase>('idle')
+  const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   useEffect(() => {
     let active = true
@@ -199,38 +227,52 @@ export function StreamManager() {
       const body: GpuStatus = await res.json()
       setData(body)
 
-      if (body.streaming && !prevStreaming.current) {
-        streamStartRef.current = Date.now()
+      const phase = streamPhase(body)
+
+      // Elapsed timer starts when outputs actually go running, not on OBS connect
+      if (phase === 'live' && prevPhase.current !== 'live') {
+        liveStartRef.current = Date.now()
         setElapsed(0)
       }
-      if (!body.streaming) streamStartRef.current = null
-      prevStreaming.current = body.streaming
+      if (phase !== 'live' && phase !== 'connecting') {
+        liveStartRef.current = null
+      }
+      prevPhase.current = phase
+
+      // Reschedule at the right interval for the new phase
+      if (pollTimerRef.current) clearInterval(pollTimerRef.current)
+      pollTimerRef.current = setInterval(poll, pollMs(phase))
     }
 
     poll()
-    const pollId  = setInterval(poll, 5000)
-    const tickId  = setInterval(() => {
-      if (streamStartRef.current) setElapsed(Date.now() - streamStartRef.current)
+    const tickId = setInterval(() => {
+      if (liveStartRef.current) setElapsed(Date.now() - liveStartRef.current)
     }, 1000)
 
-    return () => { active = false; clearInterval(pollId); clearInterval(tickId) }
+    return () => {
+      active = false
+      if (pollTimerRef.current) clearInterval(pollTimerRef.current)
+      clearInterval(tickId)
+    }
   }, [authToken])
 
   if (!data) return null
 
-  const { status, streaming, burn_rate, credits, outputs, gpu_type,
+  const phase = streamPhase(data)
+  const { streaming, burn_rate, credits, outputs,
           confirm_required, confirm_deadline, hls_available, datacenter } = data
 
-  const states          = platformStateMap(outputs)
-  const activePlatforms = PLATFORM_ORDER.filter(p => p in states)
-  const allPlatforms    = PLATFORM_ORDER  // always show all 4 when pod is running
-  const remaining       = secondsRemaining(credits, burn_rate)
-  const lowCredits      = remaining < 1800 && streaming
-  const confirmMsLeft   = confirm_deadline ? Math.max(0, new Date(confirm_deadline).getTime() - Date.now()) : null
-  const confirmMinLeft  = confirmMsLeft !== null ? Math.floor(confirmMsLeft / 60000) : null
+  const states     = platformStateMap(outputs)
+  const remaining  = secondsRemaining(credits, burn_rate)
+  const lowCredits = remaining < 1800 && streaming
+  const confirmMsLeft  = confirm_deadline ? Math.max(0, new Date(confirm_deadline).getTime() - Date.now()) : null
+  const confirmMinLeft = confirmMsLeft !== null ? Math.floor(confirmMsLeft / 60000) : null
+
+  const anyError      = outputs.some(o => o.state === 'error')
+  const anyRestarting = outputs.some(o => o.state === 'restarting')
 
   // ── Idle ────────────────────────────────────────────────────────────────────
-  if (status === 'stopped') {
+  if (phase === 'idle') {
     return (
       <div className="bg-surface border border-line rounded-2xl p-6 flex items-start gap-3">
         <span className="mt-1 h-2 w-2 rounded-full bg-ink-faint/30 flex-shrink-0" />
@@ -244,18 +286,15 @@ export function StreamManager() {
     )
   }
 
-  // ── Spinning up ─────────────────────────────────────────────────────────────
-  if (status === 'provisioning') {
+  // ── Searching / spinning up ──────────────────────────────────────────────────
+  if (phase === 'provisioning') {
     return (
       <div className="bg-surface border border-amber-800/40 rounded-2xl p-6 flex items-start gap-3">
-        <span className="relative mt-1 flex h-2.5 w-2.5 flex-shrink-0">
-          <span className="absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-60 animate-ping" />
-          <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-amber-400" />
-        </span>
+        <PingDot color="#fbbf24" />
         <div>
-          <div className="text-sm font-semibold text-amber-400 mb-1">Spinning up server…</div>
+          <div className="text-sm font-semibold text-amber-400 mb-1">Finding the nearest server…</div>
           <div className="text-xs text-ink-faint">
-            Finding the nearest available server. Usually ready in under a minute.
+            Searching for an available GPU near you. Usually ready in under a minute.
           </div>
         </div>
       </div>
@@ -263,32 +302,50 @@ export function StreamManager() {
   }
 
   // ── Server ready, waiting for OBS ────────────────────────────────────────────
-  if (status === 'running' && !streaming) {
+  if (phase === 'waiting') {
     return (
       <div className="bg-surface border border-amber-800/30 rounded-2xl p-6 space-y-4">
         <div className="flex items-center gap-2.5">
-          <span className="relative flex h-2.5 w-2.5 flex-shrink-0">
-            <span className="absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-60 animate-ping" />
-            <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-amber-400" />
-          </span>
+          <PingDot color="#fbbf24" />
           <div>
             <div className="text-sm font-semibold text-amber-400">Server ready · waiting for OBS</div>
             <div className="text-xs text-ink-faint mt-0.5">
-              Set OBS to HEVC and click Go Live in the SlimCast panel.
+              {datacenter
+                ? `Connected to ${dataCenterToRegion(datacenter)} · press Go Live in the SlimCast panel.`
+                : 'Set OBS to HEVC and click Go Live in the SlimCast panel.'}
             </div>
           </div>
         </div>
-
-        {/* Platform tiles — idle while waiting */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-          {allPlatforms.map(p => (
+          {PLATFORM_ORDER.map(p => (
             <PlatformTile key={p} platform={p} state={undefined} active={false} />
           ))}
         </div>
+      </div>
+    )
+  }
 
+  // ── OBS connected, FFmpeg starting ──────────────────────────────────────────
+  if (phase === 'connecting') {
+    return (
+      <div className="bg-surface border border-amber-800/30 rounded-2xl p-6 space-y-4">
+        <div className="flex items-center gap-2.5">
+          <PingDot color="#fbbf24" />
+          <div>
+            <div className="text-sm font-semibold text-amber-400">OBS connected · starting streams…</div>
+            <div className="text-xs text-ink-faint mt-0.5">
+              Connecting to platforms — usually takes a few seconds.
+            </div>
+          </div>
+        </div>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+          {PLATFORM_ORDER.map(p => (
+            <PlatformTile key={p} platform={p} state={states[p]} active={p in states} />
+          ))}
+        </div>
         {datacenter && (
           <div className="text-xs text-ink-faint border-t border-line pt-3">
-            Connected · {dataCenterToRegion(datacenter)}
+            {dataCenterToRegion(datacenter)}
           </div>
         )}
       </div>
@@ -296,8 +353,6 @@ export function StreamManager() {
   }
 
   // ── Live ─────────────────────────────────────────────────────────────────────
-  const anyError      = outputs.some(o => o.state === 'error')
-  const anyRestarting = outputs.some(o => o.state === 'restarting')
   const borderCls = lowCredits
     ? 'border-amber-800/60'
     : anyError ? 'border-red-900/40' : 'border-accent/30'
@@ -308,18 +363,13 @@ export function StreamManager() {
       {/* Header */}
       <div className="flex items-start justify-between gap-4">
         <div className="flex items-center gap-2.5">
-          <span className="relative flex h-2.5 w-2.5 flex-shrink-0">
-            <span className={`absolute inline-flex h-full w-full rounded-full opacity-60 animate-ping
-              ${anyError ? 'bg-red-400' : anyRestarting ? 'bg-amber-400' : 'bg-accent'}`} />
-            <span className={`relative inline-flex h-2.5 w-2.5 rounded-full
-              ${anyError ? 'bg-red-400' : anyRestarting ? 'bg-amber-400' : 'bg-accent'}`} />
-          </span>
+          <PingDot color={anyError ? '#f87171' : anyRestarting ? '#fbbf24' : '#37d67a'} />
           <div>
             <div className={`text-sm font-semibold leading-none
               ${anyError ? 'text-red-400' : anyRestarting ? 'text-amber-400' : 'text-ink'}`}>
               {anyError ? 'Live · platform error' : anyRestarting ? 'Live · reconnecting…' : 'Live'}
             </div>
-            {streamStartRef.current && (
+            {liveStartRef.current && (
               <div className="text-xs text-ink-faint font-mono mt-0.5">{fmtElapsed(elapsed)}</div>
             )}
           </div>
@@ -342,9 +392,9 @@ export function StreamManager() {
         <HlsPlayer authToken={authToken} streaming={streaming} />
       )}
 
-      {/* Platform tiles — always show all 4 when live so user sees what's up */}
+      {/* Platform tiles */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-        {allPlatforms.map(p => (
+        {PLATFORM_ORDER.map(p => (
           <PlatformTile key={p} platform={p} state={states[p]} active={p in states} />
         ))}
       </div>
@@ -352,7 +402,7 @@ export function StreamManager() {
       {/* Region badge */}
       {datacenter && (
         <div className="border-t border-line pt-4 text-xs text-ink-faint">
-          Connected · {dataCenterToRegion(datacenter)}
+          {dataCenterToRegion(datacenter)}
         </div>
       )}
 
