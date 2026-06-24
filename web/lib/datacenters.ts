@@ -97,8 +97,11 @@ export const READINESS_TIMEOUT_MS = 120_000
 export const READINESS_POLL_MS = 5_000
 
 // Cap how many pods we'll boot-and-abandon before giving up (capacity misses
-// are fast and don't count — only real-but-dead boots do).
-export const MAX_BOOT_ATTEMPTS = 2
+// are fast and don't count — only real-but-dead boots do). DC-rejected pods
+// (RunPod placed in wrong region) also don't count against this — only true
+// boot failures (timeout / RTMP unreachable) do. Set high enough to survive
+// RunPod repeatedly misplacing pods in EU before landing on a US DC.
+export const MAX_BOOT_ATTEMPTS = 5
 
 // Hard RTT ceiling for provisioning. Any datacenter whose estimated round-trip
 // from the user exceeds this is excluded from the candidate list entirely —

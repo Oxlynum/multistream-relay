@@ -219,16 +219,17 @@ export async function provisionGpu(args: {
         // and places pods wherever it has capacity (EU-SE-1, EU-CZ-1, etc.).
         // We ask RunPod's own GraphQL for the pod's actual dataCenterId and
         // reject any DC not in our catalog (US/CA only). No external API needed.
+        // Fail-closed: if RunPod returns null for dataCenterId we can't verify
+        // the pod's region — treat as unacceptable and cascade (same as EU-*).
         // Doesn't count against the boot budget — this is RunPod's mistake.
-        if (addr.dataCenterId) {
-          const inCatalog = RUNPOD_DATACENTERS.some(dc => dc.id === addr.dataCenterId)
-          if (!inCatalog) {
-            console.warn(`[broker] pod ${podId} landed in ${addr.dataCenterId} (not in acceptable DC catalog) — RunPod ignored dataCenterIds, destroying and cascading`)
-            try { await provider.destroy(podId) } catch { /* best effort */ }
-            lastError = `pod placed in unacceptable datacenter: ${addr.dataCenterId}`
-            bootAttempts--
-            continue
-          }
+        const inCatalog = addr.dataCenterId != null &&
+          RUNPOD_DATACENTERS.some(dc => dc.id === addr.dataCenterId)
+        if (!inCatalog) {
+          console.warn(`[broker] pod ${podId} landed in ${addr.dataCenterId ?? 'unknown DC'} (not in acceptable DC catalog) — RunPod ignored dataCenterIds, destroying and cascading`)
+          try { await provider.destroy(podId) } catch { /* best effort */ }
+          lastError = `pod placed in unacceptable datacenter: ${addr.dataCenterId ?? 'unknown'}`
+          bootAttempts--
+          continue
         }
 
         return {
