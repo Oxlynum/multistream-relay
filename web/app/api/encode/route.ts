@@ -19,13 +19,14 @@ export async function GET(request: Request) {
   const supabase = createServerClient()
   const { data: profile } = await supabase
     .from('profiles')
-    .select('landscape_bitrate_kbps, portrait_bitrate_kbps')
+    .select('landscape_bitrate_kbps, portrait_bitrate_kbps, enhanced_twitch')
     .eq('id', userId)
     .single()
 
   return Response.json({
     landscape_bitrate_kbps: profile?.landscape_bitrate_kbps ?? 6000,
     portrait_bitrate_kbps: profile?.portrait_bitrate_kbps ?? 4000,
+    enhanced_twitch: profile?.enhanced_twitch ?? false,
     limits: {
       landscape: { min: LANDSCAPE_MIN, max: LANDSCAPE_MAX },
       portrait: { min: PORTRAIT_MIN, max: PORTRAIT_MAX },
@@ -38,13 +39,16 @@ export async function PATCH(request: Request) {
   if (!userId) return Response.json({ error: 'Unauthorized' }, { status: 401 })
 
   const body = await request.json().catch(() => ({}))
-  const updates: Record<string, number> = {}
+  const updates: Record<string, number | boolean> = {}
 
   if ('landscape_bitrate_kbps' in body) {
     updates.landscape_bitrate_kbps = clamp(Number(body.landscape_bitrate_kbps), LANDSCAPE_MIN, LANDSCAPE_MAX)
   }
   if ('portrait_bitrate_kbps' in body) {
     updates.portrait_bitrate_kbps = clamp(Number(body.portrait_bitrate_kbps), PORTRAIT_MIN, PORTRAIT_MAX)
+  }
+  if ('enhanced_twitch' in body) {
+    updates.enhanced_twitch = Boolean(body.enhanced_twitch)
   }
 
   if (Object.keys(updates).length === 0) {

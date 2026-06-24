@@ -160,7 +160,8 @@ def main() -> None:
     last_known_config: dict = pair_resp.get("config", {})
     last_config_hash = json.dumps(
         {"outputs": last_known_config.get("outputs", []),
-         "crop": last_known_config.get("crop", {})},
+         "crop": last_known_config.get("crop", {}),
+         "enhanced_twitch": last_known_config.get("enhanced_twitch", False)},
         sort_keys=True,
     )
 
@@ -197,11 +198,12 @@ def main() -> None:
         # ── Config poll ───────────────────────────────────────────────────────
         cfg_resp = _api("GET", "/api/agent/config")
         if cfg_resp:
-            outputs = cfg_resp.get("outputs", [])
-            crop    = cfg_resp.get("crop", {})
-            new_hash = json.dumps({"outputs": outputs, "crop": crop}, sort_keys=True)
+            outputs         = cfg_resp.get("outputs", [])
+            crop            = cfg_resp.get("crop", {})
+            enhanced_twitch = cfg_resp.get("enhanced_twitch", False)
+            new_hash = json.dumps({"outputs": outputs, "crop": crop, "enhanced_twitch": enhanced_twitch}, sort_keys=True)
             if new_hash != last_config_hash:
-                last_known_config = {"outputs": outputs, "crop": crop}
+                last_known_config = {"outputs": outputs, "crop": crop, "enhanced_twitch": enhanced_twitch}
                 if prev_obs_connected:
                     log.info("Config changed — reapplying.")
                     sup.apply(last_known_config)
@@ -261,7 +263,11 @@ def main() -> None:
                 log.info("Received start command.")
                 cfg_resp2 = _api("GET", "/api/agent/config") or {}
                 if cfg_resp2:
-                    sup.apply({"outputs": cfg_resp2.get("outputs", [])})
+                    sup.apply({
+                        "outputs": cfg_resp2.get("outputs", []),
+                        "crop": cfg_resp2.get("crop", {}),
+                        "enhanced_twitch": cfg_resp2.get("enhanced_twitch", False),
+                    })
 
         # ── Watchdogs ──────────────────────────────────────────────────────────
         idle_for = time.time() - last_active

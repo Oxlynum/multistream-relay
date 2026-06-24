@@ -28,10 +28,11 @@ export function transcodeCount(outputs: OutputStatus[]): number {
  *   not streaming        → 0
  *   streaming, passthrough-only or 1 transcode → 1.0 (base)
  *   each transcode beyond the first → +0.2
+ *   enhanced Twitch active (3-tier NVENC) → +0.3 surcharge
  */
-export function burnRatePerSec(transcodes: number, streaming: boolean): number {
+export function burnRatePerSec(transcodes: number, streaming: boolean, enhancedActive?: boolean): number {
   if (!streaming) return 0
-  return 1 + 0.2 * Math.max(0, transcodes - 1)
+  return 1 + 0.2 * Math.max(0, transcodes - 1) + (enhancedActive ? 0.3 : 0)
 }
 
 /** Seconds of real streaming time left at the current burn rate. */

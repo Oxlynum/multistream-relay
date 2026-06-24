@@ -81,6 +81,7 @@ interface PlatformSettings {
 interface EncodeSettings {
   landscape_bitrate_kbps: number
   portrait_bitrate_kbps: number
+  enhanced_twitch: boolean
 }
 
 const PLATFORM_META: Record<string, { label: string; supportsPortrait: boolean }> = {
@@ -98,7 +99,7 @@ const LIMITS = {
 export default function SettingsPage() {
   const router = useRouter()
   const [settings, setSettings] = useState<PlatformSettings[]>([])
-  const [encode, setEncode] = useState<EncodeSettings>({ landscape_bitrate_kbps: 6000, portrait_bitrate_kbps: 4000 })
+  const [encode, setEncode] = useState<EncodeSettings>({ landscape_bitrate_kbps: 6000, portrait_bitrate_kbps: 4000, enhanced_twitch: false })
   const [loaded, setLoaded] = useState(false)
   const [savingEncode, setSavingEncode] = useState(false)
   const [savedEncode, setSavedEncode] = useState(false)
@@ -131,6 +132,7 @@ export default function SettingsPage() {
           setEncode({
             landscape_bitrate_kbps: e.landscape_bitrate_kbps,
             portrait_bitrate_kbps: e.portrait_bitrate_kbps,
+            enhanced_twitch: e.enhanced_twitch ?? false,
           })
         }
       }
@@ -146,7 +148,11 @@ export default function SettingsPage() {
     await fetch('/api/encode', {
       method: 'PATCH',
       headers,
-      body: JSON.stringify(encode),
+      body: JSON.stringify({
+        landscape_bitrate_kbps: encode.landscape_bitrate_kbps,
+        portrait_bitrate_kbps: encode.portrait_bitrate_kbps,
+        enhanced_twitch: encode.enhanced_twitch,
+      }),
     })
     setSavingEncode(false)
     setSavedEncode(true)
@@ -229,6 +235,50 @@ export default function SettingsPage() {
             />
           </div>
         </div>
+
+        {/* Enhanced Twitch */}
+        {settings.some(s => s.platform === 'twitch' && s.enabled !== false) && (
+          <div className="bg-surface border border-line rounded-2xl p-6">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="font-semibold">Enhanced Twitch</span>
+                  <span className="text-[10px] font-semibold bg-accent/10 text-accent border border-accent/30 rounded px-1.5 py-0.5">+0.3 tkn/hr</span>
+                </div>
+                <p className="text-xs text-ink-faint max-w-sm">
+                  The relay encodes three quality tiers (1080p60, 720p60, 480p30) and streams
+                  all three to Twitch simultaneously. Viewers with slow connections get lower
+                  quality automatically without you doing anything in OBS.
+                </p>
+              </div>
+              <button
+                onClick={() => {
+                  setEncode(e => ({ ...e, enhanced_twitch: !e.enhanced_twitch }))
+                  // Autosave the toggle immediately (no Save button click needed)
+                  authHeader().then(headers => {
+                    if (!headers) return
+                    fetch('/api/encode', {
+                      method: 'PATCH',
+                      headers,
+                      body: JSON.stringify({ enhanced_twitch: !encode.enhanced_twitch }),
+                    })
+                  })
+                }}
+                className={`flex-shrink-0 relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none ${
+                  encode.enhanced_twitch ? 'bg-accent' : 'bg-line-strong'
+                }`}
+                role="switch"
+                aria-checked={encode.enhanced_twitch}
+              >
+                <span
+                  className={`inline-block h-4 w-4 rounded-full bg-white shadow transition-transform ${
+                    encode.enhanced_twitch ? 'translate-x-6' : 'translate-x-1'
+                  }`}
+                />
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Portrait framing */}
         {hasPortrait && (
