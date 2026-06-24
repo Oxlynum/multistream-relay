@@ -33,6 +33,7 @@ export const RUNPOD_DATACENTERS: Datacenter[] = [
   { id: 'US-TX-6', lat: 29.76, lon: -95.37 },
   { id: 'US-CA-1', lat: 37.40, lon: -122.10 }, // Bay Area
   { id: 'US-CA-2', lat: 37.40, lon: -122.10 },
+  { id: 'US-WA-1', lat: 47.61, lon: -122.33 }, // Seattle
   { id: 'US-OR-1', lat: 45.52, lon: -122.68 }, // Portland
   { id: 'US-OR-2', lat: 45.52, lon: -122.68 },
   { id: 'CA-MTL-1', lat: 45.50, lon: -73.57 }, // Montreal
