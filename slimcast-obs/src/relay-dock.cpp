@@ -135,7 +135,6 @@ void RelayDock::buildUi()
     m_pages = new QStackedWidget(this);
     m_pages->addWidget(buildSetupPage());   // index 0
 
-    // Active panel: two tabs — Stream (existing controls) + Health (graph).
     auto *tabs = new QTabWidget;
     tabs->setStyleSheet(
         "QTabWidget::pane{border:none; background:#0b0e14;}"
@@ -146,10 +145,6 @@ void RelayDock::buildUi()
         "QTabBar::tab:hover:!selected{background:#1a1f2b;}");
 
     tabs->addTab(buildStreamTab(), "Stream");
-
-    m_healthWidget = new HealthGraphWidget;
-    tabs->addTab(m_healthWidget, "Health");
-
     tabs->addTab(buildOutputsTab(), "Outputs");
     tabs->addTab(buildSlimSyncTab(), "Account");
 
@@ -291,6 +286,11 @@ QWidget *RelayDock::buildStreamTab()
     }
     m_confirmBanner->setVisible(false);
     ly->addWidget(m_confirmBanner);
+
+    ly->addWidget(makeSep());
+
+    m_healthWidget = new HealthGraphWidget;
+    ly->addWidget(m_healthWidget);
 
     ly->addStretch();
     scroll->setWidget(w);
