@@ -146,11 +146,12 @@ void RelayDock::buildUi()
         "QTabBar::tab:hover:!selected{background:#1a1f2b;}");
 
     tabs->addTab(buildStreamTab(), "Stream");
-    tabs->addTab(buildOutputsTab(), "Outputs");
-    tabs->addTab(buildSlimSyncTab(), "SlimSync");
 
     m_healthWidget = new HealthGraphWidget;
     tabs->addTab(m_healthWidget, "Health");
+
+    tabs->addTab(buildOutputsTab(), "Outputs");
+    tabs->addTab(buildSlimSyncTab(), "SlimSync");
 
     m_pages->addWidget(tabs);               // index 1
     setWidget(m_pages);
