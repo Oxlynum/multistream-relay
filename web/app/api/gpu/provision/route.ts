@@ -39,9 +39,13 @@ export async function POST(request: Request) {
   // ── Payment gate: no pod may ever run without a card on file AND a way to
   // pay for it. This is the hard stop against "run pods without paying" and
   // against multi-account free-GPU abuse (a card is the anti-sybil signal). ──
-  // DEV ONLY: SLIMCAST_DEV_SKIP_PAYMENT_GATE=1 bypasses this for testing before
-  // the Stripe webhook is wired up. MUST be unset before launch.
-  if (process.env.SLIMCAST_DEV_SKIP_PAYMENT_GATE !== '1') {
+  // DEV bypass: same UUID guard as the billing bypass — must be a well-formed
+  // UUID, exact match only, never affects any other account.
+  const UUID_RE_GATE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+  const gateBypassId = process.env.SLIMCAST_DEV_NO_BILLING_USER_ID ?? ''
+  const skipPaymentGate = !!userId && UUID_RE_GATE.test(gateBypassId) && gateBypassId === userId
+  if (skipPaymentGate) console.log(`[provision] dev payment gate bypassed for ${userId}`)
+  if (!skipPaymentGate) {
     const { data: gate } = await supabase
       .from('profiles')
       .select('stripe_payment_method_id, streaming_credits_seconds, auto_refill_enabled')
