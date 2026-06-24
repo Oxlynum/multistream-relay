@@ -32,9 +32,11 @@ export async function GET(request: Request) {
 
   const { data: profile } = await supabase
     .from('profiles')
-    .select('streaming_credits_seconds')
+    .select('streaming_credits')
     .eq('id', userId)
     .single()
+
+  const credits = parseFloat(profile?.streaming_credits ?? '0') || 0
 
   if (!instance) {
     return Response.json({
@@ -42,7 +44,8 @@ export async function GET(request: Request) {
       ip: null,
       rtmp_url: null,
       ingest_key: null,
-      credits_seconds: profile?.streaming_credits_seconds ?? 0,
+      credits,
+      credits_seconds: Math.round(credits * 3600),
       burn_rate: 0,
       streaming: false,
       outputs: [],
@@ -81,7 +84,8 @@ export async function GET(request: Request) {
     ip: instance.ip_address ?? null,
     rtmp_url: server,
     ingest_key: instance.ingest_key ?? null,
-    credits_seconds: profile?.streaming_credits_seconds ?? 0,
+    credits,
+    credits_seconds: Math.round(credits * 3600),
     // Zero the meter when the agent is stale/stopped so the UI doesn't show a
     // burn rate for a stream that isn't actually running.
     burn_rate: effectiveStatus === 'running' ? (instance.burn_rate ?? 0) : 0,

@@ -48,7 +48,7 @@ export async function POST(request: Request) {
   if (!skipPaymentGate) {
     const { data: gate } = await supabase
       .from('profiles')
-      .select('stripe_payment_method_id, streaming_credits_seconds, auto_refill_enabled')
+      .select('stripe_payment_method_id, streaming_credits, auto_refill_enabled')
       .eq('id', userId)
       .single()
 
@@ -58,7 +58,7 @@ export async function POST(request: Request) {
         { status: 402 },
       )
     }
-    const credits = gate.streaming_credits_seconds ?? 0
+    const credits = parseFloat(gate.streaming_credits ?? '0') || 0
     if (credits <= 0 && !gate.auto_refill_enabled) {
       return Response.json(
         { error: 'out_of_credits', message: 'You are out of streaming time. Add credits or enable auto-refill.' },

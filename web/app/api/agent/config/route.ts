@@ -19,7 +19,7 @@ export async function GET(request: NextRequest) {
 
   const { data: profile } = await supabase
     .from('profiles')
-    .select('streaming_credits_seconds, portrait_zoom, portrait_pos_x, portrait_pos_y, landscape_bitrate_kbps, portrait_bitrate_kbps')
+    .select('streaming_credits, portrait_zoom, portrait_pos_x, portrait_pos_y, landscape_bitrate_kbps, portrait_bitrate_kbps')
     .eq('id', userId)
     .single()
 
@@ -33,6 +33,7 @@ export async function GET(request: NextRequest) {
       pos_x: profile?.portrait_pos_x ?? 0.5,
       pos_y: profile?.portrait_pos_y ?? 0.5,
     },
-    credits_seconds: profile?.streaming_credits_seconds ?? 0,
+    credits: parseFloat(profile?.streaming_credits ?? '0') || 0,
+    credits_seconds: Math.round((parseFloat(profile?.streaming_credits ?? '0') || 0) * 3600),
   })
 }

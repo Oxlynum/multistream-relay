@@ -7,15 +7,15 @@ import { DashboardNav } from '@/components/dashboard-nav'
 import { formatTokens } from '@/lib/billing'
 
 interface DashboardData {
-  credits_seconds: number
+  credits: number
   platforms: string[]
 }
 
 interface Stats {
   period: string
-  credit_balance_seconds: number
+  credit_balance: number
   total_duration_seconds: number
-  total_credits_used_seconds: number
+  total_credits_used: number
   session_count: number
   avg_duration_seconds: number
   top_platforms: Array<{ platform: string; count: number }>
@@ -60,9 +60,9 @@ export default function DashboardPage() {
         supabase.from('platform_connections').select('platform').eq('user_id', session.user.id),
       ])
 
-      const credits = await profileRes.json().catch(() => ({ seconds: 0 }))
+      const credits = await profileRes.json().catch(() => ({ tokens: 0 }))
       setData({
-        credits_seconds: credits.seconds ?? 0,
+        credits: credits.tokens ?? 0,
         platforms: (platformRes.data ?? []).map((p: { platform: string }) => p.platform),
       })
     } catch (err) {
@@ -99,8 +99,8 @@ export default function DashboardPage() {
     )
   }
 
-  const creditsSeconds = data?.credits_seconds ?? 0
-  const creditsLow = creditsSeconds < 1800
+  const credits = data?.credits ?? 0
+  const creditsLow = credits < 0.5
 
   return (
     <div className="min-h-screen">
@@ -113,7 +113,7 @@ export default function DashboardPage() {
           <div>
             <div className="text-sm text-ink-muted mb-1">Token balance</div>
             <div className={`text-3xl font-bold font-mono ${creditsLow ? 'text-amber-400' : 'text-ink'}`}>
-              {formatTokens(creditsSeconds)}
+              {formatTokens(credits)}
             </div>
             <div className="text-xs text-ink-faint mt-1">1 token = $2 · base 1 tkn/hr while live</div>
             {creditsLow && <div className="text-sm text-amber-500 mt-1">Less than 30 minutes remaining</div>}
@@ -150,7 +150,7 @@ export default function DashboardPage() {
                 <Stat label="Hours streamed" value={fmtDuration(stats?.total_duration_seconds ?? 0)} />
                 <Stat label="Sessions" value={String(stats?.session_count ?? 0)} />
                 <Stat label="Avg session" value={fmtDuration(stats?.avg_duration_seconds ?? 0)} />
-                <Stat label="Tokens used" value={formatTokens(stats?.total_credits_used_seconds ?? 0)} />
+                <Stat label="Tokens used" value={formatTokens(stats?.total_credits_used ?? 0)} />
               </div>
 
               {(stats?.top_platforms?.length ?? 0) > 0 && (

@@ -74,10 +74,10 @@ function CreditsPageInner() {
         supabase.from('achievements').select('achievement_key').eq('user_id', session.user.id),
       ])
 
-      const bal = await balRes.json().catch(() => ({ seconds: 0 }))
+      const bal = await balRes.json().catch(() => ({ tokens: 0 }))
       const refill = await refillRes.json().catch(() => ({ enabled: false, hours: 10, has_payment_method: false, card: null }))
 
-      setBalance(bal.seconds ?? 0)
+      setBalance(bal.tokens ?? 0)
       setRefillEnabled(refill.enabled)
       setRefillTokens(refill.hours ?? 10)
       setHasPaymentMethod(refill.has_payment_method)

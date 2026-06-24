@@ -11,19 +11,21 @@ export async function GET(request: Request) {
 
   const { data: profile } = await supabase
     .from('profiles')
-    .select('streaming_credits_seconds')
+    .select('streaming_credits')
     .eq('id', userId)
     .single()
 
-  const seconds = profile?.streaming_credits_seconds ?? 0
-  const hours = Math.floor(seconds / 3600)
-  const minutes = Math.floor((seconds % 3600) / 60)
+  const tokens = parseFloat(profile?.streaming_credits ?? '0') || 0
+  const seconds = Math.round(tokens * 3600)
+  const hours = Math.floor(tokens)
+  const minutes = Math.floor((tokens % 1) * 60)
 
   return Response.json({
+    tokens,
     seconds,
     hours,
     minutes,
     formatted: hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`,
-    low: seconds < 1800,  // warn at 30 min
+    low: tokens < 0.5,  // warn at 30 min (0.5 tokens)
   })
 }

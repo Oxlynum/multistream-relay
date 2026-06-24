@@ -27,13 +27,15 @@ export async function GET(request: Request) {
 
   const { data: profile } = await supabase
     .from('profiles')
-    .select('streaming_credits_seconds')
+    .select('streaming_credits')
     .eq('id', user.id)
     .single()
 
-  const creditBalance = profile?.streaming_credits_seconds ?? 0
+  const creditBalance = parseFloat(profile?.streaming_credits ?? '0') || 0
   const totalDurationSeconds = sessions?.reduce((s, r) => s + (r.duration_seconds ?? 0), 0) ?? 0
-  const totalCreditsUsed = sessions?.reduce((s, r) => s + (r.credits_deducted ?? 0), 0) ?? 0
+  const totalCreditsUsed = parseFloat(
+    (sessions?.reduce((s, r) => s + (parseFloat(r.credits_deducted ?? '0') || 0), 0) ?? 0).toFixed(3)
+  )
   const sessionCount = sessions?.length ?? 0
 
   const platformCounts: Record<string, number> = {}
@@ -53,9 +55,9 @@ export async function GET(request: Request) {
 
   return Response.json({
     period,
-    credit_balance_seconds: creditBalance,
+    credit_balance: creditBalance,
     total_duration_seconds: totalDurationSeconds,
-    total_credits_used_seconds: totalCreditsUsed,
+    total_credits_used: totalCreditsUsed,
     session_count: sessionCount,
     avg_duration_seconds: avgDurationSeconds,
     top_platforms: topPlatforms,

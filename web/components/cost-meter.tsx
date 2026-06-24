@@ -6,7 +6,7 @@ import { secondsRemaining, formatDuration } from '@/lib/billing'
 
 interface GpuStatus {
   status: string
-  credits_seconds: number
+  credits: number
   burn_rate: number
 }
 
@@ -37,7 +37,7 @@ export function CostMeter() {
 
   const tokensPerHr = data.burn_rate
   const dollarsPerHr = tokensPerHr * 2
-  const remaining = secondsRemaining(data.credits_seconds, data.burn_rate)
+  const remaining = secondsRemaining(data.credits, data.burn_rate)
   const lowRemaining = remaining < 1800
 
   return (

@@ -1,5 +1,5 @@
 import { createServerClient } from '@/lib/supabase'
-import { stripe, HOURLY_PRICE_ID, hoursToSeconds } from '@/lib/stripe'
+import { stripe, HOURLY_PRICE_ID, hoursToTokens } from '@/lib/stripe'
 import { checkRateLimit } from '@/lib/rate-limit'
 
 export async function POST(request: Request) {
@@ -40,7 +40,7 @@ export async function POST(request: Request) {
     metadata: {
       user_id: user.id,
       hours: hours.toString(),
-      credits_seconds: hoursToSeconds(hours).toString(),
+      credits_tokens: hoursToTokens(hours).toFixed(3),
     },
     success_url: `${process.env.NEXT_PUBLIC_APP_URL}/dashboard/credits?success=1`,
     cancel_url: `${process.env.NEXT_PUBLIC_APP_URL}/dashboard/credits`,

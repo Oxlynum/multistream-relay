@@ -24,3 +24,8 @@ export const HOURLY_PRICE_ID = process.env.STRIPE_PRICE_HOURLY!
 export function hoursToSeconds(hours: number) {
   return hours * 3600
 }
+
+/** Convert hours purchased to tokens (1 token = 1 hour = $2.00). */
+export function hoursToTokens(hours: number): number {
+  return hours
+}

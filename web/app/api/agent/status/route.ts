@@ -3,7 +3,7 @@ import { authenticateAgentDetailed } from '@/lib/agent-auth'
 import { createServerClient } from '@/lib/supabase'
 import { triggerAutoRefill } from '@/app/api/credits/auto-refill/route'
 import { teardownInstance, sweepStalePods } from '@/lib/pod-teardown'
-import { transcodeCount, burnRatePerSec, type OutputStatus } from '@/lib/billing'
+import { transcodeCount, burnRatePerHr, type OutputStatus } from '@/lib/billing'
 
 // Never bill more than this many seconds per heartbeat, even if the previous
 // heartbeat was long ago (missed beats / restart) — avoids surprise overcharges.
@@ -42,11 +42,11 @@ export async function POST(request: NextRequest) {
 
   const { data: profile } = await supabase
     .from('profiles')
-    .select('streaming_credits_seconds')
+    .select('streaming_credits')
     .eq('id', userId)
     .single()
 
-  let creditsSeconds = profile?.streaming_credits_seconds ?? 0
+  let credits = parseFloat(profile?.streaming_credits ?? '0') || 0
   let burnRate = instance?.burn_rate ?? 0
 
   const now = Date.now()
@@ -55,11 +55,12 @@ export async function POST(request: NextRequest) {
   // (The dashboard / OBS dock also poll this endpoint with the 'user' key — they
   //  must read state but never advance the clock, deduct, or tear anything down.)
   if (isPodAgent) {
-    burnRate = burnRatePerSec(transcodeCount(outputs), streaming)
+    burnRate = burnRatePerHr(transcodeCount(outputs), streaming)
 
     const last = instance?.last_seen_at ? new Date(instance.last_seen_at).getTime() : now
     const elapsed = Math.min(Math.max(0, (now - last) / 1000), MAX_BILL_INTERVAL_S)
-    const deduct = Math.round(burnRate * elapsed)
+    // tokens = (tokens/hr) * (seconds / 3600), rounded to 3 decimal places
+    const deduct = parseFloat((burnRate * elapsed / 3600).toFixed(3))
 
     // DEV billing bypass — three explicit guards so this can ONLY ever match one
     // specific account and can never be triggered by a blank/malformed env var:
@@ -74,12 +75,12 @@ export async function POST(request: NextRequest) {
       !!userId &&
       UUID_RE.test(devBypassId) &&
       devBypassId === userId
-    if (devNoBilling) console.log(`[billing] dev bypass active for ${userId} — deduction of ${deduct}s skipped`)
+    if (devNoBilling) console.log(`[billing] dev bypass active for ${userId} — deduction of ${deduct} tkn skipped`)
     if (deduct > 0 && !devNoBilling) {
-      creditsSeconds = Math.max(0, creditsSeconds - deduct)
+      credits = parseFloat(Math.max(0, credits - deduct).toFixed(3))
       await supabase
         .from('profiles')
-        .update({ streaming_credits_seconds: creditsSeconds })
+        .update({ streaming_credits: credits })
         .eq('id', userId)
     }
 
@@ -121,7 +122,7 @@ export async function POST(request: NextRequest) {
           .from('stream_sessions')
           .update({
             duration_seconds: Math.round((now - new Date(open.started_at).getTime()) / 1000),
-            credits_deducted: (open.credits_deducted ?? 0) + deduct,
+            credits_deducted: parseFloat(((open.credits_deducted ?? 0) + deduct).toFixed(3)),
             platforms: merged,
           })
           .eq('id', sessionId)
@@ -152,16 +153,16 @@ export async function POST(request: NextRequest) {
       })
       .eq('user_id', userId)
 
-    // Last-ditch credit save before we enforce exhaustion.
-    if (streaming && creditsSeconds < 3600) {
+    // Last-ditch credit save before we enforce exhaustion (< 1 token = < 1 hr left).
+    if (streaming && credits < 1.0) {
       const refilled = await triggerAutoRefill(userId)
       if (refilled) {
         const { data: updated } = await supabase
           .from('profiles')
-          .select('streaming_credits_seconds')
+          .select('streaming_credits')
           .eq('id', userId)
           .single()
-        creditsSeconds = updated?.streaming_credits_seconds ?? creditsSeconds
+        credits = parseFloat(updated?.streaming_credits ?? String(credits)) || credits
       }
     }
 
@@ -173,13 +174,13 @@ export async function POST(request: NextRequest) {
     const maxSessionAt = instance?.max_session_at ? new Date(instance.max_session_at).getTime() : null
 
     let killReason = ''
-    if (creditsSeconds <= 0) killReason = 'credits_exhausted'
+    if (credits <= 0) killReason = 'credits_exhausted'
     else if (maxSessionAt && now >= maxSessionAt) killReason = 'session_expired'
     else if (!streaming && idleFor > IDLE_GRACE_S) killReason = 'idle_timeout'
 
     if (killReason) {
       await teardownInstance(userId, `heartbeat:${killReason}`)
-      return Response.json({ command: 'stop', reason: killReason, credits_seconds: creditsSeconds, burn_rate: 0 })
+      return Response.json({ command: 'stop', reason: killReason, credits, credits_seconds: Math.round(credits * 3600), burn_rate: 0 })
     }
   }
 
@@ -205,8 +206,8 @@ export async function POST(request: NextRequest) {
       .update({ executed_at: new Date().toISOString() })
       .eq('id', cmd.id)
 
-    return Response.json({ command: cmd.command, credits_seconds: creditsSeconds, burn_rate: burnRate })
+    return Response.json({ command: cmd.command, credits, credits_seconds: Math.round(credits * 3600), burn_rate: burnRate })
   }
 
-  return Response.json({ command: null, credits_seconds: creditsSeconds, burn_rate: burnRate, outputs })
+  return Response.json({ command: null, credits, credits_seconds: Math.round(credits * 3600), burn_rate: burnRate, outputs })
 }

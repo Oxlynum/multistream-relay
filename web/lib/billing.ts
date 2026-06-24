@@ -1,13 +1,10 @@
-// Pricing model: pay-per-use streaming credits, stored in seconds.
-//   1 token = 1 hour = 3600 credit-seconds = $2.00
+// Pricing model: pay-per-use streaming credits stored as tokens.
+//   1 token = 1 hour of streaming at base rate = $2.00
 //
 // What's included in the base 1 token/hr:
 //   - YouTube HEVC passthrough (no encode — always free)
 //   - the first transcoded platform
 // Each ADDITIONAL transcoded platform adds 0.2 token/hr.
-//
-// Because 1 token/hr == 1 credit-second per real second, the burn rate in
-// tokens/hr is numerically identical to the credits-per-second deduction rate.
 
 export interface OutputStatus {
   name: string
@@ -24,20 +21,20 @@ export function transcodeCount(outputs: OutputStatus[]): number {
 }
 
 /**
- * Burn rate in tokens/hr (== credit-seconds per second).
- *   not streaming        → 0
- *   streaming, passthrough-only or 1 transcode → 1.0 (base)
- *   each transcode beyond the first → +0.2
+ * Burn rate in tokens/hr.
+ *   not streaming                                     → 0
+ *   streaming, passthrough-only or 1 transcode        → 1.0 (base)
+ *   each transcode beyond the first                   → +0.2
  */
-export function burnRatePerSec(transcodes: number, streaming: boolean): number {
+export function burnRatePerHr(transcodes: number, streaming: boolean): number {
   if (!streaming) return 0
   return 1 + 0.2 * Math.max(0, transcodes - 1)
 }
 
-/** Seconds of real streaming time left at the current burn rate. */
-export function secondsRemaining(creditsSeconds: number, burnRate: number): number {
-  if (burnRate <= 0) return creditsSeconds
-  return Math.floor(creditsSeconds / burnRate)
+/** Seconds of real streaming time left at the current burn rate (tokens/hr). */
+export function secondsRemaining(credits: number, burnRate: number): number {
+  if (burnRate <= 0) return credits * 3600
+  return Math.floor((credits / burnRate) * 3600)
 }
 
 /**
@@ -50,14 +47,14 @@ export function secondsRemaining(creditsSeconds: number, burnRate: number): numb
 export async function creditPaymentOnce(
   paymentId: string,
   userId: string,
-  seconds: number,
+  tokens: number,
 ): Promise<boolean> {
   const { createServerClient } = await import('@/lib/supabase')
   const supabase = createServerClient()
   const { data, error } = await supabase.rpc('credit_payment_once', {
     p_payment_id: paymentId,
     p_user_id: userId,
-    p_seconds: seconds,
+    p_tokens: tokens,
   })
   if (error) {
     console.error('[billing] credit_payment_once failed:', error.message)
@@ -75,11 +72,10 @@ export function formatDuration(seconds: number): string {
   return `${m}m`
 }
 
-/** Format a credit balance as tokens (1 token = 3600 credit-seconds = $2). */
-export function formatTokens(seconds: number): string {
-  if (seconds <= 0) return '0 tkn'
-  const t = seconds / 3600
-  if (t >= 100) return `${Math.floor(t)} tkn`
-  if (t >= 10)  return `${t.toFixed(1)} tkn`
-  return `${t.toFixed(2)} tkn`
+/** Format a token balance to 3 decimal places for display. */
+export function formatTokens(tokens: number): string {
+  if (tokens <= 0) return '0 tkn'
+  if (tokens >= 100) return `${Math.floor(tokens)} tkn`
+  if (tokens >= 10)  return `${tokens.toFixed(1)} tkn`
+  return `${tokens.toFixed(3)} tkn`
 }

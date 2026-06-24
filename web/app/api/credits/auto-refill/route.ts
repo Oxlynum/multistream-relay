@@ -1,5 +1,5 @@
 import { createServerClient } from '@/lib/supabase'
-import { stripe, HOURLY_PRICE_ID, hoursToSeconds } from '@/lib/stripe'
+import { stripe, HOURLY_PRICE_ID, hoursToTokens } from '@/lib/stripe'
 import { creditPaymentOnce } from '@/lib/billing'
 
 // GET — return current auto-refill settings + saved card info.
@@ -82,14 +82,14 @@ export async function triggerAutoRefill(userId: string): Promise<boolean> {
 
   const { data: profile } = await supabase
     .from('profiles')
-    .select('auto_refill_enabled, auto_refill_hours, stripe_customer_id, stripe_payment_method_id, streaming_credits_seconds')
+    .select('auto_refill_enabled, auto_refill_hours, stripe_customer_id, stripe_payment_method_id, streaming_credits')
     .eq('id', userId)
     .single()
 
   if (!profile?.auto_refill_enabled) return false
   if (!profile.stripe_customer_id || !profile.stripe_payment_method_id) return false
-  // Don't double-refill if balance already climbed above threshold (race guard).
-  if ((profile.streaming_credits_seconds ?? 0) > 3600) return false
+  // Don't double-refill if balance already climbed above 1 token (race guard).
+  if ((parseFloat(profile.streaming_credits ?? '0') || 0) > 1.0) return false
 
   const hours = profile.auto_refill_hours ?? 10
   const amountCents = hours * 200 // $2/hr
@@ -106,7 +106,7 @@ export async function triggerAutoRefill(userId: string): Promise<boolean> {
       metadata: {
         user_id: userId,
         hours: hours.toString(),
-        credits_seconds: hoursToSeconds(hours).toString(),
+        credits_tokens: hoursToTokens(hours).toFixed(3),
         auto_refill: 'true',
       },
     })
@@ -115,7 +115,7 @@ export async function triggerAutoRefill(userId: string): Promise<boolean> {
       // Credit immediately so the live stream isn't killed waiting on the
       // webhook. Keyed on the payment_intent id, so the webhook's later
       // payment_intent.succeeded for the same charge is a no-op (no double).
-      await creditPaymentOnce(paymentIntent.id, userId, hoursToSeconds(hours))
+      await creditPaymentOnce(paymentIntent.id, userId, hoursToTokens(hours))
       return true
     }
   } catch {

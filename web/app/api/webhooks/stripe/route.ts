@@ -44,12 +44,12 @@ export async function POST(req: NextRequest) {
 
       if (session.mode !== 'payment' || session.payment_status !== 'paid') break
 
-      const creditsSeconds = parseInt(session.metadata?.credits_seconds ?? '0', 10)
+      const tokens = parseFloat(session.metadata?.credits_tokens ?? '0') || 0
       // Idempotent on the payment_intent id: a Stripe webhook retry (or the
       // session firing twice) can never double-credit.
       const payId = (session.payment_intent as string) ?? session.id
-      if (userId && creditsSeconds > 0) {
-        await creditPaymentOnce(payId, userId, creditsSeconds)
+      if (userId && tokens > 0) {
+        await creditPaymentOnce(payId, userId, tokens)
       }
 
       // Persist stripe_customer_id.
@@ -81,11 +81,11 @@ export async function POST(req: NextRequest) {
       if (pi.metadata?.auto_refill !== 'true') break
 
       const userId = pi.metadata?.user_id
-      const creditsSeconds = parseInt(pi.metadata?.credits_seconds ?? '0', 10)
+      const tokens = parseFloat(pi.metadata?.credits_tokens ?? '0') || 0
       // Keyed on the payment_intent id, so this is a no-op if the auto-refill
       // path already credited it — and the backstop if that path failed.
-      if (userId && creditsSeconds > 0) {
-        await creditPaymentOnce(pi.id, userId, creditsSeconds)
+      if (userId && tokens > 0) {
+        await creditPaymentOnce(pi.id, userId, tokens)
       }
       break
     }

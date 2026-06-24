@@ -16,7 +16,7 @@ interface GpuStatus {
   status: string
   streaming: boolean
   burn_rate: number
-  credits_seconds: number
+  credits: number
   outputs: OutputStatus[]
   datacenter: string | null
   gpu_type: string | null
@@ -224,13 +224,13 @@ export function StreamManager() {
 
   if (!data) return null
 
-  const { status, streaming, burn_rate, credits_seconds, outputs, gpu_type,
+  const { status, streaming, burn_rate, credits, outputs, gpu_type,
           confirm_required, confirm_deadline, hls_available } = data
 
   const states          = platformStateMap(outputs)
   const activePlatforms = PLATFORM_ORDER.filter(p => p in states)
   const allPlatforms    = PLATFORM_ORDER  // always show all 4 when pod is running
-  const remaining       = secondsRemaining(credits_seconds, burn_rate)
+  const remaining       = secondsRemaining(credits, burn_rate)
   const lowCredits      = remaining < 1800 && streaming
   const confirmMsLeft   = confirm_deadline ? Math.max(0, new Date(confirm_deadline).getTime() - Date.now()) : null
   const confirmMinLeft  = confirmMsLeft !== null ? Math.floor(confirmMsLeft / 60000) : null
@@ -336,7 +336,7 @@ export function StreamManager() {
 
         <div className="text-right flex-shrink-0">
           <div className={`text-base font-bold font-mono ${lowCredits ? 'text-amber-400' : 'text-ink'}`}>
-            {formatTokens(credits_seconds)}
+            {formatTokens(credits)}
           </div>
           <div className="text-xs text-ink-faint">
             {burn_rate > 0
