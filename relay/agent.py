@@ -52,10 +52,18 @@ MEDIAMTX_CONFIG = os.environ.get("MEDIAMTX_CONFIG", "mediamtx.yml")
 # Cleared when OBS drops (runOnNotReady). Agent uses this to start/stop the
 # supervisor in sync with OBS instead of starting at pod boot.
 OBS_FLAG = "/tmp/obs_connected"
+# hook.sh signals this PID via SIGUSR1 to wake the poll loop immediately instead
+# of waiting up to POLL_INTERVAL seconds before noticing the flag changed.
+PID_FILE = "/tmp/agent.pid"
 
 # ── Safety watchdogs ──────────────────────────────────────────────────────────
 HEARTBEAT_FAIL_LIMIT = int(os.environ.get("AGENT_HB_FAIL_LIMIT", "6"))   # ~60s
-IDLE_LIMIT_S = int(os.environ.get("AGENT_IDLE_LIMIT_S", str(5 * 60)))
+# Seconds after OBS disconnects before we stop encoders and terminate the pod.
+# A reconnect within this window (network blip, OBS restart) cancels the timer.
+DISCONNECT_GRACE_S = int(os.environ.get("RELAY_DISCONNECT_GRACE", "20"))
+# Fallback idle limit: fires only if MediaMTX crashes and the hook never clears
+# the flag. Primary termination path is the RTMP disconnect → grace timer above.
+IDLE_LIMIT_S = int(os.environ.get("AGENT_IDLE_LIMIT_S", str(10 * 60)))
 
 if not API_KEY:
     log.error("SLIMCAST_API_KEY is not set — cannot authenticate with Vercel.")
@@ -151,6 +159,35 @@ def main() -> None:
 
     sup = Supervisor()
 
+    # Write PID so hook.sh can wake us immediately via SIGUSR1 instead of
+    # waiting up to POLL_INTERVAL seconds before the loop checks the flag.
+    with open(PID_FILE, "w") as f:
+        f.write(str(os.getpid()))
+
+    wake_event = threading.Event()
+    signal.signal(signal.SIGUSR1, lambda *_: wake_event.set())
+
+    # Grace-terminate timer: fires DISCONNECT_GRACE_S after OBS drops.
+    # Using a list as a mutable box so inner closures can replace the value.
+    _disc_timer: list[threading.Timer | None] = [None]
+
+    def _schedule_terminate() -> None:
+        if _disc_timer[0]:
+            _disc_timer[0].cancel()
+        def _do() -> None:
+            log.info("Grace period elapsed — OBS did not reconnect. Terminating pod.")
+            sup.stop_all()
+            _api("POST", "/api/agent/terminate", {"reason": "obs_disconnected"})
+        t = threading.Timer(DISCONNECT_GRACE_S, _do)
+        t.daemon = True
+        t.start()
+        _disc_timer[0] = t
+
+    def _cancel_terminate() -> None:
+        if _disc_timer[0]:
+            _disc_timer[0].cancel()
+            _disc_timer[0] = None
+
     # Store the latest config. We apply it when OBS connects, not at pod boot.
     # Reason: starting FFmpeg before OBS publishes means it immediately fails the
     # SRT loopback read and enters exponential backoff. If OBS connects while
@@ -178,6 +215,10 @@ def main() -> None:
         sup.stop_all()
         mediamtx_proc.terminate()
         uvicorn_proc.terminate()
+        try:
+            os.unlink(PID_FILE)
+        except FileNotFoundError:
+            pass
         sys.exit(0)
 
     signal.signal(signal.SIGTERM, shutdown)
@@ -218,18 +259,22 @@ def main() -> None:
         # ── OBS connection state (hook.sh writes/clears /tmp/obs_connected) ──
         obs_connected = os.path.exists(OBS_FLAG)
         if obs_connected and not prev_obs_connected:
-            # OBS just connected → SRT loopback is now publishing. Start runners
-            # immediately (fresh start, bypasses any backoff from pre-connect retries).
+            # OBS just connected (SIGUSR1 woke us instantly from hook.sh).
+            # Cancel any pending grace-terminate from a previous disconnect,
+            # then start encoders immediately with the cached config.
             log.info("OBS connected — starting encoders immediately.")
+            _cancel_terminate()
             sup.cancel_pending_stop()
             if last_known_config:
                 sup.apply(last_known_config)
-            last_active = time.time()   # reset idle timer
+            last_active = time.time()
         elif not obs_connected and prev_obs_connected:
-            # OBS disconnected → schedule a grace-period stop so a quick
-            # OBS reconnect cancels it without tearing down the encoders.
-            log.info("OBS disconnected — scheduling grace stop.")
-            sup.schedule_stop()
+            # OBS disconnected. Start the grace timer: if OBS reconnects within
+            # DISCONNECT_GRACE_S the timer is cancelled and encoders keep running.
+            # If it doesn't, the timer stops encoders AND terminates the pod —
+            # no need for a separate idle timer to handle this case.
+            log.info("OBS disconnected — grace timer started (%ds). Pod terminates if OBS doesn't reconnect.", DISCONNECT_GRACE_S)
+            _schedule_terminate()
         prev_obs_connected = obs_connected
 
         # ── Heartbeat ──────────────────────────────────────────────────────────
@@ -270,7 +315,11 @@ def main() -> None:
             sup.stop_all()
             _api("POST", "/api/agent/terminate", {"reason": "idle"})
 
-        time.sleep(POLL_INTERVAL)
+        # Interruptible sleep: hook.sh sends SIGUSR1 when OBS connects/disconnects,
+        # which sets wake_event and breaks out of the wait immediately instead of
+        # burning up to POLL_INTERVAL seconds before the loop sees the flag change.
+        wake_event.wait(timeout=POLL_INTERVAL)
+        wake_event.clear()
 
 
 if __name__ == "__main__":
