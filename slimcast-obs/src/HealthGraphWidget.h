@@ -1,8 +1,7 @@
 #pragma once
 
 #include <QWidget>
-#include <QComboBox>
-#include <QLabel>
+#include <QHBoxLayout>
 #include <QTimer>
 #include <QNetworkAccessManager>
 #include <QString>
@@ -11,9 +10,6 @@
 
 class GraphCanvas;
 
-// Connection health graph panel for the Health tab of the SlimCast dock.
-// Shows a rolling sparkline of ingest bitrate (blue) and health score (green)
-// for the selected source. Updates every 5 s while streaming.
 class HealthGraphWidget : public QWidget {
     Q_OBJECT
 
@@ -29,8 +25,9 @@ private slots:
 
 private:
     void fetchMetrics();
-    void rebuildCombo();
+    void rebuildSources();
     void pushToCanvas();
+    void updateChips();
 
     static constexpr int MAX_POINTS = 60;
 
@@ -40,21 +37,18 @@ private:
     };
 
     struct Source {
-        QString label;        // "OBS → SlimCast" | "→ Twitch" etc.
-        QString key;          // "" = overall ingest, else platform id
+        QString label;
+        QString key;   // "" = ingest, else platform id
         QList<DataPoint> pts;
     };
 
-    QComboBox             *m_combo       = nullptr;
     GraphCanvas           *m_canvas      = nullptr;
-    QLabel                *m_bitrateChip = nullptr;
-    QLabel                *m_healthChip  = nullptr;
+    QHBoxLayout           *m_chipsLayout = nullptr;
     QNetworkAccessManager *m_nam         = nullptr;
     QTimer                *m_timer       = nullptr;
 
-    QString     m_apiKey;
-    bool        m_streaming = false;
-    QStringList m_platforms;
+    QString       m_apiKey;
+    bool          m_streaming = false;
+    QStringList   m_platforms;
     QList<Source> m_sources;
-    int         m_selected  = 0;
 };
