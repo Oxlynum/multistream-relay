@@ -10,7 +10,9 @@ Replaces run.sh / start.sh. Responsibilities:
   6. Watch /tmp/obs_connected (written by hook.sh) to know when OBS connects/drops.
      On connect  → immediately call sup.apply() so FFmpeg starts with a fresh retry
                    rather than waiting out whatever backoff the runners are in.
-     On disconnect → call sup.schedule_stop() for the grace period.
+     On disconnect → start DISCONNECT_GRACE_S timer; if OBS doesn't reconnect,
+                   stop encoders and call /api/agent/terminate. A reconnect within
+                   the window cancels the timer (handles blips/OBS restarts).
   7. POST /api/agent/status → heartbeat with live stream state.
   8. Handle stop commands in heartbeat response.
 """
@@ -61,9 +63,6 @@ HEARTBEAT_FAIL_LIMIT = int(os.environ.get("AGENT_HB_FAIL_LIMIT", "6"))   # ~60s
 # Seconds after OBS disconnects before we stop encoders and terminate the pod.
 # A reconnect within this window (network blip, OBS restart) cancels the timer.
 DISCONNECT_GRACE_S = int(os.environ.get("RELAY_DISCONNECT_GRACE", "20"))
-# Fallback idle limit: fires only if MediaMTX crashes and the hook never clears
-# the flag. Primary termination path is the RTMP disconnect → grace timer above.
-IDLE_LIMIT_S = int(os.environ.get("AGENT_IDLE_LIMIT_S", str(10 * 60)))
 
 if not API_KEY:
     log.error("SLIMCAST_API_KEY is not set — cannot authenticate with Vercel.")
@@ -225,8 +224,6 @@ def main() -> None:
     signal.signal(signal.SIGINT, shutdown)
 
     streaming = False
-    start_time = time.time()
-    last_active = start_time
     hb_failures = 0
 
     while True:
@@ -267,7 +264,6 @@ def main() -> None:
             sup.cancel_pending_stop()
             if last_known_config:
                 sup.apply(last_known_config)
-            last_active = time.time()
         elif not obs_connected and prev_obs_connected:
             # OBS disconnected. Start the grace timer: if OBS reconnects within
             # DISCONNECT_GRACE_S the timer is cancelled and encoders keep running.
@@ -280,8 +276,6 @@ def main() -> None:
         # ── Heartbeat ──────────────────────────────────────────────────────────
         statuses = sup.status()
         streaming = obs_connected or any(s["state"] == "running" for s in statuses)
-        if streaming:
-            last_active = time.time()
 
         hb_resp = _api("POST", "/api/agent/status", {
             "outputs": statuses,
@@ -307,13 +301,6 @@ def main() -> None:
                 cfg_resp2 = _api("GET", "/api/agent/config") or {}
                 if cfg_resp2:
                     sup.apply({"outputs": cfg_resp2.get("outputs", [])})
-
-        # ── Watchdogs ──────────────────────────────────────────────────────────
-        idle_for = time.time() - last_active
-        if idle_for > IDLE_LIMIT_S:
-            log.warning("Idle %ds — requesting termination.", int(idle_for))
-            sup.stop_all()
-            _api("POST", "/api/agent/terminate", {"reason": "idle"})
 
         # Interruptible sleep: hook.sh sends SIGUSR1 when OBS connects/disconnects,
         # which sets wake_event and breaks out of the wait immediately instead of
