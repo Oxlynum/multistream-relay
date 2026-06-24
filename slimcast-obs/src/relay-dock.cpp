@@ -145,7 +145,9 @@ void RelayDock::buildUi()
         " border-bottom:2px solid #4d8ef0;}"
         "QTabBar::tab:hover:!selected{background:#1a1f2b;}");
 
-    tabs->addTab(buildActivePage(), "Stream");
+    tabs->addTab(buildStreamTab(), "Stream");
+    tabs->addTab(buildOutputsTab(), "Outputs");
+    tabs->addTab(buildSlimSyncTab(), "SlimSync");
 
     m_healthWidget = new HealthGraphWidget;
     tabs->addTab(m_healthWidget, "Health");
@@ -217,9 +219,8 @@ static QFrame *makeSep()
     return f;
 }
 
-QWidget *RelayDock::buildActivePage()
+QWidget *RelayDock::buildStreamTab()
 {
-    // Scrollable: the control panel is taller than a docked panel often is.
     auto *scroll = new QScrollArea;
     scroll->setWidgetResizable(true);
     scroll->setFrameShape(QFrame::NoFrame);
@@ -239,8 +240,6 @@ QWidget *RelayDock::buildActivePage()
     m_statusLabel->setStyleSheet("font-size:14px; font-weight:600; color:#e7ebf2");
     headRow->addWidget(m_statusDot);
     headRow->addWidget(m_statusLabel);
-    // Compact warning: a red "⚠" that reveals the OBS-config issue on hover or
-    // click (a flat button shows tooltips reliably, unlike a bare QLabel).
     m_serviceWarn = new QPushButton("⚠");
     m_serviceWarn->setFlat(true);
     m_serviceWarn->setCursor(Qt::PointingHandCursor);
@@ -264,9 +263,6 @@ QWidget *RelayDock::buildActivePage()
     m_ingestLabel->setStyleSheet(QString("color:%1; font-size:11px").arg(C_FAINT));
     ly->addWidget(m_ingestLabel);
 
-    // Primary control. Provisions the pod → waits until reachable → fills OBS's
-    // URL → starts OBS. We never touch OBS's own Start button (coexists cleanly
-    // with StreamElements and any other control-panel plugin).
     m_goLiveBtn = new QPushButton("Go Live");
     m_goLiveBtn->setMinimumHeight(34);
     ly->addWidget(m_goLiveBtn);
@@ -295,7 +291,22 @@ QWidget *RelayDock::buildActivePage()
     m_confirmBanner->setVisible(false);
     ly->addWidget(m_confirmBanner);
 
-    ly->addWidget(makeSep());
+    ly->addStretch();
+    scroll->setWidget(w);
+    return scroll;
+}
+
+QWidget *RelayDock::buildOutputsTab()
+{
+    auto *scroll = new QScrollArea;
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+
+    auto *w  = new QWidget;
+    auto *ly = new QVBoxLayout(w);
+    ly->setContentsMargins(14, 14, 14, 12);
+    ly->setSpacing(10);
 
     // ── Channels ──────────────────────────────────────────────────────────────
     for (const QString &id : PLATFORM_NAMES) {
@@ -380,7 +391,7 @@ QWidget *RelayDock::buildActivePage()
 
     ly->addWidget(makeSep());
 
-    // ── Totals + footer ───────────────────────────────────────────────────────
+    // ── Totals ───────────────────────────────────────────────────────────────
     m_totalLabel = new QLabel("—");
     m_totalLabel->setStyleSheet(QString("color:%1; font-size:11px").arg(C_MUTE));
     ly->addWidget(m_totalLabel);
@@ -390,24 +401,58 @@ QWidget *RelayDock::buildActivePage()
     m_helperLabel->setStyleSheet(QString("color:%1; font-size:10px").arg(C_FAINT));
     ly->addWidget(m_helperLabel);
 
+    ly->addStretch();
+    scroll->setWidget(w);
+    return scroll;
+}
+
+QWidget *RelayDock::buildSlimSyncTab()
+{
+    auto *scroll = new QScrollArea;
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+
+    auto *w  = new QWidget;
+    auto *ly = new QVBoxLayout(w);
+    ly->setContentsMargins(14, 18, 14, 12);
+    ly->setSpacing(12);
+
+    auto *title = new QLabel("Account");
+    title->setStyleSheet("font-size:13px; font-weight:600; color:#e7ebf2");
+    ly->addWidget(title);
+
+    auto *connectedRow = new QHBoxLayout;
+    connectedRow->setSpacing(6);
+    auto *connDot = new QLabel("●");
+    connDot->setStyleSheet(QString("color:%1; font-size:11px").arg(C_LIVE));
+    auto *connLabel = new QLabel("Connected to SlimCast");
+    connLabel->setStyleSheet(QString("color:%1; font-size:12px").arg(C_MUTE));
+    connectedRow->addWidget(connDot);
+    connectedRow->addWidget(connLabel);
+    connectedRow->addStretch();
+    ly->addLayout(connectedRow);
+
+    ly->addWidget(makeSep());
+
     auto *manage = new QLabel(
         "<a href='https://slimcast-oxlynum.vercel.app/dashboard' style='color:#4d8ef0'>Manage account ↗</a>");
     manage->setOpenExternalLinks(true);
-    manage->setStyleSheet("font-size:11px");
+    manage->setStyleSheet("font-size:12px");
     ly->addWidget(manage);
 
-    // Unlink this device → back to the setup page (the "Connect" button).
-    auto *disconnect = new QPushButton("Disconnect this device");
+    ly->addSpacing(4);
+
+    auto *disconnect = new QPushButton("Disconnect account");
     disconnect->setFlat(true);
     disconnect->setCursor(Qt::PointingHandCursor);
     disconnect->setStyleSheet(QString(
-        "QPushButton{color:%1; font-size:10px; border:none; text-align:left; padding:2px 0;}"
-        "QPushButton:hover{color:#e7ebf2;}").arg(C_FAINT));
+        "QPushButton{color:%1; font-size:11px; border:none; text-align:left; padding:2px 0;}"
+        "QPushButton:hover{color:#ff5470;}").arg(C_FAINT));
     ly->addWidget(disconnect);
     connect(disconnect, &QPushButton::clicked, this, &RelayDock::onDisconnect);
 
     ly->addStretch();
-
     scroll->setWidget(w);
     return scroll;
 }

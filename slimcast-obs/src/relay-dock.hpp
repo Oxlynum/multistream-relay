@@ -61,7 +61,9 @@ private slots:
 private:
     void buildUi();
     QWidget *buildSetupPage();
-    QWidget *buildActivePage();
+    QWidget *buildStreamTab();
+    QWidget *buildOutputsTab();
+    QWidget *buildSlimSyncTab();
     void loadSettings();
     void saveSettings();
     void enterActive();   // switch to the active page + start polling
