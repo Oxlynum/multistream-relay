@@ -61,9 +61,20 @@ export async function POST(request: NextRequest) {
     const elapsed = Math.min(Math.max(0, (now - last) / 1000), MAX_BILL_INTERVAL_S)
     const deduct = Math.round(burnRate * elapsed)
 
-    // DEV: SLIMCAST_DEV_NO_BILLING_USER_ID skips credit deduction for one account
-    // (server-side Vercel env only — never exposed to clients). Safe for testing.
-    const devNoBilling = process.env.SLIMCAST_DEV_NO_BILLING_USER_ID === userId
+    // DEV billing bypass — three explicit guards so this can ONLY ever match one
+    // specific account and can never be triggered by a blank/malformed env var:
+    //   1. Env var must be a well-formed UUID (rejects empty string, "undefined",
+    //      wildcards, or anything that isn't a real Supabase user ID).
+    //   2. userId must be truthy (guards against any auth edge case returning null).
+    //   3. Comparison is exact === equality — no prefix match, no type coercion.
+    // If the env var is not set, UUID_RE.test('') is false → bypass never fires.
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+    const devBypassId = process.env.SLIMCAST_DEV_NO_BILLING_USER_ID ?? ''
+    const devNoBilling =
+      !!userId &&
+      UUID_RE.test(devBypassId) &&
+      devBypassId === userId
+    if (devNoBilling) console.log(`[billing] dev bypass active for ${userId} — deduction of ${deduct}s skipped`)
     if (deduct > 0 && !devNoBilling) {
       creditsSeconds = Math.max(0, creditsSeconds - deduct)
       await supabase
