@@ -211,6 +211,7 @@ export async function POST(request: Request) {
       { key: 'SLIMCAST_API_KEY', value: podRawKey },
       { key: 'SLIMCAST_VERCEL_URL', value: callbackUrl },
       { key: 'SLIMCAST_INGEST_KEY', value: ingestKey },
+      ...(process.env.RELAY_PASSWORD ? [{ key: 'RELAY_PASSWORD', value: process.env.RELAY_PASSWORD }] : []),
     ],
     userOutputs,
     srtMode,

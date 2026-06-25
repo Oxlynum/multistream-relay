@@ -31,7 +31,8 @@ export async function POST(request: NextRequest) {
     outputs: OutputStatus[]
     streaming: boolean
   }
-  console.log(`[agent/status] label=${label} streaming=${streaming} outputs=${outputs.length}`)
+  const outSummary = outputs.map((o: OutputStatus) => `${o.name}:${o.state}(exit=${o.last_exit ?? '-'},r=${o.restarts ?? 0})`).join(' ')
+  console.log(`[agent/status] label=${label} streaming=${streaming} outputs=${outputs.length} ${outSummary}`)
 
   const supabase = createServerClient()
 

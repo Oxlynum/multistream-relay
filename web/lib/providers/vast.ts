@@ -50,6 +50,7 @@ function allInPricePerHr(o: VastOffer): number {
 
 interface VastOffer {
   id: number
+  machine_id: number
   gpu_name: string
   compute_cap: number
   dph_total: number
@@ -62,6 +63,27 @@ interface VastOffer {
   public_ipaddr: string | null
   geolocation: string | null
 }
+
+// Some Vast hosts attach the GPU at the host level (it shows in Vast's own
+// monitoring) but never inject the device into the container: the driver
+// libraries mount, yet every NVENC/NVDEC call returns
+// "CUDA_ERROR_NO_DEVICE: no CUDA-capable device is detected". The whole relay
+// pipeline is GPU-only, so such a host can't transcode at all — FFmpeg dies in a
+// ~6s restart loop and the user sees an endless "connecting" with nothing
+// reaching the platforms. There's no remote signal for this (the pod boots, maps
+// ports, and answers probes fine), so the durable defense is the boot-time GPU
+// self-test in relay/agent.py — a GPU-blind pod self-terminates before opening
+// RTMP, which makes the broker cascade to the next-nearest candidate. This
+// denylist is the belt-and-suspenders: machines we've already seen fail are
+// skipped at ranking time so we don't keep landing on them. 8914 (an RTX 5090
+// host at 198.53.64.194) failed the live test twice; extend via the
+// VAST_MACHINE_DENYLIST env (comma-separated machine ids). Remove an id once the
+// host is confirmed fixed.
+const MACHINE_DENYLIST = new Set<number>([
+  8914,
+  ...(process.env.VAST_MACHINE_DENYLIST ?? '')
+    .split(',').map(s => parseInt(s.trim(), 10)).filter(Number.isFinite),
+])
 
 // Country-centroid fallback coords (used only if IP geolocation fails). Keyed by
 // the 2-letter code at the tail of Vast's geolocation string ("California, US").
@@ -151,6 +173,7 @@ export const vastProvider: GpuProvider = {
       o.direct_port_count >= MIN_DIRECT_PORTS &&
       (o.internet_up_cost_per_tb ?? 0) <= MAX_EGRESS_COST_PER_TB &&  // reject bandwidth gougers
       allInPricePerHr(o) <= maxPricePerHr &&                          // all-in, not just GPU
+      !MACHINE_DENYLIST.has(o.machine_id) &&                          // skip known GPU-blind hosts
       !!o.public_ipaddr,
     )
     if (usable.length === 0) return []
@@ -167,8 +190,8 @@ export const vastProvider: GpuProvider = {
         pricePerHr: allInPricePerHr(o),   // GPU + bandwidth, so it ranks on true cost
         lat: loc.lat,
         lon: loc.lon,
-        label: `vast:${o.id} ${o.gpu_name} ${o.geolocation ?? ''}`.trim(),
-        placement: { offerId: o.id },
+        label: `vast:${o.id} m${o.machine_id} ${o.gpu_name} ${o.geolocation ?? ''}`.trim(),
+        placement: { offerId: o.id, machineId: o.machine_id },
       })
     })
     return candidates
@@ -188,6 +211,13 @@ export const vastProvider: GpuProvider = {
       ...Object.fromEntries(env.map(e => [e.key, e.value])),
       '-p 8890:8890/udp': '1',   // SRT ingest — OBS → pod
       '-p 8889:8889/udp': '1',   // UDP echo probe — broker readiness gate
+      // NOTE: the relay Dockerfile already bakes NVIDIA_VISIBLE_DEVICES=all +
+      // NVIDIA_DRIVER_CAPABILITIES=compute,video,utility, and a live test proved
+      // setting them here too does NOT fix a GPU-blind host — the driver libs
+      // mount fine but the device node is never injected on some machines. The
+      // real defense is the boot-time GPU self-test in relay/agent.py (fails fast
+      // so the broker cascades) plus MACHINE_DENYLIST below. Don't re-add the
+      // NVIDIA_* env keys here expecting them to help; they don't.
     }
     const body: Record<string, unknown> = {
       client_id: 'me',

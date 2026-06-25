@@ -188,6 +188,42 @@ def build_outputs(config: dict) -> list[dict]:
     return config.get("outputs", [])
 
 
+def _gpu_self_test(attempts: int = 2) -> bool:
+    """Verify the container can actually reach the GPU before we depend on it.
+
+    Some hosts (seen on Vast 'Secure' datacenter machines) attach the GPU at the
+    host level — it shows in the provider's monitoring — but never inject the
+    device into the container: the driver libraries mount, yet every NVENC/NVDEC
+    call returns CUDA_ERROR_NO_DEVICE ("no CUDA-capable device is detected").
+    The whole relay pipeline is GPU-only, so on such a host EVERY transcode dies
+    in a ~6s FFmpeg restart loop and the user sees an endless "connecting" with
+    nothing reaching the platforms (verified live, RTX 5090 host).
+
+    Catch it at boot with a sub-second synthetic NVENC encode: it either succeeds
+    (device present) or fails fast (device blind). Returns True iff NVENC works."""
+    probe = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error",
+        "-f", "lavfi", "-i", "color=c=black:s=128x128:r=5:d=0.2",
+        "-c:v", "h264_nvenc", "-f", "null", "-",
+    ]
+    for i in range(attempts):
+        try:
+            r = subprocess.run(probe, capture_output=True, text=True, timeout=25)
+            if r.returncode == 0:
+                log.info("GPU self-test passed (NVENC encode OK).")
+                return True
+            tail = (r.stderr or "").strip().splitlines()
+            log.warning("GPU self-test attempt %d/%d failed (code %d): %s",
+                        i + 1, attempts, r.returncode, tail[-1] if tail else "(no stderr)")
+        except subprocess.TimeoutExpired:
+            log.warning("GPU self-test attempt %d/%d timed out.", i + 1, attempts)
+        except Exception as exc:  # ffmpeg missing, etc. — treat as a failed probe
+            log.warning("GPU self-test attempt %d/%d error: %s", i + 1, attempts, exc)
+        if i + 1 < attempts:
+            time.sleep(3)
+    return False
+
+
 def main() -> None:
     ip = _get_external_ip()
     log.info("External IP: %s", ip or "(unknown)")
@@ -210,6 +246,26 @@ def main() -> None:
         sys.exit(1)
 
     log.info("Paired successfully.")
+
+    # GPU sanity gate. A host that can't inject the GPU into the container makes
+    # every transcode fail in a restart loop (CUDA_ERROR_NO_DEVICE), which the
+    # user just sees as a stream that never goes live. Fail fast and visibly by
+    # HALTING the boot here — we exit WITHOUT starting MediaMTX, so the pod never
+    # accepts RTMP. The broker's readiness probe (probeRtmp) then fails on this
+    # candidate, it destroys the pod and cascades to the next-nearest machine —
+    # often recovering within the same Start.
+    #
+    # Deliberately NOT calling /api/agent/terminate here: that runs teardownInstance
+    # which DELETES the gpu_instances claim row, and during a live provision cascade
+    # the broker is about to create the next pod and UPDATE that same row — deleting
+    # it would orphan the next pod (it bills until the daily reaper). The broker's
+    # own provider.destroy() on probe failure tears this pod down and leaves the row
+    # intact, so a plain exit is both sufficient and safe.
+    if not _gpu_self_test():
+        log.error("GPU UNAVAILABLE — host did not expose a usable NVENC device to the "
+                  "container (CUDA_ERROR_NO_DEVICE). Halting boot so the broker cascades "
+                  "to another machine; not starting MediaMTX.")
+        sys.exit(1)
 
     mediamtx_proc = start_mediamtx()
     uvicorn_proc = start_uvicorn()

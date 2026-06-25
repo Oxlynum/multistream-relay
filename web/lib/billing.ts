@@ -18,6 +18,8 @@ export interface OutputStatus {
   state: string
   mode?: string
   platforms?: string[]
+  restarts?: number
+  last_exit?: number | null
 }
 
 export interface OutputSettings {
