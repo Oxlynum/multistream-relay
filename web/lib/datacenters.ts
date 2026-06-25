@@ -71,72 +71,70 @@ export interface GpuSpec {
   consumerGpu?: boolean
 }
 
-// NVENC-capable cards only. A100/H100/H200/B200 are deliberately excluded —
-// data-center compute GPUs have no hardware video encoder and cannot transcode.
-// Ordered loosely by price; the broker sorts precisely (cheapest first, with a
-// small preference for the newer/better Ada encoder when prices are close).
+// NVENC-capable cards available on RunPod SECURE cloud, ≤ $1/hr, verified live
+// against RunPod's gpuTypes API (IDs + secure on-demand prices).
+//
+// Inclusion rule — every card here can run the SlimCast transcode pipeline:
+//   • has NVENC + NVDEC (HEVC decode), and
+//   • is Turing or newer, so it supports the relay's p6 preset + B-frames +
+//     temporal-AQ (Pascal/Maxwell can't, so they're excluded), and
+//   • is ≤ PRICE_CEILING on secure.
+// Excluded entirely: the compute dies with NO video encoder (A100/H100/H200/
+// B200/V100) — they physically cannot transcode.
+//
+// NOT here (on purpose): the ultra-cheap consumer cards (RTX A2000, 3070, 4080,
+// etc.) that RunPod only offers on COMMUNITY cloud — community can't be steered
+// to a location (it places pods globally at random), so it's unusable for a
+// "nearest server" product. Those cards are sourced from Vast.ai instead, whose
+// offer search exposes each machine's real location. See lib/providers/vast.ts.
+//
+// Prices are typical secure on-demand and used only for cheapest-first ordering;
+// the live cost guard (createPod cost vs PRICE_CEILING) enforces the real ceiling.
 export const GPU_CATALOG: GpuSpec[] = [
-  { key: 'a4000',      runpodId: 'NVIDIA RTX A4000',                gen: 'ampere',    pricePerHr: 0.25 },
-  { key: 'a5000',      runpodId: 'NVIDIA RTX A5000',                gen: 'ampere',    pricePerHr: 0.27 },
-  { key: 'l4',         runpodId: 'NVIDIA L4',                       gen: 'ada',       pricePerHr: 0.39 },
-  { key: 'a40',        runpodId: 'NVIDIA A40',                      gen: 'ampere',    pricePerHr: 0.44 },
-  { key: 'rtx3090',    runpodId: 'NVIDIA GeForce RTX 3090',         gen: 'ampere',    pricePerHr: 0.46, consumerGpu: true },
-  { key: 'rtxpro4000', runpodId: 'NVIDIA RTX PRO 4000',             gen: 'blackwell', pricePerHr: 0.57 },
-  { key: 'rtx4090',    runpodId: 'NVIDIA GeForce RTX 4090',         gen: 'ada',       pricePerHr: 0.69, consumerGpu: true },
-  { key: 'rtxpro4500', runpodId: 'NVIDIA RTX PRO 4500',             gen: 'blackwell', pricePerHr: 0.74 },
+  { key: 'rtx2000ada', runpodId: 'NVIDIA RTX 2000 Ada Generation', gen: 'ada',       pricePerHr: 0.24 },
+  { key: 'a4000',      runpodId: 'NVIDIA RTX A4000',               gen: 'ampere',    pricePerHr: 0.25 },
+  { key: 'a4500',      runpodId: 'NVIDIA RTX A4500',               gen: 'ampere',    pricePerHr: 0.25 },
+  { key: 'rtx4000ada', runpodId: 'NVIDIA RTX 4000 Ada Generation', gen: 'ada',       pricePerHr: 0.26 },
+  { key: 'a5000',      runpodId: 'NVIDIA RTX A5000',               gen: 'ampere',    pricePerHr: 0.27 },
+  { key: 'l4',         runpodId: 'NVIDIA L4',                      gen: 'ada',       pricePerHr: 0.39 },
+  { key: 'a40',        runpodId: 'NVIDIA A40',                     gen: 'ampere',    pricePerHr: 0.44 },
+  { key: 'rtx3090',    runpodId: 'NVIDIA GeForce RTX 3090',        gen: 'ampere',    pricePerHr: 0.46, consumerGpu: true },
+  { key: 'a6000',      runpodId: 'NVIDIA RTX A6000',               gen: 'ampere',    pricePerHr: 0.49 },
+  { key: 'rtxpro4000', runpodId: 'NVIDIA RTX PRO 4000 Blackwell',  gen: 'blackwell', pricePerHr: 0.57 },
+  { key: 'rtx4090',    runpodId: 'NVIDIA GeForce RTX 4090',        gen: 'ada',       pricePerHr: 0.69, consumerGpu: true },
+  { key: 'rtxpro4500', runpodId: 'NVIDIA RTX PRO 4500 Blackwell',  gen: 'blackwell', pricePerHr: 0.74 },
   { key: 'rtx6000ada', runpodId: 'NVIDIA RTX 6000 Ada Generation', gen: 'ada',       pricePerHr: 0.77 },
-  { key: 'l40s',       runpodId: 'NVIDIA L40S',                     gen: 'ada',       pricePerHr: 0.99 },
-  { key: 'rtx5090',    runpodId: 'NVIDIA GeForce RTX 5090',         gen: 'blackwell', pricePerHr: 0.99, consumerGpu: true },
+  { key: 'l40',        runpodId: 'NVIDIA L40',                     gen: 'ada',       pricePerHr: 0.82 },
+  { key: 'rtx5090',    runpodId: 'NVIDIA GeForce RTX 5090',        gen: 'blackwell', pricePerHr: 0.99, consumerGpu: true },
+  { key: 'l40s',       runpodId: 'NVIDIA L40S',                    gen: 'ada',       pricePerHr: 0.99 },
 ]
 
 // --- Broker policy knobs ----------------------------------------------------
 
-// Never auto-provision a card above this hourly price (protects margin if a
-// cascade ever reaches the expensive end of the catalog).
+// Never auto-provision a card above this hourly price. Enforced twice: catalog
+// filter (pricePerHr) AND the live cost guard against the provider's real price.
 export const PRICE_CEILING = 1.00
 
-// Tiny discount (in $/hr terms) applied to Ada cards when sorting, so an Ada
-// card is preferred over an Ampere one only when their prices are within ~3¢.
-export const ADA_SORT_BONUS = 0.03
+// RunPod cloud type. SECURE only: it honors a pinned datacenter and reports the
+// DC it actually used, so placement is deterministic and "nearest server" works.
+// COMMUNITY is deliberately NOT used — it ignores the datacenter pin and places
+// pods globally at random (verified: a pod pinned to Atlanta landed in Sweden),
+// which is unusable for a proximity-based product. Cheap consumer cards that
+// only exist on community come from Vast.ai instead (see lib/providers/vast.ts).
+export const RUNPOD_CLOUD_TYPE = 'SECURE'
 
-// Subregion ring sizes and distance caps for the broker.
-// PRIMARY: DCs within PRIMARY_MAX_KM that form the tight local subregion.
-//   Cap prevents e.g. Kansas landing in Seattle's ring, or Montreal in London's.
-//   Always includes the nearest DC regardless of distance (remote/VPN users).
-// SECONDARY: next ring up to SECONDARY_MAX_KM — same continent fallback.
-// PRIMARY_MAX_COUNT / SECONDARY_MAX_COUNT cap list size even within the distance.
-export const PRIMARY_MAX_KM      = 2000
-export const PRIMARY_MAX_COUNT   = 6
-export const SECONDARY_MAX_KM    = 5000
-export const SECONDARY_MAX_COUNT = 8
-
-// Cloud types tried, in order. COMMUNITY is cheapest, so we try it first; SECURE
-// is datacenter-grade with far more reliable inventory (community is routinely
-// dry for the mid-tier NVENC cards — L4/A40/A5000) and every SECURE card in our
-// catalog still prices under the $1/hr PRICE_CEILING, so it's a safe fallback.
-// The per-(gpu,cloud) stock preflight (lib/runpod.ts fetchGpuStock) skips dead
-// combos in either tier, and the runtime cost guard enforces the ceiling.
-export const CLOUD_TYPES: string[] = ['COMMUNITY', 'SECURE']
-
-// Readiness gate: after a pod is created we poll until it has a public IP
-// (i.e. it actually booted). If it never does, we abandon it and try the next
-// candidate — "got inventory" is not the same as "it works".
-// RunPod cold start: Docker pull (60-90s) + container start (10s) = ~100s.
-// 120s gives enough margin. Worst case with 2 boot attempts = 240s < Vercel 300s limit.
+// Readiness gate: after a pod is created we poll until it has a public IP (i.e.
+// it actually booted). If it never does within the timeout, abandon it and try
+// the next candidate — inventory is not the same as a working pod.
+// RunPod cold start: Docker pull (60-90s) + container start (~10s) ≈ 100s.
 export const READINESS_TIMEOUT_MS = 120_000
 export const READINESS_POLL_MS = 5_000
 
-// Cap how many pods we'll boot-and-abandon before giving up (capacity misses
-// are fast and don't count — only real-but-dead boots do). DC-rejected pods
-// (RunPod placed in wrong region) also don't count against this — only true
-// boot failures (timeout / RTMP unreachable) do. Set high enough to survive
-// RunPod repeatedly misplacing pods in EU before landing on a US DC.
+// Cap how many pods we'll boot-and-abandon before giving up. Capacity misses
+// (create rejected — no inventory in that DC) are fast and do NOT count; only a
+// real pod that boots but never gets an IP counts. Keeps a pathological run
+// inside Vercel's function timeout.
 export const MAX_BOOT_ATTEMPTS = 5
-
-// How many times RunPod can place a pod in the wrong region before we give up
-// and tell the user to retry later. Each wrong-region pod takes ~90s to detect
-// and destroy — 3 rejections = ~270s, safely within Vercel's 300s limit.
-export const MAX_RTT_REJECTIONS = 3
 
 // Default location when the request carries no geo headers (local dev, VPNs):
 // central US minimizes worst-case latency for an unknown US user.

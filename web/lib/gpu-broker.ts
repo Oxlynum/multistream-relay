@@ -1,44 +1,32 @@
 import net from 'net'
 
-// TCP probe: verify the RTMP port is actually forwarding before we hand the
-// address to OBS. RunPod GraphQL reports the mapping before the tunnel is fully
-// wired up on community cloud; this catches broken port mappings and lets the
-// broker cascade to a different pod automatically.
-function probeTcp(host: string, port: number, timeoutMs = 8000): Promise<boolean> {
-  return new Promise(resolve => {
-    const socket = net.createConnection(port, host)
-    const timer = setTimeout(() => { socket.destroy(); resolve(false) }, timeoutMs)
-    socket.once('connect', () => { clearTimeout(timer); socket.destroy(); resolve(true) })
-    socket.once('error',   () => { clearTimeout(timer); resolve(false) })
-  })
-}
-
 // GPU availability broker.
 //
-// Instead of "give me an L4 in this DC → fail if dry", this generates a ranked
-// list of {gpu × cloud × datacenters} candidates and tries each until one both
-// provisions AND boots. A capacity miss is a fast API rejection, so cascading
-// through many candidates costs seconds; only a real boot incurs the ~45s wait.
+// Model: every provider (RunPod secure today; Vast.ai next) reports a list of
+// LOCATION-STAMPED candidates via listCandidates(). The broker merges them into
+// one list, ranks by distance-to-user (then price), and creates them nearest-first
+// until one boots. Because each candidate carries coordinates and a deterministic
+// placement, "closest server wins" spans every provider with no special-casing —
+// and there is no post-boot geolocation/region-guessing, because we only use
+// providers that place the pod where they said they would.
 //
-// Ranking policy:
-//   1. Latency tier first (near ≤40ms, then mid ≤70ms, then far) — under ~40ms
-//      latency is imperceptible for buffered streaming, so within a tier we
-//      optimize purely for cost.
-//   2. Within a tier: cheapest acceptable GPU first (Ada preferred on near-ties).
-//   3. Cloud type order (community first).
+// This replaced the old community-cloud machinery (subregion rings, RTT tiers,
+// stock preflight, null-DC handling). All of that existed to clean up after
+// RunPod community placing pods globally at random; we no longer use community.
 
 import {
-  RUNPOD_DATACENTERS, GPU_CATALOG, PRICE_CEILING, ADA_SORT_BONUS,
-  PRIMARY_MAX_KM, PRIMARY_MAX_COUNT, SECONDARY_MAX_KM, SECONDARY_MAX_COUNT,
-  CLOUD_TYPES, READINESS_TIMEOUT_MS, READINESS_POLL_MS, MAX_BOOT_ATTEMPTS,
-  MAX_RTT_REJECTIONS,
-  type Datacenter,
+  PRICE_CEILING, READINESS_TIMEOUT_MS, READINESS_POLL_MS, MAX_BOOT_ATTEMPTS,
 } from '@/lib/datacenters'
-import { fetchGpuStock, STOCK_NONE } from '@/lib/runpod'
 import { ACTIVE_PROVIDERS } from '@/lib/providers/runpod'
 import type { GpuCandidate, GpuProvider, PodEnv } from '@/lib/providers/types'
 import { requiredNvencSessions, type UserOutputConfig } from '@/lib/nvenc-utils'
 export type { UserOutputConfig } from '@/lib/nvenc-utils'
+
+// Stop after this many create attempts even if none succeeded. Capacity misses
+// are fast (one rejected API call each), so this bounds a worst case where the
+// user's whole region is dry: we try the nearest ~this-many options, then tell
+// them to retry rather than booting a pod on another continent.
+const MAX_CREATE_ATTEMPTS = 120
 
 function haversineKm(aLat: number, aLon: number, bLat: number, bLon: number): number {
   const R = 6371
@@ -52,70 +40,16 @@ function haversineKm(aLat: number, aLon: number, bLat: number, bLon: number): nu
   return 2 * R * Math.asin(Math.sqrt(h))
 }
 
-// Cheapest first; Ada gets a small bonus so it wins only on near-ties.
-function gpuSortScore(pricePerHr: number, gen: string): number {
-  return pricePerHr - (gen === 'ada' ? ADA_SORT_BONUS : 0)
-}
-
-/** Build the ranked candidate list for a user at (lat, lon). */
-export function rankCandidates(lat: number, lon: number, needsProfessionalGpu = false, datacenters: Datacenter[] = RUNPOD_DATACENTERS, stock?: Map<string, string>): GpuCandidate[] {
-  // Sort every available DC by straight-line distance from the user — closest first.
-  // This gives automatic subregion filtering: a Seattle user gets Pacific-coast DCs,
-  // a Paris user gets Western EU DCs, etc., without any manual region selection.
-  const sorted = [...datacenters]
-    .map(dc => ({ dc, distKm: haversineKm(lat, lon, dc.lat, dc.lon) }))
-    .sort((a, b) => a.distKm - b.distKm)
-
-  // Three rings: primary (tight local subregion), secondary (same continent),
-  // tertiary (global fallback). Distance caps prevent e.g. Kansas landing in
-  // Seattle's primary ring (2340km) or Montreal in London's (5221km).
-  // Always include the nearest DC in primary so remote/VPN users aren't stranded.
-  const nearest = sorted[0]
-  const primaryDcs = sorted
-    .filter(x => x.distKm <= PRIMARY_MAX_KM || x.dc.id === nearest?.dc.id)
-    .slice(0, PRIMARY_MAX_COUNT)
-    .map(x => x.dc)
-  const primaryIds = new Set(primaryDcs.map(dc => dc.id))
-  const secondaryDcs = sorted
-    .filter(x => !primaryIds.has(x.dc.id) && x.distKm <= SECONDARY_MAX_KM)
-    .slice(0, SECONDARY_MAX_COUNT)
-    .map(x => x.dc)
-  const secondaryIds = new Set([...primaryIds, ...secondaryDcs.map(dc => dc.id)])
-  const tertiaryDcs = sorted.filter(x => !secondaryIds.has(x.dc.id)).map(x => x.dc)
-
-  if (sorted.length > 0) {
-    const nearest = sorted[0]
-    console.log(`[broker] subregion: [${primaryDcs.map(d => d.id).join(', ')}] (nearest: ${nearest.dc.id} ${nearest.distKm.toFixed(0)}km)`)
-  }
-
-  const gpus = GPU_CATALOG
-    .filter(g => g.pricePerHr <= PRICE_CEILING)
-    .filter(g => !needsProfessionalGpu || !g.consumerGpu)
-    .sort((a, b) => gpuSortScore(a.pricePerHr, a.gen) - gpuSortScore(b.pricePerHr, b.gen))
-
-  const candidates: GpuCandidate[] = []
-  for (const [tier, dcs] of [['near', primaryDcs], ['mid', secondaryDcs], ['far', tertiaryDcs]] as const) {
-    if (dcs.length === 0) continue
-    const dcIds = dcs.map(dc => dc.id)
-    for (const cloudType of CLOUD_TYPES) {
-      for (const gpu of gpus) {
-        // Skip combos RunPod's preflight reports as definitively out of stock —
-        // this is what eliminates the sequential failed-create churn. Unknown/
-        // absent stock is kept (fail-open): we only drop on an explicit sentinel.
-        if (stock?.get(`${gpu.runpodId}|${cloudType}`) === STOCK_NONE) continue
-        candidates.push({
-          gpuKey: gpu.key,
-          gpuTypeId: gpu.runpodId,
-          gen: gpu.gen,
-          pricePerHr: gpu.pricePerHr,
-          cloudType,
-          datacenterIds: dcIds,
-          tier,
-        })
-      }
-    }
-  }
-  return candidates
+// TCP probe: verify the RTMP port is actually forwarding before handing the
+// address to OBS. RunPod can report a port mapping before the tunnel is wired up;
+// this catches broken forwarding so the broker cascades to another pod.
+function probeTcp(host: string, port: number, timeoutMs = 8000): Promise<boolean> {
+  return new Promise(resolve => {
+    const socket = net.createConnection(port, host)
+    const timer = setTimeout(() => { socket.destroy(); resolve(false) }, timeoutMs)
+    socket.once('connect', () => { clearTimeout(timer); socket.destroy(); resolve(true) })
+    socket.once('error',   () => { clearTimeout(timer); resolve(false) })
+  })
 }
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
@@ -150,10 +84,28 @@ export interface ProvisionResult {
   error?: string
 }
 
+/** Build the distance-then-price ranked candidate list across all providers. */
+async function rankedCandidates(lat: number, lon: number, needsProfessionalGpu: boolean): Promise<Array<{ c: GpuCandidate; distKm: number }>> {
+  const lists = await Promise.all(
+    ACTIVE_PROVIDERS.map(async p => {
+      try {
+        return await p.listCandidates({ maxPricePerHr: PRICE_CEILING, needsProfessionalGpu })
+      } catch (err) {
+        console.error(`[broker] ${p.name} listCandidates failed:`, err instanceof Error ? err.message : err)
+        return []
+      }
+    }),
+  )
+  return lists
+    .flat()
+    .map(c => ({ c, distKm: haversineKm(lat, lon, c.lat, c.lon) }))
+    .sort((a, b) => a.distKm - b.distKm || a.c.pricePerHr - b.c.pricePerHr)
+}
+
 /**
- * Cascade across providers × candidates until one boots. Returns the winning
- * pod, or ok:false if every option was exhausted (vanishingly rare at launch
- * scale with multi-DC + multi-GPU breadth).
+ * Provision the nearest available GPU ≤ PRICE_CEILING. Ranks every provider's
+ * candidates by distance and creates nearest-first until one boots; returns the
+ * winning pod, or ok:false if the nearest options are exhausted.
  */
 export async function provisionGpu(args: {
   lat: number
@@ -169,133 +121,89 @@ export async function provisionGpu(args: {
     console.log(`[broker] user needs ${nvencSessions} NVENC sessions — skipping consumer GPUs`)
   }
 
-  // RUNPOD_DATACENTERS is already pinned to the REST `POST /pods` create-valid
-  // enum (see lib/datacenters.ts) — every DC we rank here is one RunPod will
-  // actually build in, so the create request never schema-400s on an unknown DC.
-  // We deliberately do NOT query the GraphQL `dataCenters` list: it returns a
-  // wider catalog (~47) that the create endpoint rejects, which is what caused
-  // every provision to fail instantly with "no capacity".
-
-  // Stock preflight: one GraphQL call per cloud tier tells us which GPU×cloud
-  // combos have inventory right now, so rankCandidates can drop the dead ones
-  // instead of the broker eating a sequential failed create() for each. Fail-open
-  // (empty map → nothing dropped) so a flaky stock query never blocks a stream.
-  const stock = await fetchGpuStock()
-  const inStock = [...stock.values()].filter(s => s !== STOCK_NONE).length
-  console.log(`[broker] stock preflight: ${stock.size} GPU×cloud combos checked, ${inStock} with inventory`)
-
-  let candidates = rankCandidates(args.lat, args.lon, needsProfessionalGpu, RUNPOD_DATACENTERS, stock)
-  // Safeguard: if the stock filter dropped EVERY candidate (e.g. RunPod briefly
-  // reports all combos empty, or a partial stock response), fall back to the
-  // unfiltered list. Better to cascade through real create() attempts than to
-  // hand the user an instant "no capacity" — the exact failure we just removed.
+  const candidates = await rankedCandidates(args.lat, args.lon, needsProfessionalGpu)
   if (candidates.length === 0) {
-    console.warn('[broker] stock preflight dropped all candidates — falling back to unfiltered cascade')
-    candidates = rankCandidates(args.lat, args.lon, needsProfessionalGpu)
+    return { ok: false, attempts: 0, error: 'no candidates available' }
   }
+  const providerByName = new Map(ACTIVE_PROVIDERS.map(p => [p.name, p]))
+  const nearest = candidates[0]
+  console.log(`[broker] ${candidates.length} candidates across ${ACTIVE_PROVIDERS.length} provider(s); nearest: ${nearest.c.label} (${nearest.distKm.toFixed(0)}km, ${nearest.c.gpuKey} $${nearest.c.pricePerHr})`)
+
   let attempts = 0
   let bootAttempts = 0
-  let rttRejections = 0
   let lastError: string | undefined
 
-  for (const provider of ACTIVE_PROVIDERS) {
-    for (const candidate of candidates) {
-      attempts++
-      let podId: string
-      let actualCost: number | undefined
-      try {
-        const created = await provider.create({
-          candidate,
-          name: args.name,
-          imageTag: args.imageTag,
-          env: args.env,
-        })
-        podId = created.podId
-        actualCost = created.costPerHr
-      } catch (err) {
-        // No capacity / rejected — fast miss, move to the next candidate.
-        lastError = err instanceof Error ? err.message : String(err)
-        console.error(`[broker] ${provider.name} ${candidate.gpuKey} @ ${candidate.datacenterIds[0]} (${candidate.cloudType}) failed:`, lastError)
-        continue
-      }
+  for (const { c, distKm } of candidates) {
+    if (attempts >= MAX_CREATE_ATTEMPTS) {
+      console.warn(`[broker] reached ${MAX_CREATE_ATTEMPTS} attempts without capacity near user — giving up`)
+      break
+    }
+    const provider = providerByName.get(c.provider)
+    if (!provider) continue
+    attempts++
 
-      // Hard price guard: if the provider reports an actual hourly cost above
-      // the ceiling (live price differs from our catalog estimate), refuse it
-      // and cascade on — we never want to silently exceed PRICE_CEILING.
-      if (actualCost !== undefined && actualCost > PRICE_CEILING) {
-        try { await provider.destroy(podId) } catch { /* best effort */ }
-        lastError = `price ${actualCost} exceeds ceiling ${PRICE_CEILING}`
-        continue
-      }
+    let podId: string
+    let actualCost: number | undefined
+    try {
+      const created = await provider.create({ candidate: c, name: args.name, imageTag: args.imageTag, env: args.env })
+      podId = created.podId
+      actualCost = created.costPerHr
+    } catch (err) {
+      // No capacity in this location/GPU — fast miss, try the next candidate.
+      lastError = err instanceof Error ? err.message : String(err)
+      console.error(`[broker] ${c.provider} ${c.gpuKey} @ ${c.label} (${distKm.toFixed(0)}km) failed:`, lastError)
+      continue
+    }
 
-      // Got inventory — now make sure it actually boots (IP + mapped port).
-      bootAttempts++
-      const addr = await waitForIp(provider, podId)
-      if (addr) {
-        // Verify the RTMP port is actually reachable. RunPod community cloud
-        // reports port mappings in GraphQL before the TCP tunnel is live; a
-        // probe here catches broken forwarding and lets us cascade automatically.
-        const reachable = await probeTcp(addr.ip, addr.port)
-        if (!reachable) {
-          console.warn(`[broker] pod ${podId} RTMP ${addr.ip}:${addr.port} unreachable — tunnel failure, cascading`)
-          try { await provider.destroy(podId) } catch { /* best effort */ }
-          lastError = 'RTMP port unreachable (RunPod tunnel not set up)'
-          if (bootAttempts >= MAX_BOOT_ATTEMPTS) {
-            return { ok: false, attempts, error: 'too many failed boots' }
-          }
-          continue
-        }
+    // Hard price guard: refuse a pod whose live cost exceeds the ceiling.
+    if (actualCost !== undefined && actualCost > PRICE_CEILING) {
+      try { await provider.destroy(podId) } catch { /* best effort */ }
+      lastError = `price ${actualCost} exceeds ceiling ${PRICE_CEILING}`
+      continue
+    }
 
-        // Verify RunPod honored our dataCenterIds hint by checking the actual DC
-        // is in the set we requested. RunPod community cloud sometimes ignores
-        // the hint and boots wherever it has inventory; this catches it.
-        // Unknown DC (null) → can't verify, accept with a warning rather than
-        // destroying a potentially-good pod over a metadata gap.
-        if (addr.dataCenterId != null) {
-          if (!RUNPOD_DATACENTERS.find(dc => dc.id === addr.dataCenterId)) {
-            console.warn(`[broker] pod ${podId} has unrecognised DC '${addr.dataCenterId}' — cascading`)
-            try { await provider.destroy(podId) } catch { /* best effort */ }
-            lastError = `unrecognised datacenter: ${addr.dataCenterId}`
-            bootAttempts--
-            continue
-          }
-          if (!candidate.datacenterIds.includes(addr.dataCenterId)) {
-            rttRejections++
-            const wrongDc = RUNPOD_DATACENTERS.find(dc => dc.id === addr.dataCenterId)
-            const distKm = wrongDc ? haversineKm(args.lat, args.lon, wrongDc.lat, wrongDc.lon).toFixed(0) : '?'
-            console.warn(`[broker] pod ${podId} placed in ${addr.dataCenterId} (${distKm}km) — outside requested subregion (rejection ${rttRejections}/${MAX_RTT_REJECTIONS})`)
-            try { await provider.destroy(podId) } catch { /* best effort */ }
-            lastError = `wrong subregion: placed in ${addr.dataCenterId}`
-            bootAttempts--
-            if (rttRejections >= MAX_RTT_REJECTIONS) {
-              return { ok: false, attempts, error: `No GPU capacity near you right now — try again in a few minutes when local inventory refreshes.` }
-            }
-            continue
-          }
-        } else {
-          console.warn(`[broker] pod ${podId} has null dataCenterId — accepting without subregion verification`)
-        }
-
-        return {
-          ok: true,
-          provider: provider.name,
-          podId,
-          ip: addr.ip,
-          port: addr.port,
-          hlsPort: addr.hlsPort,
-          gpuKey: candidate.gpuKey,
-          datacenter: candidate.datacenterIds[0],
-          pricePerHr: actualCost ?? candidate.pricePerHr,
-          attempts,
-        }
-      }
-
-      // Created but never booted — abandon it and keep cascading.
+    // Got inventory — make sure it actually boots (IP + mapped RTMP port).
+    bootAttempts++
+    const addr = await waitForIp(provider, podId)
+    if (!addr) {
       try { await provider.destroy(podId) } catch { /* best effort */ }
       lastError = 'pod created but failed to boot'
-      if (bootAttempts >= MAX_BOOT_ATTEMPTS) {
-        return { ok: false, attempts, error: 'too many failed boots' }
-      }
+      if (bootAttempts >= MAX_BOOT_ATTEMPTS) return { ok: false, attempts, error: 'too many failed boots' }
+      continue
+    }
+
+    // The RTMP port must actually be reachable (catches broken tunnels).
+    if (!(await probeTcp(addr.ip, addr.port))) {
+      console.warn(`[broker] pod ${podId} RTMP ${addr.ip}:${addr.port} unreachable — cascading`)
+      try { await provider.destroy(podId) } catch { /* best effort */ }
+      lastError = 'RTMP port unreachable'
+      if (bootAttempts >= MAX_BOOT_ATTEMPTS) return { ok: false, attempts, error: 'too many failed boots' }
+      continue
+    }
+
+    // Placement sanity: with a deterministic provider the pod must land where we
+    // asked. If it reports a different datacenter than requested (should never
+    // happen on RunPod secure), reject it rather than stream from the wrong place.
+    const requestedDc = c.placement.datacenterId
+    if (addr.dataCenterId && requestedDc && addr.dataCenterId !== requestedDc) {
+      console.warn(`[broker] pod ${podId} landed in ${addr.dataCenterId}, expected ${requestedDc} — rejecting`)
+      try { await provider.destroy(podId) } catch { /* best effort */ }
+      lastError = `placement mismatch: ${addr.dataCenterId} != ${requestedDc}`
+      bootAttempts--   // provider misbehaviour, not a boot failure
+      continue
+    }
+
+    return {
+      ok: true,
+      provider: c.provider,
+      podId,
+      ip: addr.ip,
+      port: addr.port,
+      hlsPort: addr.hlsPort,
+      gpuKey: c.gpuKey,
+      datacenter: c.label,
+      pricePerHr: actualCost ?? c.pricePerHr,
+      attempts,
     }
   }
 

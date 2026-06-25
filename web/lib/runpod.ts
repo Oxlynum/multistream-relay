@@ -57,45 +57,6 @@ async function gqlRequest<T>(query: string): Promise<T> {
   return body.data
 }
 
-// Sentinel stored for a GPU that RunPod lists but reports zero inventory for.
-// RunPod signals out-of-stock by returning the GPU with stockStatus: null (NOT a
-// "None" string and NOT by omitting it), so we record an explicit marker the
-// broker can skip on. In-stock GPUs map to 'High' | 'Medium' | 'Low'.
-export const STOCK_NONE = 'None'
-
-// Preflight inventory check. Asks RunPod (one GraphQL call per cloud tier) for
-// the current stock level of every GPU type, so the broker can SKIP combos with
-// zero inventory instead of discovering it the slow way — a sequential failed
-// create() per dead combo. Returns a map keyed `${gpuId}|${cloudType}` →
-// stockStatus ('High'|'Medium'|'Low'|STOCK_NONE).
-//
-// Two layers of fail-open keep a flaky/empty stock query from ever blocking a
-// stream: (1) a cloud tier whose query throws contributes NO entries, so every
-// GPU in it is "unknown" and gets tried; (2) a GPU id RunPod doesn't return at
-// all stays absent → also tried. Only an explicit present-but-null (STOCK_NONE)
-// is treated as "skip". The broker additionally falls back to the unfiltered
-// list if stock filtering would drop every candidate.
-export async function fetchGpuStock(): Promise<Map<string, string>> {
-  const out = new Map<string, string>()
-  // cloudType string (as used in candidates) → secureCloud bool (query input).
-  const tiers: Array<[string, boolean]> = [['COMMUNITY', false], ['SECURE', true]]
-  for (const [cloudType, secure] of tiers) {
-    try {
-      const data = await gqlRequest<{ gpuTypes: Array<{ id: string; lowestPrice: { stockStatus: string | null } | null }> }>(
-        `query { gpuTypes { id lowestPrice(input: {gpuCount: 1, secureCloud: ${secure}}) { stockStatus } } }`
-      )
-      for (const g of data.gpuTypes ?? []) {
-        if (!g.id) continue
-        // present-but-null stockStatus = out of stock → record the sentinel.
-        out.set(`${g.id}|${cloudType}`, g.lowestPrice?.stockStatus ?? STOCK_NONE)
-      }
-    } catch {
-      // leave this tier's entries absent → broker treats it as unknown and tries it
-    }
-  }
-  return out
-}
-
 export interface PodEnv { key: string; value: string }
 
 // Low-level pod create for one specific candidate (gpu type + cloud + DC).

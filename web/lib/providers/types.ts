@@ -5,16 +5,23 @@ export interface PodEnv {
   value: string
 }
 
-// One concrete thing to try: a GPU type, on a cloud type, restricted to a
-// proximity-ordered set of datacenters. The broker walks a ranked list of these.
+// One concrete, LOCATION-STAMPED option the broker can try: a specific GPU at a
+// specific place, from a specific provider. The broker merges candidates from
+// every provider into one list, ranks them by distance-to-user (then price), and
+// creates them nearest-first until one boots. Because each candidate carries its
+// own coordinates, RunPod datacenters and Vast.ai marketplace offers rank against
+// each other uniformly — "closest server wins" spans providers for free.
 export interface GpuCandidate {
-  gpuKey: string
-  gpuTypeId: string
-  gen: GpuGen
-  pricePerHr: number
-  cloudType: string
-  datacenterIds: string[]
-  tier: 'near' | 'mid' | 'far'
+  provider: string        // owning provider name ('runpod' | 'vast'); routes create/destroy
+  gpuKey: string          // our short key, stored on the instance for observability
+  gpuTypeId: string       // the provider's own GPU identifier
+  pricePerHr: number      // catalog/offer price — cheapest-first tiebreak + ceiling
+  lat: number             // where this option physically is — for nearest-first ranking
+  lon: number
+  label: string           // human-readable, e.g. 'US-GA-1' or 'vast:12345 Frankfurt'
+  // Opaque provider-specific payload handed back to create() to place the pod.
+  // RunPod: { datacenterId }. Vast: { offerId }. The broker never inspects it.
+  placement: Record<string, unknown>
 }
 
 export interface CreatedPod {
@@ -27,20 +34,35 @@ export interface PodStatus {
   ip: string | null
   port: number | null          // public mapped port for the RTMP ingest (1935)
   hlsPort: number | null       // public mapped port for the HLS preview server (8888)
-  dataCenterId: string | null  // actual DC the pod landed in (may differ from requested)
+  dataCenterId: string | null  // actual location the pod landed in (for the placement sanity check)
 }
 
-// A cloud GPU provider. RunPod is implemented today; Vultr / Vast.ai slot in as
-// additional implementations and the broker cascades across all of them.
+// A cloud GPU provider. RunPod (secure) is implemented today; Vast.ai slots in as
+// an additional implementation (see vast.ts) and the broker ranks across all of
+// them. The only requirement is deterministic placement — the provider must put
+// the pod where listCandidates said it would be.
 export interface GpuProvider {
   name: string
+
+  // Every location-stamped option this provider can offer at or under maxPricePerHr.
+  // RunPod: (catalog GPUs × secure datacenters), priced from the catalog —
+  //   availability is unknown here, so create() is the source of truth.
+  // Vast: a live offer search — each returned machine is actually available, with
+  //   its real geolocation and price.
+  // Best-effort: should resolve to [] (not throw) if the provider is unreachable,
+  // so one provider being down never blocks the others.
+  listCandidates(opts: { maxPricePerHr: number; needsProfessionalGpu: boolean }): Promise<GpuCandidate[]>
+
   create(args: {
     candidate: GpuCandidate
     name: string
     imageTag: string
     env: PodEnv[]
   }): Promise<CreatedPod>
+
   getStatus(podId: string): Promise<PodStatus>
   stop(podId: string): Promise<void>
   destroy(podId: string): Promise<void>
 }
+
+export type { GpuGen }
