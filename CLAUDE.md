@@ -1,4 +1,6 @@
-# CLAUDE.md — context for continuing this project
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## What it is
 **SlimCast** — a consumer multistreaming SaaS. User pushes one HEVC stream from
@@ -15,10 +17,22 @@ billed in seconds; +0.2 token/hr per extra transcoded platform. No subscription.
 
 ## Current status
 - Pipeline confirmed working end-to-end (Twitch at 1080p60).
-- Provider: **RunPod** L4 (community cloud, ~$0.39/hr, ~45s cold start). Selected
-  automatically by the availability broker (see Architecture #7) — never picked by
-  hand. Hard $1/hr price ceiling.
-- Web app (Next.js) in `web/` — Supabase + Stripe wired, deploys to Vercel.
+- Provider: **RunPod SECURE cloud**, picked by the availability broker (Arch #8) —
+  never by hand. Hard $1/hr ceiling. NOTE: this replaced RunPod *community* cloud,
+  which is unusable for a "nearest server" product — it ignores the datacenter pin
+  and places pods globally at random (a pod pinned to Atlanta landed in Sweden).
+  Secure honors the pin and reports the real DC, so placement is deterministic.
+- **Multi-provider broker**: RunPod-secure + **Vast.ai** ranked together by
+  distance (`ACTIVE_PROVIDERS`). **Vast is currently DISABLED** (commented out of
+  `ACTIVE_PROVIDERS`) — it provisions/pairs fine but a live test showed the OBS→pod
+  RTMP data path didn't establish (likely the `NVIDIA_DRIVER_CAPABILITIES=video`
+  gap, now fixed in the slim image — re-test before re-enabling). Vast adds cheap
+  consumer GPUs ($0.05–0.14/hr all-in) and is priced INCLUDING bandwidth (it bills
+  egress per TB; RunPod doesn't).
+- **Relay Docker image slimmed 1.6GB → 0.23GB** (cuda `-runtime` → `-base`; the
+  CUDA toolkit was unused dead weight — see Arch #4/#14). Faster cold starts.
+- Web app (Next.js 16) in `web/` — Supabase + Stripe wired, deploys to Vercel.
+  Auth gate is `web/proxy.ts` (renamed from `middleware.ts` per Next 16).
 - OBS plugin in `slimcast-obs/` — v2.1.0 C++ plugin, rebuilt for the agent
   architecture: single scrollable dock, API-key-only auth, OBS-driven GPU
   lifecycle (Start Streaming → provision nearest GPU; Stop → destroy pod, no idle
@@ -38,8 +52,44 @@ billed in seconds; +0.2 token/hr per extra transcoded platform. No subscription.
   agent.py is the Docker entrypoint (on-boot pair/poll/heartbeat).
 - `web/` — Next.js app: auth, dashboard, platform config, credit billing, OBS dock,
   GPU availability broker. Stack: Next.js + Supabase + Stripe. Deploys to Vercel.
-- `slimcast-obs/` — C++ OBS plugin (v2.0.0 complete). Manages relay from OBS.
+- `slimcast-obs/` — C++ OBS plugin (v2.1.0). OBS-driven GPU lifecycle + stream
+  config dock + one-click HEVC encoder auto-configuration. Manages relay from OBS.
 - `docs/` — architecture notes and product plan (may be stale vs plan file above).
+
+## Commands
+**web/** (Next.js 16, deploys via Vercel on push to `main`):
+```bash
+cd web
+npm run dev            # local dev server
+npx tsc --noEmit       # typecheck — the de-facto pre-push check (no test suite)
+vercel --prod          # manual prod deploy (RUN FROM REPO ROOT — Vercel root dir is web/)
+vercel logs --environment=production --since=10m -x   # read prod runtime logs (broker, agent, billing)
+```
+There is no unit-test suite; `npx tsc --noEmit` is the gate. Prod is debugged via
+`vercel logs` — the broker/agent/billing all `console.log` structured lines
+(`[broker]`, `[provision]`, `[agent/status]`, `[gpu/status]`).
+
+**slimcast-obs/** (C++ OBS plugin, macOS arm64; needs OBS.app + CMake ≥3.26):
+```bash
+cd slimcast-obs
+cmake --preset macos-arm64
+cmake --build --preset macos-arm64
+cmake --install build/macos-arm64 --prefix "$HOME/Library/Application Support/obs-studio/plugins"
+```
+Install to the `.plugin` bundle path above — NEVER `cp` into `bin/64bit` (causes a
+duplicate dock). Restart OBS to load. Windows preset: `windows-x64`. See `BUILD.md`.
+
+**relay/** (GPU Docker image): CI (`.github/workflows/relay-docker.yml`) builds +
+pushes `ghcr.io/oxlynum/multistream-relay:latest` + a `:<sha>` tag on any `relay/**`
+push to `main`. The `:<sha>` tags are rollback points. To build/test out-of-band:
+`docker buildx build --platform linux/amd64 -t ...:slim --push relay`, then retag
+with `docker buildx imagetools create --tag ...:latest ...:slim` (instant promote).
+
+**Probes** (verify provider APIs against reality before trusting them — this repo
+has been bitten 3× by assumed API shapes; always probe first):
+`web/scripts/test-dc-pin.mjs` (RunPod single-DC placement), `test-vast.mjs` (Vast
+offer search), `test-vast-rent.mjs` (Vast rent→ports→destroy). Each reads its key
+from `web/.env.local`.
 
 ## Target user flow (the north star — nothing should require a terminal)
 1. Sign up → onboarding wizard auto-starts
@@ -91,13 +141,35 @@ They just aren't the brand. The brand is "stream everywhere, no setup."
    platforms in the same group **share one bitrate** (the group runs at the lowest
    cap in it). Do not revert to per-platform full transcodes.
 
-8. **GPU is chosen by the availability broker, never by hand.** `lib/gpu-broker.ts`
-   cascades over {provider × datacenter × GPU-type} ranked by latency tier
-   (geo-nearest first via Vercel geo headers) then price, until a pod boots.
-   NVENC-only catalog, hard $1/hr ceiling (catalog filter + runtime cost guard),
-   readiness gate (abandon pods that don't get an IP). Provider-abstracted —
-   RunPod today; Vultr/Vast.ai drop in as more entries. Tuning surface:
-   `lib/datacenters.ts`.
+8. **GPU is chosen by the availability broker, never by hand.** `lib/gpu-broker.ts`.
+   Model: each provider yields **location-stamped candidates** via
+   `listCandidates()` (a GPU at a place, with lat/lon + a `placement` payload). The
+   broker merges every provider's candidates into one list, ranks by **distance to
+   the user** (Vercel geo headers, `haversine`) then price, and `create()`s them
+   **nearest-first until one boots**. "Closest server wins" spans providers for
+   free. Hard $1/hr ceiling (catalog filter + runtime cost guard), readiness gate
+   (abandon pods that never get an IP), RTMP TCP probe (forwarded port must accept),
+   placement sanity check (reject a pod that reports a different DC than requested).
+   - **RunPod** (`lib/providers/runpod.ts`): candidates = catalog GPUs × the 28
+     create-valid datacenters, `cloudType: SECURE`, **single-DC pin** (one DC per
+     create — secure honors it and reports it back; no post-boot geolocation).
+   - **Vast.ai** (`lib/providers/vast.ts`): live offer search → each rentable
+     machine becomes a candidate, geolocated by its `public_ipaddr`, **priced
+     all-in (GPU + estimated bandwidth)** and filtered to NVENC Turing+
+     (`compute_cap >= 750`), ≤$8/TB egress, ≥300 Mbps down. Currently disabled in
+     `ACTIVE_PROVIDERS` (see Current status).
+   - **DELETED this rewrite** (don't reintroduce): subregion rings, RTT/latency
+     tiers, GraphQL stock preflight, null-DC handling, IP-geolocation of pods. All
+     existed to clean up after RunPod *community*'s random placement, which is gone.
+   - **The RunPod two-list trap** (cost us a day): the GraphQL `dataCenters` query
+     returns ~47 DCs, but the REST `POST /pods` endpoint accepts a **different,
+     smaller enum (28)** and 400s the whole request if ANY pinned DC is outside it.
+     `RUNPOD_DATACENTERS` in `lib/datacenters.ts` is pinned to that **create-valid
+     28** — keep it in sync with the enum RunPod returns in the 400 error, never
+     with the GraphQL list. RunPod's per-DC stock API is also unreliable (disagreed
+     with the console) — `create()` is the source of truth, not a stock query.
+   - Tuning surfaces: `lib/datacenters.ts` (RunPod DCs, GPU catalog, `RUNPOD_CLOUD_TYPE`,
+     `PRICE_CEILING`, readiness timeouts), `lib/providers/vast.ts` (Vast filters).
 
 9. **Billing runs on the pod agent heartbeat.** burn rate = 1 token/hr base
    (incl. YouTube passthrough + first transcode) + 0.2/extra transcoded platform.
@@ -175,6 +247,18 @@ They just aren't the brand. The brand is "stream everywhere, no setup."
     fails open). Checkout price is server-side (`HOURLY_PRICE_ID`), never trusted
     from the client.
 
+14. **The relay image needs the GPU DRIVER, not the CUDA toolkit.** The pipeline's
+    entire GPU surface is driver-level — `h264_nvenc` (libnvidia-encode), NVDEC via
+    `-hwaccel cuda` (libnvcuvid), and the CUDA *Driver* API (libcuda) for hwaccel —
+    all mounted from the host by the NVIDIA container runtime, never shipped in the
+    image. It calls **zero** CUDA *toolkit* (runtime) APIs (no libcudart/npp/cuBLAS;
+    filters are CPU). So the base is the tiny `-base` CUDA image, not `-runtime`.
+    For the driver libs to be mounted, `NVIDIA_DRIVER_CAPABILITIES` MUST include
+    `video` (NVENC/NVDEC) + `compute` (hwaccel cuda) — set explicitly in the
+    Dockerfile so it works on any host, not just RunPod. **Rollback for a bad relay
+    image:** every CI build is tagged `:<commit-sha>`; retag a known-good sha to
+    `:latest` via `docker buildx imagetools create` (~2s), no rebuild needed.
+
 ## Key files
 ### relay/
 - `supervisor.py` — `plan_runners()` groups enabled outputs by orientation +
@@ -188,20 +272,28 @@ They just aren't the brand. The brand is "stream everywhere, no setup."
 - `app.py` — FastAPI control plane (kept for debug; agent wraps it).
 - `mediamtx.yml` — RTMP :1935 ingest + SRT :8890 loopback; runOnReady → hook.sh.
 - `hook.sh` — triggers supervisor start/stop-with-grace when OBS connects/drops.
-- `Dockerfile` — nvidia/cuda:12.4.1-runtime-ubuntu22.04, jellyfin-ffmpeg 7.1.4-3,
-  MediaMTX v1.9.3. CMD = python3 agent.py. Built/pushed to
-  `ghcr.io/oxlynum/multistream-relay:latest` by `.github/workflows/relay-docker.yml`
-  on any `relay/**` change.
+- `Dockerfile` — **nvidia/cuda:12.4.1-BASE-ubuntu22.04** (~150MB, NOT `-runtime`:
+  the 1.37GB CUDA toolkit is unused — see Arch #14), jellyfin-ffmpeg 7.1.4-3,
+  MediaMTX. Sets `NVIDIA_DRIVER_CAPABILITIES=compute,video,utility` (the `video`
+  cap is REQUIRED for NVENC/NVDEC; RunPod set it implicitly via `all`, other hosts
+  may not). CMD = python3 agent.py. Built/pushed to
+  `ghcr.io/oxlynum/multistream-relay:latest` + a `:<sha>` tag by
+  `.github/workflows/relay-docker.yml` on any `relay/**` change. Total image ~0.23GB.
 
 ### web/
 - `lib/supabase.ts` — browser (SSR cookie) + server Supabase clients.
 - `lib/stripe.ts` — Stripe client (lazy Proxy to survive build w/o key).
 - `lib/runpod.ts` — RunPod REST wrapper (createPod w/ gpuType/cloud/dataCenterIds,
-  stop/destroy/getPodStatus; returns costPerHr for the price guard).
-- `lib/gpu-broker.ts` — availability cascade + ranking + readiness gate (Arch #8).
-- `lib/datacenters.ts` — DC coords + NVENC GPU catalog + all broker policy knobs
-  (PRICE_CEILING, latency tiers, CLOUD_TYPES). **Tune here, not in code.**
-- `lib/providers/` — provider interface + RunPod impl + registry (Vultr/Vast TODO).
+  stop/destroy/getPodStatus via GraphQL; returns costPerHr for the price guard).
+- `lib/gpu-broker.ts` — multi-provider distance-ranked nearest-first cascade +
+  readiness gate + RTMP probe + placement check (Arch #8). `rankedCandidates()`
+  merges every provider's `listCandidates()`, sorts by haversine then price.
+- `lib/datacenters.ts` — the **28 create-valid** RunPod DC coords + 16-card NVENC
+  GPU catalog + broker knobs (`PRICE_CEILING`, `RUNPOD_CLOUD_TYPE='SECURE'`,
+  readiness timeouts). **Tune here, not in code.**
+- `lib/providers/types.ts` — `GpuProvider` interface + location-stamped
+  `GpuCandidate`. `providers/runpod.ts` (secure single-DC), `providers/vast.ts`
+  (offer search, all-in pricing, NVENC Turing+ filter), registry + `ACTIVE_PROVIDERS`.
 - `lib/billing.ts` — transcodeCount + burnRatePerSec (Arch #9).
 - `lib/agent-config.ts` — shared output builder for config+pair routes (incl. the
   YouTube HLS passthrough URL from the stream key).
