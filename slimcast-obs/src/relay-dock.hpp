@@ -57,6 +57,7 @@ private slots:
     void onConfirmClicked();
     void onGoLiveClicked();
     void onMainBtnClicked();   // dispatches: Go Live | Cancel | Stop Stream
+    void onAutoConfigure();    // detect HEVC encoder + apply SlimCast OBS settings
 
 private:
     void buildUi();
@@ -70,6 +71,8 @@ private:
     void abortLaunch(const QString &message);   // give up + clean up a failed Go Live
     void applyObsStreamUrl(const QString &server, const QString &key);
     void setSlimcastService(const QString &server, const QString &key);
+    // Write SlimCast's recommended encoder settings into the active OBS profile.
+    void applyRecommendedSettings(const QString &encId, int bframeFamily, int bitrate);
 
     void render(const GpuInfo &info);
     void renderConfirm(const GpuInfo &info);

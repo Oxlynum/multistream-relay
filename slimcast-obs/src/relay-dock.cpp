@@ -25,6 +25,8 @@
 #include <QUrl>
 #include <QTimer>
 #include <QMainWindow>
+#include <QProcess>
+#include <QCoreApplication>
 #include <cmath>
 #include <algorithm>
 #include <cstring>
@@ -69,6 +71,90 @@ static QString formatCredits(double tokens)
 static bool isPassthrough(const PlatformConfig &p)
 {
     return p.platform == "youtube" && p.orientation == "landscape";
+}
+
+// ── HEVC encoder auto-detection ───────────────────────────────────────────────
+// How a given encoder family stores its "disable B-frames" setting in
+// streamEncoder.json. Apple VT uses a bool "bframes"; QSV uses an int "bframes";
+// NVENC / AMF / VAAPI use an int "bf".
+enum BframeFamily { BF_VT_BOOL, BF_QSV_INT, BF_BF_INT };
+
+// Pick the best hardware HEVC encoder OBS has registered on this machine.
+// Registration is hardware/driver-gated (NVENC only appears with an NVIDIA GPU,
+// VideoToolbox only on macOS, …), so an id being present means it's usable.
+// Returns false if no HEVC encoder exists at all.
+static bool pickHevcEncoder(QString &idOut, QString &nameOut, int &bfFamily)
+{
+    QStringList hevc;
+    const char *id = nullptr;
+    for (size_t i = 0; obs_enum_encoder_types(i, &id); ++i) {
+        if (!id) continue;
+        const char *codec = obs_get_encoder_codec(id);
+        if (codec && strcmp(codec, "hevc") == 0)
+            hevc << QString::fromUtf8(id);
+    }
+    if (hevc.isEmpty()) return false;
+
+    QString chosen;
+#ifdef __APPLE__
+    // Apple VideoToolbox hardware HEVC ids carry "ave"; software ones don't.
+    for (const QString &h : hevc)
+        if (h.contains("ave")) { chosen = h; break; }
+#else
+    // Hardware first: NVENC → QSV → AMF → VAAPI.
+    static const QStringList prefer = {
+        "obs_nvenc_hevc_tex", "jim_hevc_nvenc", "obs_nvenc_hevc_cuda", "ffmpeg_hevc_nvenc",
+        "obs_qsv11_hevc", "h265_texture_amf",
+        "hevc_ffmpeg_vaapi_tex", "hevc_ffmpeg_vaapi"};
+    for (const QString &p : prefer)
+        if (hevc.contains(p)) { chosen = p; break; }
+#endif
+    if (chosen.isEmpty()) chosen = hevc.first();
+
+    idOut = chosen;
+    const char *disp = obs_encoder_get_display_name(chosen.toUtf8().constData());
+    nameOut = disp ? QString::fromUtf8(disp) : chosen;
+
+    const QString c = chosen.toLower();
+    if (c.contains("qsv"))                                   bfFamily = BF_QSV_INT;
+    else if (c.contains("nvenc") || c.contains("amf") ||
+             c.contains("vaapi"))                            bfFamily = BF_BF_INT;
+    else                                                     bfFamily = BF_VT_BOOL;  // Apple VT
+    return true;
+}
+
+// Relaunch OBS. There's no public restart API and OBS's internal `restart` flag
+// lives in the host executable (not linkable from a plugin), so we spawn a
+// detached watcher that waits for this process to exit — releasing OBS's
+// single-instance lock — then reopens the app, and ask the main window to close
+// so OBS shuts down cleanly (saving scenes/profile on the way out).
+static void restartObs()
+{
+    const qint64 pid = QCoreApplication::applicationPid();
+    const QString exe = QCoreApplication::applicationFilePath();
+
+#ifdef __APPLE__
+    QString app = exe;                          // …/OBS.app/Contents/MacOS/OBS → …/OBS.app
+    const int idx = app.indexOf("/Contents/MacOS/");
+    if (idx > 0) app = app.left(idx);
+    const QString sh = QString(
+        "while kill -0 %1 2>/dev/null; do sleep 0.2; done; sleep 0.4; open \"%2\"")
+        .arg(pid).arg(app);
+    QProcess::startDetached("/bin/sh", {"-c", sh});
+#elif defined(_WIN32)
+    QProcess::startDetached("powershell", QStringList{
+        "-NoProfile", "-WindowStyle", "Hidden", "-Command",
+        QString("Wait-Process -Id %1 -ErrorAction SilentlyContinue; Start-Process '%2'")
+            .arg(pid).arg(exe)});
+#else
+    const QString sh = QString(
+        "while kill -0 %1 2>/dev/null; do sleep 0.2; done; sleep 0.4; \"%2\" &")
+        .arg(pid).arg(exe);
+    QProcess::startDetached("/bin/sh", {"-c", sh});
+#endif
+
+    if (auto *win = static_cast<QWidget *>(obs_frontend_get_main_window()))
+        QMetaObject::invokeMethod(win, "close", Qt::QueuedConnection);
 }
 
 // ── ctor ──────────────────────────────────────────────────────────────────────
@@ -146,7 +232,7 @@ void RelayDock::buildUi()
 
     tabs->addTab(buildStreamTab(), "Stream");
     tabs->addTab(buildOutputsTab(), "Outputs");
-    tabs->addTab(buildSlimSyncTab(), "Account");
+    tabs->addTab(buildSlimSyncTab(), "System");
 
     m_pages->addWidget(tabs);               // index 1
 
@@ -423,6 +509,31 @@ QWidget *RelayDock::buildSlimSyncTab()
     ly->setContentsMargins(14, 18, 14, 12);
     ly->setSpacing(12);
 
+    // ── One-click OBS tuning ──────────────────────────────────────────────────
+    auto *tuneTitle = new QLabel("OBS encoder setup");
+    tuneTitle->setStyleSheet("font-size:13px; font-weight:600; color:#e7ebf2");
+    ly->addWidget(tuneTitle);
+
+    auto *tuneNote = new QLabel(
+        "Detects your hardware HEVC encoder — Apple VideoToolbox on Mac, "
+        "NVIDIA / AMD / Intel on PC — and switches OBS to SlimCast's "
+        "recommended settings: custom service, advanced output, CBR, "
+        "dynamic bitrate on, B-frames off.");
+    tuneNote->setWordWrap(true);
+    tuneNote->setStyleSheet(QString("color:%1; font-size:11px").arg(C_MUTE));
+    ly->addWidget(tuneNote);
+
+    auto *autoBtn = new QPushButton("Auto-configure OBS for SlimCast");
+    autoBtn->setStyleSheet(
+        "QPushButton{background:#4d8ef0; color:#0b0e14; font-weight:700; "
+        "border:none; border-radius:6px; padding:9px;}"
+        "QPushButton:hover{background:#6aa3f4;}");
+    ly->addWidget(autoBtn);
+    connect(autoBtn, &QPushButton::clicked, this, &RelayDock::onAutoConfigure);
+
+    ly->addWidget(makeSep());
+
+    // ── Account ───────────────────────────────────────────────────────────────
     auto *title = new QLabel("Account");
     title->setStyleSheet("font-size:13px; font-weight:600; color:#e7ebf2");
     ly->addWidget(title);
@@ -1087,4 +1198,135 @@ void RelayDock::setStatus(const QString &text, const QString &color)
 {
     m_statusDot->setStyleSheet(QString("color:%1; font-size:13px").arg(color));
     m_statusLabel->setText(text);
+}
+
+// ── One-click OBS auto-configuration ──────────────────────────────────────────
+
+// Detect the platform + best HEVC encoder, confirm with the user, then write
+// SlimCast's recommended encoder settings into the active OBS profile.
+void RelayDock::onAutoConfigure()
+{
+    // Changing the output mode/encoder mid-stream would tear the running output
+    // down — make the user stop first.
+    if (obs_frontend_streaming_active()) {
+        QMessageBox::information(this, "SlimCast",
+            "Stop streaming first, then auto-configure your OBS settings.");
+        return;
+    }
+
+    QString encId, encName;
+    int bfFamily = BF_BF_INT;
+    if (!pickHevcEncoder(encId, encName, bfFamily)) {
+        QMessageBox::warning(this, "SlimCast — no HEVC encoder",
+            "Couldn't find a hardware HEVC (H.265) encoder on this computer.\n\n"
+            "SlimCast needs Apple VideoToolbox (Mac) or an NVIDIA / AMD / Intel "
+            "HEVC encoder (PC). Your GPU or OS version may not support it.");
+        return;
+    }
+
+#ifdef __APPLE__
+    const QString platform = "Mac · Apple VideoToolbox";
+#else
+    const QString platform = "Windows";
+#endif
+
+    // The OBS→GPU ingest is the user's single upload, so target their configured
+    // landscape cap (falls back to 6000 kbps before the encode config has loaded).
+    const int bitrate = (m_haveEncode && m_encode.landscape > 0) ? m_encode.landscape : 6000;
+
+    const QString summary = QString(
+        "Detected: %1\nEncoder: %2\n\n"
+        "SlimCast will change these OBS settings:\n"
+        "  •  Stream service  →  Custom (SlimCast)\n"
+        "  •  Output mode  →  Advanced\n"
+        "  •  Encoder  →  %2 (HEVC)\n"
+        "  •  Rate control  →  CBR @ %3 kbps\n"
+        "  •  Dynamic bitrate  →  On\n"
+        "  •  B-frames  →  Off\n"
+        "  •  Keyframe interval  →  2s   ·   Profile  →  main\n\n"
+        "Apply these now?")
+        .arg(platform, encName).arg(bitrate);
+
+    if (QMessageBox::question(this, "Auto-configure OBS for SlimCast", summary,
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes) != QMessageBox::Yes)
+        return;
+
+    // OBS hot-applies streamEncoder.json (CBR, bitrate, keyframes, B-frames…) on
+    // every Go Live, but it only rebuilds the output handler — and thus picks up a
+    // new output MODE or a different encoder TYPE — at startup / profile load.
+    // So a restart is needed only when we're switching the mode or the encoder
+    // itself; pure setting tweaks take effect immediately.
+    bool needsRestart = true;
+    if (config_t *cfg = obs_frontend_get_profile_config()) {
+        const char *mode = config_get_string(cfg, "Output", "Mode");
+        const char *curEnc = config_get_string(cfg, "AdvOut", "Encoder");
+        const bool wasAdvanced = mode && strcmp(mode, "Advanced") == 0;
+        const bool sameEncoder = curEnc && encId == QString::fromUtf8(curEnc);
+        needsRestart = !(wasAdvanced && sameEncoder);
+    }
+
+    applyRecommendedSettings(encId, bfFamily, bitrate);
+
+    // Pure setting tweaks are hot-applied on the next Go Live, so nothing else to
+    // do. A new output mode or encoder type only loads on an OBS rebuild, so when
+    // that changed we restart OBS (the one reliable way to load it).
+    if (!needsRestart)
+        return;
+
+    const auto choice = QMessageBox::question(this, "Restart OBS",
+        "Your OBS settings are updated, but the new output mode / encoder only "
+        "loads when OBS starts.\n\nRestart OBS now to apply them?",
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
+    if (choice == QMessageBox::Yes)
+        restartObs();
+}
+
+// Persist the recommended encoder config to the active profile. Encoder-specific
+// settings live in <profile>/streamEncoder.json; the encoder id, output mode and
+// dynamic-bitrate flag live in the profile's basic config. The streaming service
+// is switched to Custom, preserving any SlimCast URL/key already present (Go Live
+// fills these in when it provisions a pod).
+void RelayDock::applyRecommendedSettings(const QString &encId, int bfFamily, int bitrate)
+{
+    // 1) Encoder settings JSON — merge into any existing file so we don't wipe
+    //    other tweaks the user may have set.
+    if (char *profPathRaw = obs_frontend_get_current_profile_path()) {
+        const QString jsonPath = QString::fromUtf8(profPathRaw) + "/streamEncoder.json";
+        bfree(profPathRaw);
+
+        obs_data_t *enc = obs_data_create_from_json_file(jsonPath.toUtf8().constData());
+        if (!enc) enc = obs_data_create();
+        obs_data_set_string(enc, "rate_control", "CBR");
+        obs_data_set_int(enc, "bitrate", bitrate);
+        obs_data_set_int(enc, "keyint_sec", 2);
+        obs_data_set_string(enc, "profile", "main");
+        // Disable B-frames using whichever key this encoder family reads.
+        if (bfFamily == BF_VT_BOOL)      obs_data_set_bool(enc, "bframes", false);
+        else if (bfFamily == BF_QSV_INT) obs_data_set_int(enc, "bframes", 0);
+        else                             obs_data_set_int(enc, "bf", 0);
+        obs_data_save_json_safe(enc, jsonPath.toUtf8().constData(), "tmp", "bak");
+        obs_data_release(enc);
+    }
+
+    // 2) Profile config — output mode, encoder selection, dynamic bitrate.
+    if (config_t *cfg = obs_frontend_get_profile_config()) {
+        config_set_string(cfg, "Output", "Mode", "Advanced");
+        config_set_string(cfg, "AdvOut", "Encoder", encId.toUtf8().constData());
+        config_set_bool(cfg, "Output", "DynamicBitrate", true);
+        config_set_bool(cfg, "AdvOut", "ApplyServiceSettings", false);  // keep our CBR/bitrate
+        config_set_bool(cfg, "AdvOut", "Rescale", false);               // stream at canvas res
+        config_save_safe(cfg, "tmp", nullptr);
+    }
+
+    // 3) Streaming service → Custom (SlimCast), preserving any URL/key already set.
+    QString server, key;
+    obs_service_t *svc = obs_frontend_get_streaming_service();   // borrowed
+    const char *type = svc ? obs_service_get_type(svc) : nullptr;
+    if (type && strcmp(type, "rtmp_custom") == 0) {
+        obs_data_t *s = obs_service_get_settings(svc);
+        server = QString::fromUtf8(obs_data_get_string(s, "server"));
+        key    = QString::fromUtf8(obs_data_get_string(s, "key"));
+        obs_data_release(s);
+    }
+    setSlimcastService(server, key);
 }
