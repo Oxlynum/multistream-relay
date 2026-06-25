@@ -53,7 +53,7 @@ export interface GpuProvider {
   //   its real geolocation and price.
   // Best-effort: should resolve to [] (not throw) if the provider is unreachable,
   // so one provider being down never blocks the others.
-  listCandidates(opts: { maxPricePerHr: number; needsProfessionalGpu: boolean }): Promise<GpuCandidate[]>
+  listCandidates(opts: { maxPricePerHr: number; needsProfessionalGpu: boolean; srtMode?: boolean }): Promise<GpuCandidate[]>
 
   create(args: {
     candidate: GpuCandidate

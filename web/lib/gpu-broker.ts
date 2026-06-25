@@ -71,11 +71,15 @@ function probeRtmp(host: string, port: number, timeoutMs = 10000): Promise<boole
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 
-// UDP forwarding probe (SRT mode): the relay runs a tiny UDP echo on 8889/udp.
-// We send a datagram to its mapped port and require an "ECHO:" reply — this proves
-// the host actually FORWARDS UDP (not all do, even Vast datacenter hosts), which is
-// the prerequisite for SRT ingest. Retransmits because UDP is lossy.
-function probeUdp(host: string, port: number, timeoutMs = 8000): Promise<boolean> {
+// Vast host probe (SRT mode): the relay runs a UDP echo on 8889/udp that replies
+// "ECHO:<status>:<data>" where status is OK | BAD | PENDING. One round-trip proves
+// BOTH things we need to safely use the full (non-datacenter) host pool:
+//   • the reply arriving at all → the host FORWARDS UDP (required for SRT ingest);
+//   • status OK → the host's OUTBOUND to the platforms works (BAD = it can ingest
+//     but can't deliver to Twitch; PENDING = the outbound test is still running, so
+//     keep probing). Timeout / no reply / BAD → reject the host and cascade.
+// Retransmits because UDP is lossy and the outbound test takes a few seconds.
+function probeUdp(host: string, port: number, timeoutMs = 14000): Promise<boolean> {
   return new Promise(resolve => {
     const socket = dgram.createSocket('udp4')
     let done = false
@@ -88,11 +92,17 @@ function probeUdp(host: string, port: number, timeoutMs = 8000): Promise<boolean
     }
     const timer = setTimeout(() => finish(false), timeoutMs)
     const msg = Buffer.from('slimcast-udp-probe')
-    socket.on('message', m => finish(m.toString().startsWith('ECHO:')))
+    socket.on('message', m => {
+      const s = m.toString()
+      if (!s.startsWith('ECHO:')) return       // not our responder
+      if (s.startsWith('ECHO:OK:')) finish(true)        // udp forwards + outbound works
+      else if (s.startsWith('ECHO:BAD:')) finish(false) // outbound blocked → reject
+      // ECHO:PENDING: → outbound test still running; keep retransmitting until OK/BAD
+    })
     socket.on('error', () => finish(false))
     socket.send(msg, port, host)
     let n = 0
-    const retx = setInterval(() => { if (!done && n++ < 6) socket.send(msg, port, host) }, 1000)
+    const retx = setInterval(() => { if (!done && n++ < 12) socket.send(msg, port, host) }, 1000)
   })
 }
 
@@ -141,7 +151,7 @@ async function rankedCandidates(lat: number, lon: number, needsProfessionalGpu: 
   const lists = await Promise.all(
     providers.map(async p => {
       try {
-        return await p.listCandidates({ maxPricePerHr: PRICE_CEILING, needsProfessionalGpu })
+        return await p.listCandidates({ maxPricePerHr: PRICE_CEILING, needsProfessionalGpu, srtMode })
       } catch (err) {
         console.error(`[broker] ${p.name} listCandidates failed:`, err instanceof Error ? err.message : err)
         return []
@@ -262,13 +272,13 @@ export async function provisionGpu(args: {
         continue
       }
       if (!(await probeUdp(addr.ip, addr.udpProbePort))) {
-        console.warn(`[broker] pod ${podId} host does not forward UDP (probe ${addr.ip}:${addr.udpProbePort}) — cascading`)
+        console.warn(`[broker] pod ${podId} failed UDP/outbound check (${addr.ip}:${addr.udpProbePort}) — cascading`)
         try { await provider.destroy(podId) } catch { /* best effort */ }
-        lastError = 'host does not forward UDP (SRT not possible)'
+        lastError = 'host failed UDP-forwarding or outbound-to-platform check'
         if (bootAttempts >= MAX_BOOT_ATTEMPTS) return { ok: false, attempts, error: 'too many failed boots' }
         continue
       }
-      console.log(`[broker] pod ${podId} SRT ready: udp forwards, srt port ${addr.srtPort}`)
+      console.log(`[broker] pod ${podId} SRT ready: udp forwards + outbound ok, srt port ${addr.srtPort}`)
     }
 
     return {

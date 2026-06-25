@@ -135,23 +135,49 @@ def start_uvicorn() -> subprocess.Popen:
     ])
 
 
-def start_udp_echo(port: int = 8889) -> None:
-    """Tiny UDP echo for the broker's SRT/UDP-forwarding probe.
+# Outbound-reachability state for the broker's host probe. None = still testing.
+_outbound_ok: "bool | None" = None
 
-    The broker (SRT mode) sends a datagram to this port's host-mapped address and
-    requires an 'ECHO:' reply, proving the host actually forwards UDP before it
-    commits to SRT ingest. Only externally reachable on UDP-capable hosts (Vast,
-    which maps the EXPOSE'd 8889/udp); a no-op everywhere else. Runs in a daemon
-    thread so it never blocks the agent.
-    """
+
+def _test_outbound() -> None:
+    """Check the host can open OUTBOUND RTMP — the leg that delivers to the platforms.
+    Some consumer hosts accept inbound + forward UDP but block outbound 1935, so a pod
+    could ingest fine yet never reach Twitch (tee onfail=ignore hides it). We TCP-probe
+    a Twitch ingest; the result rides on the UDP echo so the broker rejects a host that
+    can't deliver, letting us safely use the FULL host pool instead of datacenter-only."""
+    global _outbound_ok
+    for host, port in (("live.twitch.tv", 1935),
+                       ("ingest.global-contribute.live-video.net", 1935)):
+        try:
+            with socket.create_connection((host, port), timeout=6):
+                _outbound_ok = True
+                log.info("Outbound RTMP reachable (%s:%d)", host, port)
+                return
+        except Exception:
+            continue
+    _outbound_ok = False
+    log.warning("Outbound RTMP blocked — host cannot deliver to platforms")
+
+
+def start_udp_echo(port: int = 8889) -> None:
+    """UDP echo carrying the broker's two Vast host checks in ONE round-trip:
+      1. the reply existing proves the host FORWARDS UDP (required for SRT ingest);
+      2. the reply prefix reports OUTBOUND reachability ('OK'/'BAD'/'PENDING') so the
+         broker can reject a host that ingests but can't deliver to the platforms.
+    Started early (before pairing) + in daemon threads; a no-op off UDP-capable hosts
+    (Vast maps the EXPOSE'd 8889/udp; RunPod doesn't open it)."""
+    threading.Thread(target=_test_outbound, daemon=True).start()
+
     def _serve() -> None:
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.bind(("0.0.0.0", port))
-            log.info("UDP echo (SRT probe) listening on :%d", port)
+            log.info("UDP echo (Vast host probe) listening on :%d", port)
             while True:
                 data, addr = sock.recvfrom(2048)
-                sock.sendto(b"ECHO:" + data, addr)
+                status = (b"OK" if _outbound_ok is True
+                          else b"BAD" if _outbound_ok is False else b"PENDING")
+                sock.sendto(b"ECHO:" + status + b":" + data, addr)
         except Exception as exc:  # never crash the agent over the probe
             log.warning("UDP echo stopped: %s", exc)
 
@@ -165,6 +191,11 @@ def build_outputs(config: dict) -> list[dict]:
 def main() -> None:
     ip = _get_external_ip()
     log.info("External IP: %s", ip or "(unknown)")
+
+    # Start the host probe (UDP echo + outbound test) BEFORE pairing, so the broker
+    # can verify the host's networking even on hosts that block outbound to Twitch
+    # (which would otherwise let the pod ingest but never deliver). Daemon threads.
+    start_udp_echo()
 
     log.info("Pairing with %s…", VERCEL_URL)
     pair_resp = {}
@@ -182,7 +213,6 @@ def main() -> None:
 
     mediamtx_proc = start_mediamtx()
     uvicorn_proc = start_uvicorn()
-    start_udp_echo()   # SRT/UDP-forwarding probe responder (broker readiness check)
 
     sup = Supervisor()
 

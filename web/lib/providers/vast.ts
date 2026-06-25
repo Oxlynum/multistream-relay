@@ -104,23 +104,31 @@ function gpuKeyOf(name: string): string {
 export const vastProvider: GpuProvider = {
   name: 'vast',
 
-  async listCandidates({ maxPricePerHr, needsProfessionalGpu }) {
+  async listCandidates({ maxPricePerHr, needsProfessionalGpu, srtMode }) {
     if (!VAST_API_KEY) return []
     // Vast machines are consumer GPUs (3-session NVENC cap on older drivers). For
     // users who need >3 simultaneous encodes we can't guarantee it, so skip Vast.
     if (needsProfessionalGpu) return []
 
     // datacenter:{eq:true} = Vast's datacenter-grade hosts (the secure-cloud analog
-    // of RunPod). These have clean, unrestricted networking — crucially, working
-    // OUTBOUND to the platform ingests, which the consumer/residential hosts often
-    // block (a pod can receive OBS but fail to deliver to Twitch). ~61 of ~499 usable
-    // offers are datacenter; restricting to them trades breadth for reliability.
-    const q = {
+    // of RunPod): clean networking, including working OUTBOUND to the platform
+    // ingests (consumer/residential hosts often block it — a pod can receive OBS but
+    // fail to deliver to Twitch). ~61 of ~499 offers are datacenter.
+    //
+    // In SRT mode we WIDEN beyond datacenter to all static-IP hosts (~234 vs ~61 —
+    // a static public IP signals real hosting, not residential NAT, so far more
+    // likely to have clean outbound) and verify each one end-to-end before committing:
+    // the UDP echo probe confirms BOTH UDP-forwarding (for SRT ingest) AND
+    // outbound-to-Twitch (the echo's status prefix). The static_ip filter just keeps
+    // the broker from wasting boots on hosts that would fail the outbound probe; the
+    // probe is the actual guarantee. Net: many more, and far closer, usable hosts.
+    const q: Record<string, unknown> = {
       verified: { eq: true }, rentable: { eq: true }, rented: { eq: false },
-      datacenter: { eq: true },
       num_gpus: { eq: 1 }, dph_total: { lte: maxPricePerHr }, type: 'on-demand',
       order: [['dph_total', 'asc']], limit: 100,
     }
+    if (srtMode) q.static_ip = { eq: true }
+    else q.datacenter = { eq: true }
     let offers: VastOffer[]
     try {
       const res = await fetch(`${BASE}/bundles?q=${encodeURIComponent(JSON.stringify(q))}`, { headers: authHeaders(), signal: AbortSignal.timeout(8000) })
