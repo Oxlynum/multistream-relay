@@ -176,6 +176,7 @@ RelayDock::RelayDock(QWidget *parent)
     connect(m_api, &RelayApi::gpuDestroyed,      this, &RelayDock::onGpuDestroyed);
     connect(m_api, &RelayApi::platformsUpdated,  this, &RelayDock::onPlatformsUpdated);
     connect(m_api, &RelayApi::encodeUpdated,     this, &RelayDock::onEncodeUpdated);
+    connect(m_api, &RelayApi::srtUpdated,        this, &RelayDock::onSrtUpdated);
     connect(m_api, &RelayApi::networkError,      this, &RelayDock::onNetworkError);
     connect(m_api, &RelayApi::deviceLinked,      this, &RelayDock::onDeviceLinked);
     connect(m_api, &RelayApi::deviceLinkFailed,  this, &RelayDock::onDeviceLinkFailed);
@@ -533,6 +534,20 @@ QWidget *RelayDock::buildSlimSyncTab()
 
     ly->addWidget(makeSep());
 
+    // ── SRT uplink ────────────────────────────────────────────────────────────
+    m_srtCheck = new QCheckBox("SRT uplink  (+0.1 tkn/hr)");
+    m_srtCheck->setStyleSheet("color:#e7ebf2; font-size:13px; font-weight:600;");
+    ly->addWidget(m_srtCheck);
+    auto *srtNote = new QLabel(
+        "More resilient ingest over UDP for weak / unstable uploads. Provisions a "
+        "UDP-capable host; applies on your next stream.");
+    srtNote->setWordWrap(true);
+    srtNote->setStyleSheet(QString("color:%1; font-size:11px").arg(C_MUTE));
+    ly->addWidget(srtNote);
+    connect(m_srtCheck, &QCheckBox::toggled, this, [this](bool on) { m_api->setSrt(on); });
+
+    ly->addWidget(makeSep());
+
     // ── Account ───────────────────────────────────────────────────────────────
     auto *title = new QLabel("Account");
     title->setStyleSheet("font-size:13px; font-weight:600; color:#e7ebf2");
@@ -614,6 +629,7 @@ void RelayDock::enterActive()
     m_api->fetchGpuStatus();
     m_api->fetchPlatforms();
     m_api->fetchEncode();
+    m_api->fetchSrt();
     if (m_healthWidget)
         m_healthWidget->setApiKey(m_apiKeyEdit->text().trimmed());
 }
@@ -1015,6 +1031,13 @@ void RelayDock::onEncodeUpdated(EncodeConfig encode)
         m_landscapeSpin->setValue(encode.landscape);
     if (!m_portraitSpin->hasFocus())
         m_portraitSpin->setValue(encode.portrait);
+}
+
+void RelayDock::onSrtUpdated(bool enabled)
+{
+    if (!m_srtCheck) return;
+    QSignalBlocker block(m_srtCheck);   // reflect server state without echoing a PATCH
+    m_srtCheck->setChecked(enabled);
 }
 
 void RelayDock::onChannelToggled(const QString &platform, bool enabled)

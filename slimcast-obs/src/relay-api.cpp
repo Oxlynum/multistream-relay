@@ -335,3 +335,16 @@ void RelayApi::setEncode(int landscapeKbps, int portraitKbps)
          {{"landscape_bitrate_kbps", landscapeKbps}, {"portrait_bitrate_kbps", portraitKbps}},
          [] {});
 }
+
+void RelayApi::fetchSrt()
+{
+    dispatch(m_nam->get(makeRequest("/api/srt")), [this](const QByteArray &data) {
+        auto doc = QJsonDocument::fromJson(data);
+        if (!doc.isObject()) return;
+        emit srtUpdated(doc.object()["srt_enabled"].toBool(false));
+    });
+}
+void RelayApi::setSrt(bool enabled)
+{
+    send("PATCH", "/api/srt", {{"srt_enabled", enabled}}, [] {});
+}

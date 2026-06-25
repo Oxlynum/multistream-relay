@@ -71,6 +71,8 @@ public:
     void setPlatformEnabled(const QString &platform, bool enabled);
     void fetchEncode();
     void setEncode(int landscapeKbps, int portraitKbps);
+    void fetchSrt();
+    void setSrt(bool enabled);
 
 signals:
     void gpuStatusUpdated(GpuInfo info);
@@ -79,6 +81,7 @@ signals:
     void gpuDestroyed();
     void platformsUpdated(QList<PlatformConfig> platforms);
     void encodeUpdated(EncodeConfig encode);
+    void srtUpdated(bool enabled);
     void networkError(QString message);
     void deviceLinked(QString apiKey);     // device link succeeded → raw key
     void deviceLinkFailed(QString message);
