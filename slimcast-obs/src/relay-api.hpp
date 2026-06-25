@@ -15,7 +15,7 @@ struct GpuInfo {
     QString ip;
     QString rtmpUrl;           // rtmp://{ip}:{port}
     QString ingestKey;         // per-pod RTMP path secret
-    QString datacenter;        // RunPod DC id, e.g. "US-TX-3"
+    QString datacenter;        // placement label: RunPod DC id ("US-TX-3") or Vast offer label
     double  creditsTokens = 0; // balance in tokens (3dp)
     double  burnRate      = 0; // tokens/hr
     bool    streaming     = false;

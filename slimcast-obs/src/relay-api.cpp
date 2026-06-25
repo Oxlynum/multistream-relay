@@ -103,13 +103,16 @@ void RelayApi::fetchGpuStatus()
 
 void RelayApi::provisionGpu()
 {
-    // Provisioning includes the broker's capacity search + the pod boot, which
-    // can take ~45s — so this request needs a much longer timeout than the
-    // default. Success/failure is also surfaced so the dock can narrate it.
+    // Provisioning includes the broker's capacity search + the pod boot. The
+    // broker may cascade across providers and wait out a readiness gate (up to
+    // 180s per boot for a Vast fresh-host image pull), and the whole request is
+    // bounded server-side by Vercel's 300s function limit — so the client must
+    // wait that full window, or it would abort a provision that's about to
+    // succeed. Success/failure is surfaced so the dock can narrate it.
     QNetworkRequest req(QUrl(BASE_URL + "/api/gpu/provision"));
     req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
     req.setRawHeader("Authorization", ("Bearer " + m_apiKey).toUtf8());
-    req.setTransferTimeout(180000);   // 3 min for broker + RunPod boot
+    req.setTransferTimeout(300000);   // 5 min — matches the server's max provision window
 
     m_provisionReply = m_nam->post(req, QByteArray("{}"));
     connect(m_provisionReply, &QNetworkReply::finished, this, [this]() {
