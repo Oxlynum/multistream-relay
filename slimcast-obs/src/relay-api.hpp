@@ -14,6 +14,7 @@ struct GpuInfo {
     QString status;            // "provisioning" | "running" | "stopped"
     QString ip;
     QString rtmpUrl;           // rtmp://{ip}:{port}
+    QString srtUrl;            // srt://{ip}:{port}?streamid=publish:{key} when SRT mode (else empty)
     QString ingestKey;         // per-pod RTMP path secret
     QString datacenter;        // placement label: RunPod DC id ("US-TX-3") or Vast offer label
     double  creditsTokens = 0; // balance in tokens (3dp)

@@ -731,13 +731,20 @@ void RelayDock::onGpuStatusUpdated(GpuInfo info)
     // Agent paired → status flips 'provisioning' → 'running'. That means
     // MediaMTX is up and RTMP is accepting. Set OBS's URL and start streaming.
     if (m_autoLaunching && info.status == "running") {
-        if (!info.rtmpUrl.isEmpty()) {
+        // SRT mode (UDP-capable host) takes precedence: the server returns srt_url
+        // and the publish key is embedded in its streamid, so OBS's key field is
+        // empty. Otherwise use RTMP. Both share OBS's rtmp_custom service — OBS
+        // routes by the URL scheme (srt:// → SRT output).
+        if (!info.srtUrl.isEmpty() || !info.rtmpUrl.isEmpty()) {
             // Port mapping is in the DB — we have everything we need.
             if (m_launchTimeout) m_launchTimeout->stop();
             m_autoLaunching  = false;
             m_resumingStream = true;
             setStatus("Connecting…", C_WARN);
-            applyObsStreamUrl(info.rtmpUrl, info.ingestKey);
+            if (!info.srtUrl.isEmpty())
+                applyObsStreamUrl(info.srtUrl, QString());
+            else
+                applyObsStreamUrl(info.rtmpUrl, info.ingestKey);
             obs_frontend_streaming_start();
         }
         // rtmpUrl is null: pod paired but provision hasn't saved the public port
@@ -1117,7 +1124,12 @@ void RelayDock::applyObsStreamUrl(const QString &server, const QString &key)
 // (Go Live configures everything itself).
 QString RelayDock::obsServiceIssue()
 {
-    if (m_lastGpuInfo.status != "running" || m_lastGpuInfo.rtmpUrl.isEmpty())
+    // In SRT mode the expected output is the srt:// URL with an empty key (the
+    // publish key rides in the streamid); otherwise the rtmp:// URL + ingest key.
+    const bool srt = !m_lastGpuInfo.srtUrl.isEmpty();
+    const QString expectServer = srt ? m_lastGpuInfo.srtUrl : m_lastGpuInfo.rtmpUrl;
+    const QString expectKey    = srt ? QString() : m_lastGpuInfo.ingestKey;
+    if (m_lastGpuInfo.status != "running" || expectServer.isEmpty())
         return "";
     obs_service_t *svc = obs_frontend_get_streaming_service();  // borrowed
     const char *type = svc ? obs_service_get_type(svc) : nullptr;
@@ -1127,7 +1139,7 @@ QString RelayDock::obsServiceIssue()
     const QString curServer = QString::fromUtf8(obs_data_get_string(s, "server"));
     const QString curKey = QString::fromUtf8(obs_data_get_string(s, "key"));
     obs_data_release(s);
-    if (curKey != m_lastGpuInfo.ingestKey || curServer != m_lastGpuInfo.rtmpUrl)
+    if (curKey != expectKey || curServer != expectServer)
         return "OBS isn't pointed at your current SlimCast server. Stop and press "
                "Go Live again.";
     return "";

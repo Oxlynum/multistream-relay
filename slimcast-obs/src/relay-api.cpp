@@ -74,6 +74,7 @@ void RelayApi::fetchGpuStatus()
         info.status         = obj["status"].toString("stopped");
         info.ip             = obj["ip"].toString();
         info.rtmpUrl        = obj["rtmp_url"].toString();
+        info.srtUrl         = obj["srt_url"].toString();
         info.ingestKey      = obj["ingest_key"].toString();
         info.datacenter     = obj["datacenter"].toString();
         // Prefer the token field (3dp float); fall back to credits_seconds ÷ 3600
