@@ -1,6 +1,22 @@
 # Multistream relay: NVENC-capable FFmpeg + MediaMTX ingest + control panel.
-# Requires the NVIDIA container runtime at run time (RunPod provides this).
-FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
+# Requires the NVIDIA container runtime at run time (the host provides the driver).
+#
+# Base is the SMALL `-base` CUDA image (~150MB), NOT `-runtime` (~1.37GB). The
+# CUDA toolkit runtime (libcudart/libnpp/cuBLAS) is deliberately excluded: the
+# relay's entire GPU surface is driver-level — NVENC encode (libnvidia-encode),
+# NVDEC decode (libnvcuvid), and `-hwaccel cuda` (libcuda, the CUDA Driver API) —
+# all mounted from the host by the NVIDIA container runtime, never shipped here.
+# See the dependency audit; nothing in the pipeline calls the CUDA runtime API.
+FROM nvidia/cuda:12.4.1-base-ubuntu22.04
+
+# Declare the GPU + driver capabilities the relay needs, so it works on ANY host
+# regardless of the runtime's defaults. The `nvidia/cuda` base defaults to
+# `compute,utility` which OMITS `video` — without `video`, NVENC/NVDEC libs aren't
+# mounted and every transcode fails. RunPod silently sets `all`; other hosts
+# (e.g. Vast) may not, so we set it explicitly:
+#   compute = libcuda (-hwaccel cuda) · video = NVENC/NVDEC · utility = nvidia-smi
+ENV NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
 
 ARG MEDIAMTX_VERSION=v1.19.1
 ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1
