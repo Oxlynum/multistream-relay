@@ -98,13 +98,17 @@ function probeUdp(host: string, port: number, timeoutMs = 8000): Promise<boolean
 
 interface PodAddr { ip: string; port: number; hlsPort: number | null; dataCenterId: string | null; srtPort: number | null; udpProbePort: number | null }
 
-/** Poll until the pod reports a public IP + mapped RTMP port (booted), or time out. */
-async function waitForIp(provider: GpuProvider, podId: string): Promise<PodAddr | null> {
+/** Poll until the pod reports a public IP + mapped ports (booted), or time out.
+ * In SRT mode we also wait for the UDP ports (SRT + probe) to map — Vast maps UDP
+ * ports a few seconds AFTER the TCP ones, so returning on the RTMP port alone would
+ * make the SRT readiness check see null ports and wrongly reject the pod. */
+async function waitForIp(provider: GpuProvider, podId: string, srtMode = false): Promise<PodAddr | null> {
   const deadline = Date.now() + READINESS_TIMEOUT_MS
   while (Date.now() < deadline) {
     try {
       const s = await provider.getStatus(podId)
-      if (s.ip && s.port) return { ip: s.ip, port: s.port, hlsPort: s.hlsPort ?? null, dataCenterId: s.dataCenterId ?? null, srtPort: s.srtPort ?? null, udpProbePort: s.udpProbePort ?? null }
+      const ready = s.ip && s.port && (!srtMode || (s.srtPort && s.udpProbePort))
+      if (ready) return { ip: s.ip!, port: s.port!, hlsPort: s.hlsPort ?? null, dataCenterId: s.dataCenterId ?? null, srtPort: s.srtPort ?? null, udpProbePort: s.udpProbePort ?? null }
       if (s.status === 'error' || s.status === 'terminated') return null
     } catch {
       // transient API error — keep polling within the budget
@@ -213,9 +217,10 @@ export async function provisionGpu(args: {
       continue
     }
 
-    // Got inventory — make sure it actually boots (IP + mapped RTMP port).
+    // Got inventory — make sure it actually boots (IP + mapped ports; in SRT mode
+    // that includes the UDP ports, which Vast maps a few seconds after the TCP ones).
     bootAttempts++
-    const addr = await waitForIp(provider, podId)
+    const addr = await waitForIp(provider, podId, srtMode)
     if (!addr) {
       try { await provider.destroy(podId) } catch { /* best effort */ }
       lastError = 'pod created but failed to boot'
