@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -134,6 +135,29 @@ def start_uvicorn() -> subprocess.Popen:
     ])
 
 
+def start_udp_echo(port: int = 8889) -> None:
+    """Tiny UDP echo for the broker's SRT/UDP-forwarding probe.
+
+    The broker (SRT mode) sends a datagram to this port's host-mapped address and
+    requires an 'ECHO:' reply, proving the host actually forwards UDP before it
+    commits to SRT ingest. Only externally reachable on UDP-capable hosts (Vast,
+    which maps the EXPOSE'd 8889/udp); a no-op everywhere else. Runs in a daemon
+    thread so it never blocks the agent.
+    """
+    def _serve() -> None:
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.bind(("0.0.0.0", port))
+            log.info("UDP echo (SRT probe) listening on :%d", port)
+            while True:
+                data, addr = sock.recvfrom(2048)
+                sock.sendto(b"ECHO:" + data, addr)
+        except Exception as exc:  # never crash the agent over the probe
+            log.warning("UDP echo stopped: %s", exc)
+
+    threading.Thread(target=_serve, daemon=True).start()
+
+
 def build_outputs(config: dict) -> list[dict]:
     return config.get("outputs", [])
 
@@ -158,6 +182,7 @@ def main() -> None:
 
     mediamtx_proc = start_mediamtx()
     uvicorn_proc = start_uvicorn()
+    start_udp_echo()   # SRT/UDP-forwarding probe responder (broker readiness check)
 
     sup = Supervisor()
 

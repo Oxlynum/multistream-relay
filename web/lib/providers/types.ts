@@ -35,6 +35,8 @@ export interface PodStatus {
   port: number | null          // public mapped port for the RTMP ingest (1935)
   hlsPort: number | null       // public mapped port for the HLS preview server (8888)
   dataCenterId: string | null  // actual location the pod landed in (for the placement sanity check)
+  srtPort?: number | null      // public mapped UDP port for SRT ingest (8890/udp); null if not mapped
+  udpProbePort?: number | null // public mapped UDP echo port (8889/udp) used to verify the host forwards UDP
 }
 
 // A cloud GPU provider. RunPod (secure) is implemented today; Vast.ai slots in as

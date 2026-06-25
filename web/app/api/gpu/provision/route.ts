@@ -168,7 +168,7 @@ export async function POST(request: Request) {
   const [{ data: profileBitrates }, { data: platformRows }] = await Promise.all([
     supabase
       .from('profiles')
-      .select('landscape_bitrate_kbps, portrait_bitrate_kbps')
+      .select('landscape_bitrate_kbps, portrait_bitrate_kbps, srt_enabled')
       .eq('id', userId)
       .single(),
     supabase
@@ -179,6 +179,7 @@ export async function POST(request: Request) {
 
   const landscapeCap: number = (profileBitrates as { landscape_bitrate_kbps?: number } | null)?.landscape_bitrate_kbps ?? 6000
   const portraitCap: number  = (profileBitrates as { portrait_bitrate_kbps?: number } | null)?.portrait_bitrate_kbps ?? 4000
+  const srtMode: boolean      = !!(profileBitrates as { srt_enabled?: boolean } | null)?.srt_enabled
 
   const userOutputs: UserOutputConfig[] = (platformRows ?? []).map((p: {
     platform: string; orientation: string | null; enabled: boolean; bitrate_kbps: number | null
@@ -207,6 +208,7 @@ export async function POST(request: Request) {
       { key: 'SLIMCAST_INGEST_KEY', value: ingestKey },
     ],
     userOutputs,
+    srtMode,
   })
 
   if (!result.ok) {
@@ -238,6 +240,7 @@ export async function POST(request: Request) {
       ip_address: result.ip ?? null,
       ingest_port: result.port ?? null,
       hls_port: result.hlsPort ?? null,
+      srt_port: result.srtPort ?? null,
       ingest_key: ingestKey,
       provider: result.provider,
       gpu_type: result.gpuKey,

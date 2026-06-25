@@ -203,12 +203,16 @@ export const vastProvider: GpuProvider = {
     const ip = inst.public_ipaddr ?? null
     const rtmp = inst.ports?.['1935/tcp']?.[0]?.HostPort
     const hls = inst.ports?.['8888/tcp']?.[0]?.HostPort
+    const srt = inst.ports?.['8890/udp']?.[0]?.HostPort       // SRT ingest (UDP)
+    const udpProbe = inst.ports?.['8889/udp']?.[0]?.HostPort  // UDP echo for the forwarding check
     return {
       status: inst.cur_state ?? inst.actual_status ?? 'unknown',
       ip: rtmp && ip ? ip : null,      // ready only once the RTMP port is mapped
       port: rtmp ? Number(rtmp) : null,
       hlsPort: hls ? Number(hls) : null,
       dataCenterId: null,              // Vast has no datacenter id; placement is by offer
+      srtPort: srt ? Number(srt) : null,
+      udpProbePort: udpProbe ? Number(udpProbe) : null,
     }
   },
 

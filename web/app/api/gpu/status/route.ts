@@ -26,7 +26,7 @@ export async function GET(request: Request) {
 
   const { data: instance } = await supabase
     .from('gpu_instances')
-    .select('status, ip_address, ingest_port, hls_port, ingest_key, last_seen_at, burn_rate, outputs, streaming, max_session_at, datacenter, gpu_type')
+    .select('status, ip_address, ingest_port, hls_port, srt_port, ingest_key, last_seen_at, burn_rate, outputs, streaming, max_session_at, datacenter, gpu_type')
     .eq('user_id', userId)
     .maybeSingle()
 
@@ -43,6 +43,7 @@ export async function GET(request: Request) {
       status: 'stopped',
       ip: null,
       rtmp_url: null,
+      srt_url: null,
       ingest_key: null,
       credits,
       credits_seconds: Math.round(credits * 3600),
@@ -77,12 +78,19 @@ export async function GET(request: Request) {
   const server = instance.ip_address && instance.ingest_port
     ? `rtmp://${instance.ip_address}:${instance.ingest_port}`
     : null
-  console.log(`[gpu/status] effectiveStatus=${effectiveStatus} streaming=${instance.streaming} ip=${instance.ip_address} port=${instance.ingest_port} hls_port=${instance.hls_port ?? 'null'} key=${instance.ingest_key ? instance.ingest_key.slice(0,8)+'…' : 'null'} rtmp_url=${server}`)
+  // SRT uplink: when the pod has an SRT port, the plugin should publish SRT instead
+  // of RTMP. The streamid carries the per-pod ingest path (publish:<key>), so the
+  // key both routes the publish and gates access — same secret as the RTMP path.
+  const srtUrl = instance.ip_address && instance.srt_port && instance.ingest_key
+    ? `srt://${instance.ip_address}:${instance.srt_port}?streamid=publish:${instance.ingest_key}`
+    : null
+  console.log(`[gpu/status] effectiveStatus=${effectiveStatus} streaming=${instance.streaming} ip=${instance.ip_address} port=${instance.ingest_port} hls_port=${instance.hls_port ?? 'null'} srt_port=${instance.srt_port ?? 'null'} key=${instance.ingest_key ? instance.ingest_key.slice(0,8)+'…' : 'null'} rtmp_url=${server}`)
 
   return Response.json({
     status: effectiveStatus,
     ip: instance.ip_address ?? null,
     rtmp_url: server,
+    srt_url: srtUrl,
     ingest_key: instance.ingest_key ?? null,
     credits,
     credits_seconds: Math.round(credits * 3600),

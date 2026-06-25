@@ -50,14 +50,16 @@ RUN pip3 install --no-cache-dir -r requirements.txt
 COPY . .
 RUN chmod +x start.sh hook.sh 2>/dev/null || true
 
-# 1935 = RTMP ingest (TCP) ; 8080 = control panel (debug) ; 8890/udp = SRT ingest.
-# SRT (UDP) is for the optional "SRT uplink" mode on UDP-capable hosts (Vast
+# 1935 = RTMP ingest (TCP) ; 8080 = control panel (debug)
+# 8890/udp = SRT ingest ; 8889/udp = UDP echo (broker's per-host UDP-forwarding probe).
+# SRT/UDP is for the optional "SRT uplink" mode on UDP-capable hosts (Vast
 # datacenter). On RunPod only the ports in runpod.ts createPod are opened (1935),
-# so EXPOSE'ing 8890/udp here is a no-op there and only takes effect on Vast, which
-# maps the image's EXPOSE'd ports. MediaMTX already accepts SRT publish on 8890;
-# OBS publishes srt://<pod>:<mapped>?streamid=publish:<ingest-key>. Access is still
-# gated by the per-pod ingest-key path, same as RTMP.
-EXPOSE 1935 8080 8890/udp
+# so EXPOSE'ing the UDP ports here is a no-op there and only takes effect on Vast,
+# which maps the image's EXPOSE'd ports. MediaMTX already accepts SRT publish on
+# 8890; OBS publishes srt://<pod>:<mapped>?streamid=publish:<ingest-key>. Access is
+# still gated by the per-pod ingest-key path, same as RTMP. The 8889 echo lets the
+# broker verify the host actually forwards UDP before committing to SRT.
+EXPOSE 1935 8080 8890/udp 8889/udp
 
 # agent.py is the production entrypoint.
 # It handles pairing with Vercel, starting MediaMTX, and polling config.

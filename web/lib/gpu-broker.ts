@@ -1,4 +1,5 @@
 import net from 'net'
+import dgram from 'dgram'
 
 // GPU availability broker.
 //
@@ -70,13 +71,40 @@ function probeRtmp(host: string, port: number, timeoutMs = 10000): Promise<boole
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 
+// UDP forwarding probe (SRT mode): the relay runs a tiny UDP echo on 8889/udp.
+// We send a datagram to its mapped port and require an "ECHO:" reply — this proves
+// the host actually FORWARDS UDP (not all do, even Vast datacenter hosts), which is
+// the prerequisite for SRT ingest. Retransmits because UDP is lossy.
+function probeUdp(host: string, port: number, timeoutMs = 8000): Promise<boolean> {
+  return new Promise(resolve => {
+    const socket = dgram.createSocket('udp4')
+    let done = false
+    const finish = (ok: boolean) => {
+      if (done) return
+      done = true
+      clearTimeout(timer); clearInterval(retx)
+      try { socket.close() } catch { /* already closed */ }
+      resolve(ok)
+    }
+    const timer = setTimeout(() => finish(false), timeoutMs)
+    const msg = Buffer.from('slimcast-udp-probe')
+    socket.on('message', m => finish(m.toString().startsWith('ECHO:')))
+    socket.on('error', () => finish(false))
+    socket.send(msg, port, host)
+    let n = 0
+    const retx = setInterval(() => { if (!done && n++ < 6) socket.send(msg, port, host) }, 1000)
+  })
+}
+
+interface PodAddr { ip: string; port: number; hlsPort: number | null; dataCenterId: string | null; srtPort: number | null; udpProbePort: number | null }
+
 /** Poll until the pod reports a public IP + mapped RTMP port (booted), or time out. */
-async function waitForIp(provider: GpuProvider, podId: string): Promise<{ ip: string; port: number; hlsPort: number | null; dataCenterId: string | null } | null> {
+async function waitForIp(provider: GpuProvider, podId: string): Promise<PodAddr | null> {
   const deadline = Date.now() + READINESS_TIMEOUT_MS
   while (Date.now() < deadline) {
     try {
       const s = await provider.getStatus(podId)
-      if (s.ip && s.port) return { ip: s.ip, port: s.port, hlsPort: s.hlsPort ?? null, dataCenterId: s.dataCenterId ?? null }
+      if (s.ip && s.port) return { ip: s.ip, port: s.port, hlsPort: s.hlsPort ?? null, dataCenterId: s.dataCenterId ?? null, srtPort: s.srtPort ?? null, udpProbePort: s.udpProbePort ?? null }
       if (s.status === 'error' || s.status === 'terminated') return null
     } catch {
       // transient API error — keep polling within the budget
@@ -93,6 +121,7 @@ export interface ProvisionResult {
   ip?: string
   port?: number
   hlsPort?: number | null
+  srtPort?: number | null
   gpuKey?: string
   datacenter?: string
   pricePerHr?: number
@@ -100,10 +129,13 @@ export interface ProvisionResult {
   error?: string
 }
 
-/** Build the distance-then-price ranked candidate list across all providers. */
-async function rankedCandidates(lat: number, lon: number, needsProfessionalGpu: boolean): Promise<Array<{ c: GpuCandidate; distKm: number }>> {
+/** Build the distance-then-price ranked candidate list across all providers.
+ * srtMode restricts to UDP-capable providers (Vast) — RunPod is TCP-only, so it
+ * can't carry SRT and is excluded entirely. */
+async function rankedCandidates(lat: number, lon: number, needsProfessionalGpu: boolean, srtMode: boolean): Promise<Array<{ c: GpuCandidate; distKm: number }>> {
+  const providers = srtMode ? ACTIVE_PROVIDERS.filter(p => p.name === 'vast') : ACTIVE_PROVIDERS
   const lists = await Promise.all(
-    ACTIVE_PROVIDERS.map(async p => {
+    providers.map(async p => {
       try {
         return await p.listCandidates({ maxPricePerHr: PRICE_CEILING, needsProfessionalGpu })
       } catch (err) {
@@ -130,20 +162,23 @@ export async function provisionGpu(args: {
   imageTag: string
   env: PodEnv[]
   userOutputs?: UserOutputConfig[]
+  srtMode?: boolean
 }): Promise<ProvisionResult> {
   const nvencSessions = args.userOutputs ? requiredNvencSessions(args.userOutputs) : 0
   const needsProfessionalGpu = nvencSessions > 3
   if (needsProfessionalGpu) {
     console.log(`[broker] user needs ${nvencSessions} NVENC sessions — skipping consumer GPUs`)
   }
+  const srtMode = !!args.srtMode
+  if (srtMode) console.log('[broker] SRT mode — restricting to UDP-capable (Vast) hosts')
 
-  const candidates = await rankedCandidates(args.lat, args.lon, needsProfessionalGpu)
+  const candidates = await rankedCandidates(args.lat, args.lon, needsProfessionalGpu, srtMode)
   if (candidates.length === 0) {
-    return { ok: false, attempts: 0, error: 'no candidates available' }
+    return { ok: false, attempts: 0, error: srtMode ? 'no SRT-capable (Vast) host available right now' : 'no candidates available' }
   }
   const providerByName = new Map(ACTIVE_PROVIDERS.map(p => [p.name, p]))
   const nearest = candidates[0]
-  console.log(`[broker] ${candidates.length} candidates across ${ACTIVE_PROVIDERS.length} provider(s); nearest: ${nearest.c.label} (${nearest.distKm.toFixed(0)}km, ${nearest.c.gpuKey} $${nearest.c.pricePerHr})`)
+  console.log(`[broker] ${candidates.length} candidates${srtMode ? ' (SRT/Vast)' : ` across ${ACTIVE_PROVIDERS.length} provider(s)`}; nearest: ${nearest.c.label} (${nearest.distKm.toFixed(0)}km, ${nearest.c.gpuKey} $${nearest.c.pricePerHr})`)
 
   let attempts = 0
   let bootAttempts = 0
@@ -210,6 +245,27 @@ export async function provisionGpu(args: {
       continue
     }
 
+    // SRT mode: the host must (a) have mapped the SRT port and (b) actually forward
+    // UDP — verified with the echo probe. Not all hosts forward UDP even when they
+    // map the port, so a host that fails here is rejected and we cascade.
+    if (srtMode) {
+      if (!addr.srtPort || !addr.udpProbePort) {
+        console.warn(`[broker] pod ${podId} SRT/UDP ports not mapped (srt=${addr.srtPort} probe=${addr.udpProbePort}) — cascading`)
+        try { await provider.destroy(podId) } catch { /* best effort */ }
+        lastError = 'SRT ports not mapped'
+        if (bootAttempts >= MAX_BOOT_ATTEMPTS) return { ok: false, attempts, error: 'too many failed boots' }
+        continue
+      }
+      if (!(await probeUdp(addr.ip, addr.udpProbePort))) {
+        console.warn(`[broker] pod ${podId} host does not forward UDP (probe ${addr.ip}:${addr.udpProbePort}) — cascading`)
+        try { await provider.destroy(podId) } catch { /* best effort */ }
+        lastError = 'host does not forward UDP (SRT not possible)'
+        if (bootAttempts >= MAX_BOOT_ATTEMPTS) return { ok: false, attempts, error: 'too many failed boots' }
+        continue
+      }
+      console.log(`[broker] pod ${podId} SRT ready: udp forwards, srt port ${addr.srtPort}`)
+    }
+
     return {
       ok: true,
       provider: c.provider,
@@ -217,6 +273,7 @@ export async function provisionGpu(args: {
       ip: addr.ip,
       port: addr.port,
       hlsPort: addr.hlsPort,
+      srtPort: srtMode ? addr.srtPort : null,
       gpuKey: c.gpuKey,
       datacenter: c.label,
       pricePerHr: actualCost ?? c.pricePerHr,

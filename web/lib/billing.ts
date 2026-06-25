@@ -39,6 +39,8 @@ export interface BillingContext {
   has1440p: boolean
   /** True when the user's output mix requires >3 NVENC sessions (professional GPU). */
   needsProfessionalGpu: boolean
+  /** True when the SRT uplink mode is enabled (+0.1 token/hr). */
+  srtEnabled: boolean
 }
 
 /**
@@ -69,6 +71,9 @@ export function computeBurnRate(ctx: BillingContext, streaming: boolean): number
   // Pro streaming surcharge (4+ simultaneous NVENC sessions)
   if (ctx.needsProfessionalGpu) rate += 0.5
 
+  // SRT uplink add-on (UDP-capable host, more resilient ingest)
+  if (ctx.srtEnabled) rate += 0.1
+
   return Math.round(rate * 1000) / 1000
 }
 
@@ -81,9 +86,10 @@ export function buildBillingContext(
   outputSettings: OutputSettingsMap,
   has2kAddon: boolean,
   streaming: boolean,
+  srtEnabled = false,
 ): BillingContext {
   if (!streaming) {
-    return { landscapePlatforms: [], portraitPlatforms: [], passthroughPlatforms: [], has1440p: false, needsProfessionalGpu: false }
+    return { landscapePlatforms: [], portraitPlatforms: [], passthroughPlatforms: [], has1440p: false, needsProfessionalGpu: false, srtEnabled: false }
   }
 
   const enabled = platforms.filter(p => p.enabled)
@@ -116,7 +122,7 @@ export function buildBillingContext(
   }))
   const needsProfessionalGpu = requiredNvencSessions(userOutputs) > 3
 
-  return { landscapePlatforms, portraitPlatforms, passthroughPlatforms, has1440p, needsProfessionalGpu }
+  return { landscapePlatforms, portraitPlatforms, passthroughPlatforms, has1440p, needsProfessionalGpu, srtEnabled }
 }
 
 /** Per-line-item breakdown for the pricing UI. */
@@ -193,6 +199,11 @@ export function buildPricingBreakdown(ctx: BillingContext): PricingBreakdown {
   // Pro streaming surcharge
   if (ctx.needsProfessionalGpu) {
     items.push({ platform: '_pro', label: 'Pro streaming', detail: 'Your output mix', tokens_per_hr: 0.5 })
+  }
+
+  // SRT uplink add-on
+  if (ctx.srtEnabled) {
+    items.push({ platform: '_srt', label: 'SRT uplink', detail: 'Resilient UDP ingest', tokens_per_hr: 0.1 })
   }
 
   const total = items.reduce((s, i) => s + i.tokens_per_hr, 0)
