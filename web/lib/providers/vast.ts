@@ -8,7 +8,11 @@ import type { GpuProvider, GpuCandidate, PodStatus, CreatedPod } from './types'
 // Verified against the live API with scripts/test-vast.mjs (offer search) and
 // scripts/test-vast-rent.mjs (rent → ports → destroy lifecycle).
 
-const BASE = 'https://console.vast.ai/api/v0'
+const BASE_V0 = 'https://console.vast.ai/api/v0'
+const BASE_V1 = 'https://console.vast.ai/api/v1'
+// Convenience alias for the majority of calls (offer search, create, destroy) which
+// are still on v0. Instance status/list migrated to v1 (v0 /instances/ deprecated).
+const BASE = BASE_V0
 const VAST_API_KEY = process.env.VAST_API_KEY
 
 function authHeaders(): Record<string, string> {
@@ -25,7 +29,7 @@ const MIN_DOWNLOAD_MBPS = 300   // host pulls the multi-GB relay image on every 
                                 // slow download → cold-start blows the readiness window
                                 // (verified: 801 Mbps host mapped RTMP in ~83s)
 const MIN_RELIABILITY = 0.95    // host uptime score (reliability2)
-const MIN_DIRECT_PORTS = 2      // need RTMP (1935) + HLS (8888) mapped
+const MIN_DIRECT_PORTS = 3      // need RTMP (1935) + SRT (8890/udp) + UDP probe (8889/udp)
 
 // Bandwidth cost is the make-or-break for a streaming workload: Vast bills per TB
 // (RunPod doesn't), and host rates range $0.001–$40/TB. So we price offers ALL-IN
@@ -131,7 +135,7 @@ export const vastProvider: GpuProvider = {
     }
     let offers: VastOffer[]
     try {
-      const res = await fetch(`${BASE}/bundles?q=${encodeURIComponent(JSON.stringify(q))}`, { headers: authHeaders(), signal: AbortSignal.timeout(8000) })
+      const res = await fetch(`${BASE}/bundles/?q=${encodeURIComponent(JSON.stringify(q))}`, { headers: authHeaders(), signal: AbortSignal.timeout(8000) })
       if (!res.ok) { console.error(`[vast] offer search → ${res.status}`); return [] }
       offers = ((await res.json()).offers ?? []) as VastOffer[]
     } catch (err) {
@@ -172,31 +176,19 @@ export const vastProvider: GpuProvider = {
 
   async create({ candidate, name, imageTag, env }): Promise<CreatedPod> {
     const offerId = candidate.placement.offerId as number
-    // Vast's documented API format for port mapping: Docker -p flags as keys in the
-    // `env` dict with "1" as the value. EXPOSE in the Dockerfile is NOT enough —
-    // Vast only NAT-forwards ports that are explicitly requested at rent time.
-    // Without this the agent boots and phones home outbound (heartbeats work), but
-    // no inbound ports are mapped → waitForIp sees null ports forever.
-    //
-    // Ports mapped here:
-    //   1935/tcp = RTMP ingest (OBS → pod, always needed)
-    //   8890/udp = SRT ingest (OBS → pod in SRT mode; harmless in RTMP mode)
-    //   8889/udp = UDP echo probe (broker readiness gate for SRT mode)
-    // External ports are randomly assigned by Vast; we read them back via getStatus.
-    // HLS (8888/tcp) omitted — not needed for streaming.
-    const envDict: Record<string, string> = {
-      ...Object.fromEntries(env.map(e => [e.key, e.value])),
-      '-p 1935:1935': '1',
-      '-p 8890:8890/udp': '1',
-      '-p 8889:8889/udp': '1',
-    }
+    // Port mapping: Vast automatically NAT-forwards every port listed in the image's
+    // EXPOSE directive. Our relay Dockerfile has:
+    //   EXPOSE 1935 8080 8890/udp 8889/udp
+    // so Vast assigns random external ports for each on boot. We read them back via
+    // getStatus(). No `ports` field is needed in the rent body — tested live with
+    // test-vast-rent.mjs: Vast maps EXPOSE ports, silently ignores the `ports` field.
     const body: Record<string, unknown> = {
       client_id: 'me',
       image: imageTag,
       disk: 15,
       label: name,
       runtype: 'args',                                  // run the image's default CMD
-      env: envDict,
+      env: Object.fromEntries(env.map(e => [e.key, e.value])),
     }
     // Private registry pull (e.g. the relay image on ghcr.io). Set VAST_IMAGE_LOGIN
     // to a docker-login string ("-u USER -p TOKEN ghcr.io"); omit if the image is public.
@@ -213,11 +205,11 @@ export const vastProvider: GpuProvider = {
   },
 
   async getStatus(podId): Promise<PodStatus> {
-    // Use the LIST endpoint — it returns the same port dict the test script verified
-    // (test-vast-rent.mjs). The single-instance endpoint (/instances/{id}/) format
-    // was not verified against live port data and may differ. The list is slightly
-    // heavier but Vast has no per-instance endpoint with confirmed port format.
-    const res = await fetch(`${BASE}/instances/`, { headers: authHeaders(), signal: AbortSignal.timeout(8000) })
+    // Use the v1 LIST endpoint — /api/v0/instances/ was deprecated by Vast and now
+    // returns {"error":"deprecated_endpoint"}, so getStatus silently saw every pod
+    // as "terminated" (empty list → inst not found). v1 uses the same instances[]
+    // array structure; port keys are identical ('1935/tcp', '8890/udp', etc.).
+    const res = await fetch(`${BASE_V1}/instances/`, { headers: authHeaders(), signal: AbortSignal.timeout(8000) })
     if (!res.ok) return { status: 'unknown', ip: null, port: null, hlsPort: null, dataCenterId: null }
     const arr = ((await res.json()).instances ?? []) as Array<{
       id: number; cur_state?: string; actual_status?: string; public_ipaddr?: string
@@ -257,7 +249,7 @@ export const vastProvider: GpuProvider = {
   async listInstances(): Promise<Array<{ id: string; name: string }>> {
     if (!VAST_API_KEY) return []
     try {
-      const res = await fetch(`${BASE}/instances/`, { headers: authHeaders(), signal: AbortSignal.timeout(8000) })
+      const res = await fetch(`${BASE_V1}/instances/`, { headers: authHeaders(), signal: AbortSignal.timeout(8000) })
       if (!res.ok) { console.error(`[vast] list instances → ${res.status}`); return [] }
       const arr = ((await res.json()).instances ?? []) as Array<{ id: number; label?: string | null }>
       return arr.map(i => ({ id: String(i.id), name: i.label ?? '' }))
