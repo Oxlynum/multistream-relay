@@ -64,7 +64,7 @@ bool obs_module_load(void)
     obs_frontend_add_dock_by_id(
         "slimcast-dock",
         "SlimCast",
-        s_dock->widget()
+        s_dock
     );
 
     obs_frontend_add_event_callback(frontendEventCb, s_dock);

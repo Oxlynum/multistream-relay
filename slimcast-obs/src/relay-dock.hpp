@@ -1,5 +1,5 @@
 #pragma once
-#include <QDockWidget>
+#include <QWidget>
 #include <QLabel>
 #include <QLineEdit>
 #include <QCheckBox>
@@ -26,7 +26,7 @@ struct ChannelRow {
 // per-group bitrate cap — writes the same Supabase config the website does, so
 // the dock and slimcast.com always stay in sync. Resolution + frame rate are
 // owned by OBS and shown read-only.
-class RelayDock : public QDockWidget {
+class RelayDock : public QWidget {
     Q_OBJECT
 
 public:

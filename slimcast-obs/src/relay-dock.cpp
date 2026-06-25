@@ -74,7 +74,7 @@ static bool isPassthrough(const PlatformConfig &p)
 // ── ctor ──────────────────────────────────────────────────────────────────────
 
 RelayDock::RelayDock(QWidget *parent)
-    : QDockWidget(parent)
+    : QWidget(parent)
     , m_api(new RelayApi(this))
     , m_pollTimer(new QTimer(this))
 {
@@ -149,7 +149,11 @@ void RelayDock::buildUi()
     tabs->addTab(buildSlimSyncTab(), "Account");
 
     m_pages->addWidget(tabs);               // index 1
-    setWidget(m_pages);
+
+    auto *lay = new QVBoxLayout(this);
+    lay->setContentsMargins(0, 0, 0, 0);
+    lay->setSpacing(0);
+    lay->addWidget(m_pages);
 }
 
 QWidget *RelayDock::buildSetupPage()
