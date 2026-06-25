@@ -373,6 +373,7 @@ export default function SettingsPage() {
   const [platforms, setPlatforms] = useState<PlatformConfig[]>([])
   const [outputSettings, setOutputSettings] = useState<OutputSettingsMap>({})
   const [has2kAddon, setHas2kAddon] = useState(false)
+  const [srtEnabled, setSrtEnabled] = useState(false)
   const [pricing, setPricing] = useState<PricingBreakdown | null>(null)
   const [pricingLoading, setPricingLoading] = useState(true)
   const [loaded, setLoaded] = useState(false)
@@ -410,7 +411,7 @@ export default function SettingsPage() {
       const headers = await authHeader()
       if (!headers) { router.push('/login'); return }
 
-      const [{ data: platformData }, settingsRes, pricingRes] = await Promise.all([
+      const [{ data: platformData }, settingsRes, pricingRes, srtRes] = await Promise.all([
         supabase
           .from('platform_connections')
           .select('platform, orientation, enabled')
@@ -418,6 +419,7 @@ export default function SettingsPage() {
           .order('platform'),
         fetch('/api/output-settings', { headers }),
         fetch('/api/pricing', { headers }),
+        fetch('/api/srt', { headers }),
       ])
 
       setPlatforms((platformData ?? []) as PlatformConfig[])
@@ -426,6 +428,11 @@ export default function SettingsPage() {
         const body = await settingsRes.json()
         setOutputSettings(body.output_settings ?? {})
         setHas2kAddon(body.has_2k_addon ?? false)
+      }
+
+      if (srtRes.ok) {
+        const body = await srtRes.json()
+        setSrtEnabled(body.srt_enabled ?? false)
       }
 
       if (pricingRes.ok) {
@@ -458,6 +465,18 @@ export default function SettingsPage() {
     setSaving(platformId)
     await fetch(`/api/platforms/${platformId}`, {
       method: 'PATCH', headers, body: JSON.stringify({ orientation }),
+    })
+    setSaving(null)
+    await loadPricing(headers)
+  }
+
+  async function toggleSrt(enabled: boolean) {
+    setSrtEnabled(enabled)   // optimistic
+    const headers = await authHeader()
+    if (!headers) return
+    setSaving('_srt')
+    await fetch('/api/srt', {
+      method: 'PATCH', headers, body: JSON.stringify({ srt_enabled: enabled }),
     })
     setSaving(null)
     await loadPricing(headers)
@@ -557,6 +576,27 @@ export default function SettingsPage() {
 
         {/* Cost summary */}
         <CostSummary pricing={pricing} loading={pricingLoading} />
+
+        {/* SRT uplink toggle */}
+        <div className="bg-base border border-line rounded-xl px-4 py-3 flex items-center justify-between gap-4">
+          <div>
+            <div className="text-sm font-medium text-ink-muted">SRT uplink</div>
+            <div className="text-xs text-ink-faint mt-0.5">
+              +0.1 tkn/hr. More resilient ingest over UDP for weak/unstable uploads.
+              Runs on a UDP-capable host; applies on your next stream.
+            </div>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={srtEnabled}
+            onClick={() => toggleSrt(!srtEnabled)}
+            disabled={saving === '_srt'}
+            className={`relative w-11 h-6 rounded-full transition-colors shrink-0 disabled:opacity-50 ${srtEnabled ? 'bg-accent' : 'bg-elevated'}`}
+          >
+            <span className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform ${srtEnabled ? 'translate-x-5' : ''}`} />
+          </button>
+        </div>
 
         {/* 2K add-on notice */}
         {!has2kAddon && (
