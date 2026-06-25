@@ -34,6 +34,7 @@ import {
   MAX_RTT_REJECTIONS,
   type Datacenter,
 } from '@/lib/datacenters'
+import { fetchGpuStock, STOCK_NONE } from '@/lib/runpod'
 import { ACTIVE_PROVIDERS } from '@/lib/providers/runpod'
 import type { GpuCandidate, GpuProvider, PodEnv } from '@/lib/providers/types'
 import { requiredNvencSessions, type UserOutputConfig } from '@/lib/nvenc-utils'
@@ -57,7 +58,7 @@ function gpuSortScore(pricePerHr: number, gen: string): number {
 }
 
 /** Build the ranked candidate list for a user at (lat, lon). */
-export function rankCandidates(lat: number, lon: number, needsProfessionalGpu = false, datacenters: Datacenter[] = RUNPOD_DATACENTERS): GpuCandidate[] {
+export function rankCandidates(lat: number, lon: number, needsProfessionalGpu = false, datacenters: Datacenter[] = RUNPOD_DATACENTERS, stock?: Map<string, string>): GpuCandidate[] {
   // Sort every available DC by straight-line distance from the user — closest first.
   // This gives automatic subregion filtering: a Seattle user gets Pacific-coast DCs,
   // a Paris user gets Western EU DCs, etc., without any manual region selection.
@@ -98,6 +99,10 @@ export function rankCandidates(lat: number, lon: number, needsProfessionalGpu = 
     const dcIds = dcs.map(dc => dc.id)
     for (const cloudType of CLOUD_TYPES) {
       for (const gpu of gpus) {
+        // Skip combos RunPod's preflight reports as definitively out of stock —
+        // this is what eliminates the sequential failed-create churn. Unknown/
+        // absent stock is kept (fail-open): we only drop on an explicit sentinel.
+        if (stock?.get(`${gpu.runpodId}|${cloudType}`) === STOCK_NONE) continue
         candidates.push({
           gpuKey: gpu.key,
           gpuTypeId: gpu.runpodId,
@@ -170,7 +175,24 @@ export async function provisionGpu(args: {
   // We deliberately do NOT query the GraphQL `dataCenters` list: it returns a
   // wider catalog (~47) that the create endpoint rejects, which is what caused
   // every provision to fail instantly with "no capacity".
-  const candidates = rankCandidates(args.lat, args.lon, needsProfessionalGpu)
+
+  // Stock preflight: one GraphQL call per cloud tier tells us which GPU×cloud
+  // combos have inventory right now, so rankCandidates can drop the dead ones
+  // instead of the broker eating a sequential failed create() for each. Fail-open
+  // (empty map → nothing dropped) so a flaky stock query never blocks a stream.
+  const stock = await fetchGpuStock()
+  const inStock = [...stock.values()].filter(s => s !== STOCK_NONE).length
+  console.log(`[broker] stock preflight: ${stock.size} GPU×cloud combos checked, ${inStock} with inventory`)
+
+  let candidates = rankCandidates(args.lat, args.lon, needsProfessionalGpu, RUNPOD_DATACENTERS, stock)
+  // Safeguard: if the stock filter dropped EVERY candidate (e.g. RunPod briefly
+  // reports all combos empty, or a partial stock response), fall back to the
+  // unfiltered list. Better to cascade through real create() attempts than to
+  // hand the user an instant "no capacity" — the exact failure we just removed.
+  if (candidates.length === 0) {
+    console.warn('[broker] stock preflight dropped all candidates — falling back to unfiltered cascade')
+    candidates = rankCandidates(args.lat, args.lon, needsProfessionalGpu)
+  }
   let attempts = 0
   let bootAttempts = 0
   let rttRejections = 0

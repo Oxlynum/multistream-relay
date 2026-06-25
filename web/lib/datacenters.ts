@@ -110,9 +110,13 @@ export const PRIMARY_MAX_COUNT   = 6
 export const SECONDARY_MAX_KM    = 5000
 export const SECONDARY_MAX_COUNT = 8
 
-// Cloud types tried, in order. COMMUNITY is cheap; add 'SECURE' here to widen
-// availability (more reliable inventory) once the account is set up for it.
-export const CLOUD_TYPES: string[] = ['COMMUNITY']
+// Cloud types tried, in order. COMMUNITY is cheapest, so we try it first; SECURE
+// is datacenter-grade with far more reliable inventory (community is routinely
+// dry for the mid-tier NVENC cards — L4/A40/A5000) and every SECURE card in our
+// catalog still prices under the $1/hr PRICE_CEILING, so it's a safe fallback.
+// The per-(gpu,cloud) stock preflight (lib/runpod.ts fetchGpuStock) skips dead
+// combos in either tier, and the runtime cost guard enforces the ceiling.
+export const CLOUD_TYPES: string[] = ['COMMUNITY', 'SECURE']
 
 // Readiness gate: after a pod is created we poll until it has a public IP
 // (i.e. it actually booted). If it never does, we abandon it and try the next
