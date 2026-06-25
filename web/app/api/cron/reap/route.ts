@@ -1,6 +1,6 @@
 import { createServerClient } from '@/lib/supabase'
 import { teardownInstance } from '@/lib/pod-teardown'
-import { listPods, destroyPod } from '@/lib/runpod'
+import { ACTIVE_PROVIDERS } from '@/lib/providers/runpod'
 
 // The independent backstop. Runs daily (Vercel Hobby caps crons at once/day) and
 // destroys any pod that the in-pod safeties can't catch — chiefly a pod that has
@@ -63,12 +63,14 @@ export async function GET(request: Request) {
     }
   }
 
-  // ── Orphan reconcile: destroy any RunPod pod with no gpu_instances row ────
-  // This is the only path that can see a pod the DB doesn't know about (the
-  // classic "created but the row write lost a race / the function died"). Safe
-  // against the provisioning window because provision reserves the row BEFORE
-  // creating the pod, so a mid-provision pod's user always has a row — matched
-  // here by the user-prefix baked into the pod name (`slimcast-<8 chars>`).
+  // ── Orphan reconcile: destroy any provider instance with no gpu_instances row ──
+  // The only path that can see a pod the DB doesn't know about (the classic
+  // "created but the row write lost a race / the function died"). Runs across
+  // EVERY active provider — RunPod AND Vast — so a stray Vast rental can't bill
+  // forever any more than a RunPod pod can. Safe against the provisioning window
+  // because provision reserves the row BEFORE creating the pod, so a mid-provision
+  // instance's user always has a row — matched here by the user-prefix baked into
+  // the instance name (`slimcast-<8 chars>`).
   const orphans: string[] = []
   try {
     const { data: allRows } = await supabase
@@ -77,16 +79,25 @@ export async function GET(request: Request) {
     const knownPodIds = new Set((allRows ?? []).map(r => r.provider_id).filter(Boolean))
     const knownUserPrefixes = new Set((allRows ?? []).map(r => r.user_id.slice(0, 8)))
 
-    for (const pod of await listPods()) {
-      if (!pod.name?.startsWith('slimcast-')) continue
-      if (knownPodIds.has(pod.id)) continue
-      const prefix = pod.name.slice('slimcast-'.length)
-      if (knownUserPrefixes.has(prefix)) continue // row exists (mid-provision) — leave it
+    for (const provider of ACTIVE_PROVIDERS) {
+      let live: Array<{ id: string; name: string }>
       try {
-        await destroyPod(pod.id)
-        orphans.push(pod.id)
+        live = await provider.listInstances()
       } catch (e) {
-        console.error(`[reaper] failed to destroy orphan pod ${pod.id}:`, e)
+        console.error(`[reaper] ${provider.name} listInstances failed:`, e)
+        continue
+      }
+      for (const pod of live) {
+        if (!pod.name?.startsWith('slimcast-')) continue
+        if (knownPodIds.has(pod.id)) continue
+        const prefix = pod.name.slice('slimcast-'.length)
+        if (knownUserPrefixes.has(prefix)) continue // row exists (mid-provision) — leave it
+        try {
+          await provider.destroy(pod.id)
+          orphans.push(`${provider.name}:${pod.id}`)
+        } catch (e) {
+          console.error(`[reaper] failed to destroy orphan ${provider.name} instance ${pod.id}:`, e)
+        }
       }
     }
   } catch (e) {

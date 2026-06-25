@@ -65,6 +65,14 @@ export interface GpuProvider {
   getStatus(podId: string): Promise<PodStatus>
   stop(podId: string): Promise<void>
   destroy(podId: string): Promise<void>
+
+  // List this provider's currently-live instances (id + the name/label set at
+  // create) so the reaper can reconcile against real infrastructure and destroy
+  // any instance the DB has no row for. This is the ONLY path that catches a true
+  // orphan (created, but the row write lost a race / the function died), so every
+  // billing provider must implement it — without it, a stray rental bills forever.
+  // Best-effort: resolve to [] (don't throw) if the provider is unreachable.
+  listInstances(): Promise<Array<{ id: string; name: string }>>
 }
 
 export type { GpuGen }

@@ -1,4 +1,4 @@
-import { createPod, getPodStatus, stopPod, destroyPod } from '@/lib/runpod'
+import { createPod, getPodStatus, stopPod, destroyPod, listPods } from '@/lib/runpod'
 import { GPU_CATALOG, RUNPOD_DATACENTERS, RUNPOD_CLOUD_TYPE } from '@/lib/datacenters'
 import { vastProvider } from './vast'
 import type { GpuProvider, GpuCandidate } from './types'
@@ -51,6 +51,8 @@ export const runpodProvider: GpuProvider = {
   getStatus: (podId) => getPodStatus(podId),
   stop: (podId) => stopPod(podId),
   destroy: (podId) => destroyPod(podId),
+  // listPods returns { id, name } already — RunPod names pods `slimcast-<userid8>`.
+  listInstances: () => listPods(),
 }
 
 // All providers the broker ranks across, in no particular order (the broker sorts

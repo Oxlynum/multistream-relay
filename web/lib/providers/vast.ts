@@ -232,4 +232,21 @@ export const vastProvider: GpuProvider = {
   async destroy(podId): Promise<void> {
     await fetch(`${BASE}/instances/${podId}/`, { method: 'DELETE', headers: authHeaders() })
   },
+
+  // All our live rentals, as { id: contract-id, name: label }. The label is the
+  // `name` we pass at create (`slimcast-<userid8>`), which the reaper matches on.
+  // The LIST endpoint returns a usable {instances:[...]} array (unlike the per-id
+  // status detail); we only need id + label here, so it's the right call.
+  async listInstances(): Promise<Array<{ id: string; name: string }>> {
+    if (!VAST_API_KEY) return []
+    try {
+      const res = await fetch(`${BASE}/instances/`, { headers: authHeaders(), signal: AbortSignal.timeout(8000) })
+      if (!res.ok) { console.error(`[vast] list instances → ${res.status}`); return [] }
+      const arr = ((await res.json()).instances ?? []) as Array<{ id: number; label?: string | null }>
+      return arr.map(i => ({ id: String(i.id), name: i.label ?? '' }))
+    } catch (err) {
+      console.error('[vast] list instances failed:', err instanceof Error ? err.message : err)
+      return []
+    }
+  },
 }
