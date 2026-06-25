@@ -1,7 +1,9 @@
 import { createServerClient } from '@supabase/ssr'
 import { type NextRequest, NextResponse } from 'next/server'
 
-export async function middleware(request: NextRequest) {
+// Renamed from `middleware` to `proxy` per Next.js 16 (the middleware file
+// convention is deprecated). Runtime is nodejs — fine for Supabase SSR here.
+export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl
 
   // Protect all dashboard and onboarding routes.
