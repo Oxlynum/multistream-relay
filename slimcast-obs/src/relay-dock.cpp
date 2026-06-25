@@ -747,25 +747,30 @@ void RelayDock::onGpuStatusUpdated(GpuInfo info)
     // Agent paired → status flips 'provisioning' → 'running'. That means
     // MediaMTX is up and RTMP is accepting. Set OBS's URL and start streaming.
     if (m_autoLaunching && info.status == "running") {
-        // SRT mode (UDP-capable host) takes precedence: the server returns srt_url
-        // and the publish key is embedded in its streamid, so OBS's key field is
-        // empty. Otherwise use RTMP. Both share OBS's rtmp_custom service — OBS
-        // routes by the URL scheme (srt:// → SRT output).
-        if (!info.srtUrl.isEmpty() || !info.rtmpUrl.isEmpty()) {
+        // The SRT uplink checkbox is AUTHORITATIVE over the protocol. When SRT is
+        // selected the pod is provisioned for SRT, so OBS must publish srt:// — we
+        // must NEVER fall back to RTMP (that would push an RTMP stream at a pod
+        // expecting SRT, and OBS would "connect" to nothing). So we wait for the
+        // server to report srt_url (the pod's UDP port has mapped) and launch only
+        // then. When SRT is unchecked, use RTMP. Both share OBS's rtmp_custom
+        // service — OBS routes by the URL scheme (srt:// → SRT output). The SRT
+        // url carries the publish key in its streamid, so OBS's key field is empty.
+        const bool srtSelected = m_srtCheck && m_srtCheck->isChecked();
+        const QString server = srtSelected ? info.srtUrl : info.rtmpUrl;
+        const QString key    = srtSelected ? QString()   : info.ingestKey;
+        if (!server.isEmpty()) {
             // Port mapping is in the DB — we have everything we need.
             if (m_launchTimeout) m_launchTimeout->stop();
             m_autoLaunching  = false;
             m_resumingStream = true;
             setStatus("Connecting…", C_WARN);
-            if (!info.srtUrl.isEmpty())
-                applyObsStreamUrl(info.srtUrl, QString());
-            else
-                applyObsStreamUrl(info.rtmpUrl, info.ingestKey);
+            applyObsStreamUrl(server, key);
             obs_frontend_streaming_start();
         }
-        // rtmpUrl is null: pod paired but provision hasn't saved the public port
-        // yet (waitForIp() is still polling RunPod's GraphQL — typically resolves
-        // within one 5s poll). Stay in autoLaunching; the 6-min timeout backstops.
+        // server is empty: the pod paired but provision hasn't saved the public
+        // port yet — for SRT that's the UDP port, which Vast maps a few seconds
+        // after the TCP one (waitForIp() is still polling). Stay in autoLaunching;
+        // the 6-min timeout backstops. We deliberately do NOT publish RTMP here.
         return;
     }
 
