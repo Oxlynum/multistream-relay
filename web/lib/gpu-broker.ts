@@ -29,9 +29,9 @@ function probeTcp(host: string, port: number, timeoutMs = 8000): Promise<boolean
 
 import {
   RUNPOD_DATACENTERS, GPU_CATALOG, PRICE_CEILING, ADA_SORT_BONUS,
-  LATENCY_NEAR_MS, LATENCY_MID_MS, CLOUD_TYPES,
-  READINESS_TIMEOUT_MS, READINESS_POLL_MS, MAX_BOOT_ATTEMPTS,
-  MAX_PROVISION_RTT_MS, MAX_RTT_REJECTIONS,
+  PRIMARY_MAX_KM, PRIMARY_MAX_COUNT, SECONDARY_MAX_KM, SECONDARY_MAX_COUNT,
+  CLOUD_TYPES, READINESS_TIMEOUT_MS, READINESS_POLL_MS, MAX_BOOT_ATTEMPTS,
+  MAX_RTT_REJECTIONS,
   type Datacenter,
 } from '@/lib/datacenters'
 import { fetchDatacenterIds } from '@/lib/runpod'
@@ -52,18 +52,6 @@ function haversineKm(aLat: number, aLon: number, bLat: number, bLon: number): nu
   return 2 * R * Math.asin(Math.sqrt(h))
 }
 
-// Rough real-world RTT estimate: fiber light-speed plus a routing fudge factor
-// (real routes are ~1.5× the great-circle path) plus fixed overhead.
-function estimateRttMs(distanceKm: number): number {
-  return (distanceKm / 100) * 1.5 + 10
-}
-
-function tierFor(rttMs: number): 'near' | 'mid' | 'far' {
-  if (rttMs <= LATENCY_NEAR_MS) return 'near'
-  if (rttMs <= LATENCY_MID_MS) return 'mid'
-  return 'far'
-}
-
 // Cheapest first; Ada gets a small bonus so it wins only on near-ties.
 function gpuSortScore(pricePerHr: number, gen: string): number {
   return pricePerHr - (gen === 'ada' ? ADA_SORT_BONUS : 0)
@@ -71,23 +59,33 @@ function gpuSortScore(pricePerHr: number, gen: string): number {
 
 /** Build the ranked candidate list for a user at (lat, lon). */
 export function rankCandidates(lat: number, lon: number, needsProfessionalGpu = false, datacenters: Datacenter[] = RUNPOD_DATACENTERS): GpuCandidate[] {
-  // Annotate each datacenter with its tier + rtt, grouped by tier.
-  const byTier: Record<'near' | 'mid' | 'far', Array<Datacenter & { rtt: number }>> = {
-    near: [], mid: [], far: [],
-  }
-  let anyWithinBound = false
-  for (const dc of datacenters) {
-    const rtt = estimateRttMs(haversineKm(lat, lon, dc.lat, dc.lon))
-    if (rtt <= MAX_PROVISION_RTT_MS) anyWithinBound = true
-    byTier[tierFor(rtt)].push({ ...dc, rtt })
-  }
+  // Sort every available DC by straight-line distance from the user — closest first.
+  // This gives automatic subregion filtering: a Seattle user gets Pacific-coast DCs,
+  // a Paris user gets Western EU DCs, etc., without any manual region selection.
+  const sorted = [...datacenters]
+    .map(dc => ({ dc, distKm: haversineKm(lat, lon, dc.lat, dc.lon) }))
+    .sort((a, b) => a.distKm - b.distKm)
 
-  // Region beats price: exclude any DC over the RTT ceiling unless there are
-  // no in-bound DCs at all (VPN / unusual geo → allow the nearest far DC).
-  if (anyWithinBound) {
-    for (const tier of ['near', 'mid', 'far'] as const) {
-      byTier[tier] = byTier[tier].filter(dc => dc.rtt <= MAX_PROVISION_RTT_MS)
-    }
+  // Three rings: primary (tight local subregion), secondary (same continent),
+  // tertiary (global fallback). Distance caps prevent e.g. Kansas landing in
+  // Seattle's primary ring (2340km) or Montreal in London's (5221km).
+  // Always include the nearest DC in primary so remote/VPN users aren't stranded.
+  const nearest = sorted[0]
+  const primaryDcs = sorted
+    .filter(x => x.distKm <= PRIMARY_MAX_KM || x.dc.id === nearest?.dc.id)
+    .slice(0, PRIMARY_MAX_COUNT)
+    .map(x => x.dc)
+  const primaryIds = new Set(primaryDcs.map(dc => dc.id))
+  const secondaryDcs = sorted
+    .filter(x => !primaryIds.has(x.dc.id) && x.distKm <= SECONDARY_MAX_KM)
+    .slice(0, SECONDARY_MAX_COUNT)
+    .map(x => x.dc)
+  const secondaryIds = new Set([...primaryIds, ...secondaryDcs.map(dc => dc.id)])
+  const tertiaryDcs = sorted.filter(x => !secondaryIds.has(x.dc.id)).map(x => x.dc)
+
+  if (sorted.length > 0) {
+    const nearest = sorted[0]
+    console.log(`[broker] subregion: [${primaryDcs.map(d => d.id).join(', ')}] (nearest: ${nearest.dc.id} ${nearest.distKm.toFixed(0)}km)`)
   }
 
   const gpus = GPU_CATALOG
@@ -96,18 +94,9 @@ export function rankCandidates(lat: number, lon: number, needsProfessionalGpu = 
     .sort((a, b) => gpuSortScore(a.pricePerHr, a.gen) - gpuSortScore(b.pricePerHr, b.gen))
 
   const candidates: GpuCandidate[] = []
-  for (const tier of ['near', 'mid', 'far'] as const) {
-    const sortedDcs = byTier[tier].sort((a, b) => a.rtt - b.rtt)
-    if (sortedDcs.length === 0) continue
-    // Bundle ALL acceptable DCs for this tier into every candidate. RunPod
-    // community cloud ignores single-DC requests and places pods wherever it has
-    // inventory — but providing the full acceptable list gives it the best chance
-    // of landing in the right region. The actual DC is verified by RTT check
-    // post-boot. One candidate per GPU type instead of one per DC×GPU: reduces
-    // the candidate list from ~275 to ~11 for a typical user, preventing the
-    // broker from cycling through hundreds of identical-to-RunPod requests and
-    // burning the Vercel 300s function timeout on wrong-region pod detection.
-    const dcIds = sortedDcs.map(dc => dc.id)
+  for (const [tier, dcs] of [['near', primaryDcs], ['mid', secondaryDcs], ['far', tertiaryDcs]] as const) {
+    if (dcs.length === 0) continue
+    const dcIds = dcs.map(dc => dc.id)
     for (const cloudType of CLOUD_TYPES) {
       for (const gpu of gpus) {
         candidates.push({
@@ -196,17 +185,6 @@ export async function provisionGpu(args: {
   let rttRejections = 0
   let lastError: string | undefined
 
-  // Hard latency rule: the pod RunPod actually gives us must be within this
-  // many ms of the user. Proportional floor for users in regions with no nearby
-  // DC (e.g. a Pacific island where the nearest DC is 130ms away — we allow
-  // 1.5× that rather than permanently failing).
-  const minPossibleRttMs = Math.min(
-    ...RUNPOD_DATACENTERS.map(dc =>
-      estimateRttMs(haversineKm(args.lat, args.lon, dc.lat, dc.lon))
-    )
-  )
-  const rttAcceptanceMs = Math.max(MAX_PROVISION_RTT_MS, minPossibleRttMs * 1.5)
-
   for (const provider of ACTIVE_PROVIDERS) {
     for (const candidate of candidates) {
       attempts++
@@ -255,37 +233,34 @@ export async function provisionGpu(args: {
           continue
         }
 
-        // Hard latency rule: verify the pod's actual DC is close enough to the
-        // user. RunPod community cloud routinely ignores dataCenterIds and places
-        // pods on whatever continent has spare capacity. We look up the actual DC
-        // in our global catalog and reject it if the RTT from the user exceeds
-        // rttAcceptanceMs. This works globally — a Swedish user gets EU-SE, a
-        // Tokyo user gets AP-JP, etc. Doesn't count against the boot budget.
-        // Fail-closed on null/unknown DC: if we can't identify where the pod is,
-        // we can't guarantee the latency rule, so we reject it.
-        const actualDc = addr.dataCenterId != null
-          ? RUNPOD_DATACENTERS.find(dc => dc.id === addr.dataCenterId)
-          : null
-
-        if (!actualDc) {
-          console.warn(`[broker] pod ${podId} has unrecognized DC ${addr.dataCenterId ?? 'null'} — cannot verify placement, cascading`)
-          try { await provider.destroy(podId) } catch { /* best effort */ }
-          lastError = `unrecognized datacenter: ${addr.dataCenterId ?? 'null'}`
-          bootAttempts--
-          continue
-        }
-
-        const actualRttMs = estimateRttMs(haversineKm(args.lat, args.lon, actualDc.lat, actualDc.lon))
-        if (actualRttMs > rttAcceptanceMs) {
-          rttRejections++
-          console.warn(`[broker] pod ${podId} placed in ${addr.dataCenterId} (${actualRttMs.toFixed(0)}ms, limit ${rttAcceptanceMs.toFixed(0)}ms) — wrong region (rejection ${rttRejections}/${MAX_RTT_REJECTIONS})`)
-          try { await provider.destroy(podId) } catch { /* best effort */ }
-          lastError = `pod too far: ${addr.dataCenterId} at ${actualRttMs.toFixed(0)}ms`
-          bootAttempts--
-          if (rttRejections >= MAX_RTT_REJECTIONS) {
-            return { ok: false, attempts, error: `No GPU capacity in your region. RunPod placed ${rttRejections} pods outside your area — try again in a few minutes when local inventory refreshes.` }
+        // Verify RunPod honored our dataCenterIds hint by checking the actual DC
+        // is in the set we requested. RunPod community cloud sometimes ignores
+        // the hint and boots wherever it has inventory; this catches it.
+        // Unknown DC (null) → can't verify, accept with a warning rather than
+        // destroying a potentially-good pod over a metadata gap.
+        if (addr.dataCenterId != null) {
+          if (!RUNPOD_DATACENTERS.find(dc => dc.id === addr.dataCenterId)) {
+            console.warn(`[broker] pod ${podId} has unrecognised DC '${addr.dataCenterId}' — cascading`)
+            try { await provider.destroy(podId) } catch { /* best effort */ }
+            lastError = `unrecognised datacenter: ${addr.dataCenterId}`
+            bootAttempts--
+            continue
           }
-          continue
+          if (!candidate.datacenterIds.includes(addr.dataCenterId)) {
+            rttRejections++
+            const wrongDc = RUNPOD_DATACENTERS.find(dc => dc.id === addr.dataCenterId)
+            const distKm = wrongDc ? haversineKm(args.lat, args.lon, wrongDc.lat, wrongDc.lon).toFixed(0) : '?'
+            console.warn(`[broker] pod ${podId} placed in ${addr.dataCenterId} (${distKm}km) — outside requested subregion (rejection ${rttRejections}/${MAX_RTT_REJECTIONS})`)
+            try { await provider.destroy(podId) } catch { /* best effort */ }
+            lastError = `wrong subregion: placed in ${addr.dataCenterId}`
+            bootAttempts--
+            if (rttRejections >= MAX_RTT_REJECTIONS) {
+              return { ok: false, attempts, error: `No GPU capacity near you right now — try again in a few minutes when local inventory refreshes.` }
+            }
+            continue
+          }
+        } else {
+          console.warn(`[broker] pod ${podId} has null dataCenterId — accepting without subregion verification`)
         }
 
         return {

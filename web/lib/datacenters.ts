@@ -107,11 +107,16 @@ export const PRICE_CEILING = 1.00
 // card is preferred over an Ampere one only when their prices are within ~3¢.
 export const ADA_SORT_BONUS = 0.03
 
-// Latency tiers (estimated round-trip ms from the user to the datacenter).
-// We exhaust the whole NEAR tier before dropping to MID, then FAR — because
-// under ~40ms latency is imperceptible for buffered streaming.
-export const LATENCY_NEAR_MS = 40
-export const LATENCY_MID_MS = 70
+// Subregion ring sizes and distance caps for the broker.
+// PRIMARY: DCs within PRIMARY_MAX_KM that form the tight local subregion.
+//   Cap prevents e.g. Kansas landing in Seattle's ring, or Montreal in London's.
+//   Always includes the nearest DC regardless of distance (remote/VPN users).
+// SECONDARY: next ring up to SECONDARY_MAX_KM — same continent fallback.
+// PRIMARY_MAX_COUNT / SECONDARY_MAX_COUNT cap list size even within the distance.
+export const PRIMARY_MAX_KM      = 2000
+export const PRIMARY_MAX_COUNT   = 6
+export const SECONDARY_MAX_KM    = 5000
+export const SECONDARY_MAX_COUNT = 8
 
 // Cloud types tried, in order. COMMUNITY is cheap; add 'SECURE' here to widen
 // availability (more reliable inventory) once the account is set up for it.
@@ -136,16 +141,6 @@ export const MAX_BOOT_ATTEMPTS = 5
 // and tell the user to retry later. Each wrong-region pod takes ~90s to detect
 // and destroy — 3 rejections = ~270s, safely within Vercel's 300s limit.
 export const MAX_RTT_REJECTIONS = 3
-
-// Hard RTT ceiling for provisioning. Any datacenter whose estimated RTT from
-// the user exceeds this is excluded from the candidate list and rejected if
-// RunPod ignores dataCenterIds and places the pod there anyway. Works globally:
-// US users stay in US/CA DCs, EU users stay in EU DCs, AP users stay in AP DCs.
-// 100ms covers all of each continent from within it; cross-continental DCs are
-// 130ms+ from the other side so they're always excluded.
-// If no DC is within this bound (VPN, ship, unusual geo), the broker falls back
-// to the nearest available DC with a 1.5× proportional acceptance floor.
-export const MAX_PROVISION_RTT_MS = 100
 
 // Default location when the request carries no geo headers (local dev, VPNs):
 // central US minimizes worst-case latency for an unknown US user.
