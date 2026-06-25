@@ -27,6 +27,23 @@ const MIN_DOWNLOAD_MBPS = 300   // host pulls the multi-GB relay image on every 
 const MIN_RELIABILITY = 0.95    // host uptime score (reliability2)
 const MIN_DIRECT_PORTS = 2      // need RTMP (1935) + HLS (8888) mapped
 
+// Bandwidth cost is the make-or-break for a streaming workload: Vast bills per TB
+// (RunPod doesn't), and host rates range $0.001–$40/TB. So we price offers ALL-IN
+// (GPU + estimated bandwidth) and reject gougers, otherwise the broker would pick
+// a "cheap" $0.08 GPU that actually costs $0.86/hr after a $40/TB egress fee.
+// Estimated traffic for a typical 4–5 platform 1080p60 fan-out:
+const EGRESS_GB_PER_HR = 14     // ~30 Mbps out (landscape tee + YT passthrough + portrait)
+const INGRESS_GB_PER_HR = 6     // ~13 Mbps in (OBS → pod)
+const MAX_EGRESS_COST_PER_TB = 8  // hard reject: caps bandwidth at ~$0.11/hr regardless of distance
+
+// All-in $/hr = GPU rate + estimated bandwidth cost. Used for the price ceiling
+// AND for ranking, so Vast competes with RunPod on true cost, not just GPU price.
+function allInPricePerHr(o: VastOffer): number {
+  const up = o.internet_up_cost_per_tb ?? 0
+  const down = o.internet_down_cost_per_tb ?? 0
+  return o.dph_total + (EGRESS_GB_PER_HR / 1000) * up + (INGRESS_GB_PER_HR / 1000) * down
+}
+
 interface VastOffer {
   id: number
   gpu_name: string
@@ -35,6 +52,8 @@ interface VastOffer {
   reliability2: number
   inet_up: number
   inet_down: number
+  internet_up_cost_per_tb: number | null
+  internet_down_cost_per_tb: number | null
   direct_port_count: number
   public_ipaddr: string | null
   geolocation: string | null
@@ -112,7 +131,8 @@ export const vastProvider: GpuProvider = {
       o.inet_up >= MIN_UPLOAD_MBPS &&
       o.inet_down >= MIN_DOWNLOAD_MBPS &&
       o.direct_port_count >= MIN_DIRECT_PORTS &&
-      o.dph_total <= maxPricePerHr &&
+      (o.internet_up_cost_per_tb ?? 0) <= MAX_EGRESS_COST_PER_TB &&  // reject bandwidth gougers
+      allInPricePerHr(o) <= maxPricePerHr &&                          // all-in, not just GPU
       !!o.public_ipaddr,
     )
     if (usable.length === 0) return []
@@ -126,7 +146,7 @@ export const vastProvider: GpuProvider = {
         provider: 'vast',
         gpuKey: gpuKeyOf(o.gpu_name),
         gpuTypeId: o.gpu_name,
-        pricePerHr: o.dph_total,
+        pricePerHr: allInPricePerHr(o),   // GPU + bandwidth, so it ranks on true cost
         lat: loc.lat,
         lon: loc.lon,
         label: `vast:${o.id} ${o.gpu_name} ${o.geolocation ?? ''}`.trim(),
