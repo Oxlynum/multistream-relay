@@ -40,15 +40,31 @@ function haversineKm(aLat: number, aLon: number, bLat: number, bLon: number): nu
   return 2 * R * Math.asin(Math.sqrt(h))
 }
 
-// TCP probe: verify the RTMP port is actually forwarding before handing the
-// address to OBS. RunPod can report a port mapping before the tunnel is wired up;
-// this catches broken forwarding so the broker cascades to another pod.
-function probeTcp(host: string, port: number, timeoutMs = 8000): Promise<boolean> {
+// RTMP readiness probe: confirm the pod is actually SERVING RTMP (MediaMTX bound),
+// not merely that the port forwards TCP. A forwarded/proxied port (esp. on Vast,
+// and during a pod's cold start) accepts a TCP connection BEFORE MediaMTX is ready,
+// so a bare connect can green-light a pod that can't yet ingest — OBS then fails to
+// publish and `streaming` stays false. We do the RTMP handshake (send C0+C1, expect
+// S0+S1): only a live RTMP server answers, so this proves the pod is truly ready.
+function probeRtmp(host: string, port: number, timeoutMs = 10000): Promise<boolean> {
   return new Promise(resolve => {
     const socket = net.createConnection(port, host)
-    const timer = setTimeout(() => { socket.destroy(); resolve(false) }, timeoutMs)
-    socket.once('connect', () => { clearTimeout(timer); socket.destroy(); resolve(true) })
-    socket.once('error',   () => { clearTimeout(timer); resolve(false) })
+    let received = 0
+    let firstByte = -1
+    const done = (ok: boolean) => { clearTimeout(timer); socket.destroy(); resolve(ok) }
+    const timer = setTimeout(() => done(false), timeoutMs)
+    socket.once('connect', () => {
+      const c0c1 = Buffer.alloc(1537)   // C0 (1B version) + C1 (1536B)
+      c0c1[0] = 0x03                    // RTMP version 3
+      for (let i = 9; i < 1537; i++) c0c1[i] = (Math.random() * 256) | 0  // C1 random payload
+      socket.write(c0c1)
+    })
+    socket.on('data', d => {
+      if (firstByte < 0 && d.length) firstByte = d[0]
+      received += d.length
+      if (received >= 1537) done(firstByte === 0x03)   // got S0 (v3) + S1 → MediaMTX is serving
+    })
+    socket.once('error', () => done(false))
   })
 }
 
@@ -172,11 +188,12 @@ export async function provisionGpu(args: {
       continue
     }
 
-    // The RTMP port must actually be reachable (catches broken tunnels).
-    if (!(await probeTcp(addr.ip, addr.port))) {
-      console.warn(`[broker] pod ${podId} RTMP ${addr.ip}:${addr.port} unreachable — cascading`)
+    // MediaMTX must actually answer RTMP (not just accept TCP) — proves the pod
+    // is truly ready to ingest before we hand the address to OBS.
+    if (!(await probeRtmp(addr.ip, addr.port))) {
+      console.warn(`[broker] pod ${podId} RTMP ${addr.ip}:${addr.port} not serving yet — cascading`)
       try { await provider.destroy(podId) } catch { /* best effort */ }
-      lastError = 'RTMP port unreachable'
+      lastError = 'RTMP not ready (MediaMTX not answering)'
       if (bootAttempts >= MAX_BOOT_ATTEMPTS) return { ok: false, attempts, error: 'too many failed boots' }
       continue
     }
