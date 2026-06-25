@@ -5,6 +5,11 @@ import { teardownInstance, sweepStalePods } from '@/lib/pod-teardown'
 import { checkRateLimit } from '@/lib/rate-limit'
 import { FALLBACK_LAT, FALLBACK_LON } from '@/lib/datacenters'
 
+// Vercel function timeout: the broker can cascade through several Vast candidates
+// (each up to READINESS_TIMEOUT_MS = 3 min) before returning. Explicit 300s cap
+// matches what the OBS plugin expects (setTransferTimeout(300000)).
+export const maxDuration = 300
+
 // A running pod is considered live (not reclaimable) only if it has heartbeat
 // within this window. Past it the agent is presumed dead and the slot is free.
 const FRESH_HEARTBEAT_MS = 150_000
@@ -209,6 +214,16 @@ export async function POST(request: Request) {
     ],
     userOutputs,
     srtMode,
+    // Save provider_id the moment a pod is created — before any readiness probe —
+    // so teardownInstance can destroy the pod even if this function is killed
+    // mid-cascade by Vercel's maxDuration (otherwise provider_id stays '' and
+    // teardown skips the provider destroy, letting the pod run and bill forever).
+    onPodCreated: async (podId, provider) => {
+      await supabase
+        .from('gpu_instances')
+        .update({ provider_id: podId, provider })
+        .eq('user_id', userId)
+    },
   })
 
   if (!result.ok) {

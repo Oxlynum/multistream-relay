@@ -172,16 +172,31 @@ export const vastProvider: GpuProvider = {
 
   async create({ candidate, name, imageTag, env }): Promise<CreatedPod> {
     const offerId = candidate.placement.offerId as number
-    // Vast forwards the ports the IMAGE declares with EXPOSE (a rent-time `ports`
-    // param is ignored — verified). The relay Dockerfile EXPOSEs 1935 (RTMP), so
-    // that maps automatically; we read the host port back in getStatus.
+    // Vast's documented API format for port mapping: Docker -p flags as keys in the
+    // `env` dict with "1" as the value. EXPOSE in the Dockerfile is NOT enough —
+    // Vast only NAT-forwards ports that are explicitly requested at rent time.
+    // Without this the agent boots and phones home outbound (heartbeats work), but
+    // no inbound ports are mapped → waitForIp sees null ports forever.
+    //
+    // Ports mapped here:
+    //   1935/tcp = RTMP ingest (OBS → pod, always needed)
+    //   8890/udp = SRT ingest (OBS → pod in SRT mode; harmless in RTMP mode)
+    //   8889/udp = UDP echo probe (broker readiness gate for SRT mode)
+    // External ports are randomly assigned by Vast; we read them back via getStatus.
+    // HLS (8888/tcp) omitted — not needed for streaming.
+    const envDict: Record<string, string> = {
+      ...Object.fromEntries(env.map(e => [e.key, e.value])),
+      '-p 1935:1935': '1',
+      '-p 8890:8890/udp': '1',
+      '-p 8889:8889/udp': '1',
+    }
     const body: Record<string, unknown> = {
       client_id: 'me',
       image: imageTag,
       disk: 15,
       label: name,
       runtype: 'args',                                  // run the image's default CMD
-      env: Object.fromEntries(env.map(e => [e.key, e.value])),
+      env: envDict,
     }
     // Private registry pull (e.g. the relay image on ghcr.io). Set VAST_IMAGE_LOGIN
     // to a docker-login string ("-u USER -p TOKEN ghcr.io"); omit if the image is public.
@@ -198,15 +213,17 @@ export const vastProvider: GpuProvider = {
   },
 
   async getStatus(podId): Promise<PodStatus> {
-    // Single-instance endpoint returns { instances: <object> } (the list endpoint
-    // returns nothing usable). cur_state is the live status; ports appear once the
-    // container is up, Docker-binding shape: { "1935/tcp": [{ HostIp, HostPort }] }.
-    const res = await fetch(`${BASE}/instances/${podId}/`, { headers: authHeaders() })
+    // Use the LIST endpoint — it returns the same port dict the test script verified
+    // (test-vast-rent.mjs). The single-instance endpoint (/instances/{id}/) format
+    // was not verified against live port data and may differ. The list is slightly
+    // heavier but Vast has no per-instance endpoint with confirmed port format.
+    const res = await fetch(`${BASE}/instances/`, { headers: authHeaders(), signal: AbortSignal.timeout(8000) })
     if (!res.ok) return { status: 'unknown', ip: null, port: null, hlsPort: null, dataCenterId: null }
-    const inst = (await res.json()).instances as {
-      cur_state?: string; actual_status?: string; public_ipaddr?: string
+    const arr = ((await res.json()).instances ?? []) as Array<{
+      id: number; cur_state?: string; actual_status?: string; public_ipaddr?: string
       ports?: Record<string, Array<{ HostIp: string; HostPort: string }>>
-    } | undefined
+    }>
+    const inst = arr.find(i => String(i.id) === String(podId))
     if (!inst) return { status: 'terminated', ip: null, port: null, hlsPort: null, dataCenterId: null }
     const ip = inst.public_ipaddr ?? null
     const rtmp = inst.ports?.['1935/tcp']?.[0]?.HostPort

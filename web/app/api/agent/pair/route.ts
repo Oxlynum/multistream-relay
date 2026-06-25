@@ -15,10 +15,10 @@ export async function POST(request: NextRequest) {
 
   const supabase = createServerClient()
 
-  // Mark the instance as running. We do NOT touch ip_address/ingest_port here:
-  // the agent's self-reported (egress) IP is not the RTMP ingest address — that
-  // comes from the RunPod port mapping captured at provision time. Overwriting it
-  // would point OBS at the wrong host.
+  // Mark the instance as running. We do NOT touch ip_address/ingest_port/srt_port here:
+  // the agent's self-reported (egress) IP is not the ingest address — that comes from
+  // the provider's port mapping captured at provision time. Overwriting it would point
+  // OBS at the wrong host.
   await supabase
     .from('gpu_instances')
     .update({ status: 'running', last_seen_at: new Date().toISOString() })

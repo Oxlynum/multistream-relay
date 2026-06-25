@@ -72,14 +72,19 @@ function probeRtmp(host: string, port: number, timeoutMs = 10000): Promise<boole
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 
 // Vast host probe (SRT mode): the relay runs a UDP echo on 8889/udp that replies
-// "ECHO:<status>:<data>" where status is OK | BAD | PENDING. One round-trip proves
-// BOTH things we need to safely use the full (non-datacenter) host pool:
-//   • the reply arriving at all → the host FORWARDS UDP (required for SRT ingest);
-//   • status OK → the host's OUTBOUND to the platforms works (BAD = it can ingest
-//     but can't deliver to Twitch; PENDING = the outbound test is still running, so
-//     keep probing). Timeout / no reply / BAD → reject the host and cascade.
-// Retransmits because UDP is lossy and the outbound test takes a few seconds.
-function probeUdp(host: string, port: number, timeoutMs = 14000): Promise<boolean> {
+// "ECHO:<status>:<data>" where status is OK | BAD | PENDING (OK = outbound to the
+// platforms works; BAD = it can ingest but can't deliver to Twitch).
+//
+// ADVISORY, not gating. A Vercel/serverless function cannot reliably complete an
+// outbound UDP round-trip (no stable inbound path back to the ephemeral socket), so
+// a no-reply here tells us nothing about the HOST — it's usually our own egress.
+// Gating on it rejected every datacenter host and made SRT impossible. So we only
+// act on a DEFINITIVE negative: an explicit ECHO:BAD means the host self-reported
+// blocked outbound → reject. Anything else (OK, or — the common case — no reply at
+// all) → proceed. UDP forwarding itself is already assured by the datacenter-host
+// filter (listCandidates), and the agent's own outbound self-test is the backstop.
+// Returns false ONLY on an explicit BAD; true otherwise (including timeout).
+function probeUdp(host: string, port: number, timeoutMs = 8000): Promise<boolean> {
   return new Promise(resolve => {
     const socket = dgram.createSocket('udp4')
     let done = false
@@ -90,16 +95,17 @@ function probeUdp(host: string, port: number, timeoutMs = 14000): Promise<boolea
       try { socket.close() } catch { /* already closed */ }
       resolve(ok)
     }
-    const timer = setTimeout(() => finish(false), timeoutMs)
+    // No reply within the window → proceed (true). Only an explicit BAD rejects.
+    const timer = setTimeout(() => finish(true), timeoutMs)
     const msg = Buffer.from('slimcast-udp-probe')
     socket.on('message', m => {
       const s = m.toString()
       if (!s.startsWith('ECHO:')) return       // not our responder
       if (s.startsWith('ECHO:OK:')) finish(true)        // udp forwards + outbound works
-      else if (s.startsWith('ECHO:BAD:')) finish(false) // outbound blocked → reject
+      else if (s.startsWith('ECHO:BAD:')) finish(false) // host self-reported blocked outbound → reject
       // ECHO:PENDING: → outbound test still running; keep retransmitting until OK/BAD
     })
-    socket.on('error', () => finish(false))
+    socket.on('error', () => finish(true))   // our egress hiccup, not the host — proceed
     socket.send(msg, port, host)
     let n = 0
     const retx = setInterval(() => { if (!done && n++ < 12) socket.send(msg, port, host) }, 1000)
@@ -177,6 +183,12 @@ export async function provisionGpu(args: {
   env: PodEnv[]
   userOutputs?: UserOutputConfig[]
   srtMode?: boolean
+  // Called the instant a pod is created, BEFORE the slow readiness probes, so the
+  // caller can persist provider_id onto the claim row and the pod is reapable even
+  // if this function is killed mid-cascade (Vercel maxDuration) — otherwise a pod
+  // created during a failed SRT cascade strands with provider_id='' and bills until
+  // the daily by-label reaper. Best-effort; must never throw into the broker loop.
+  onPodCreated?: (podId: string, provider: string) => Promise<void>
 }): Promise<ProvisionResult> {
   const nvencSessions = args.userOutputs ? requiredNvencSessions(args.userOutputs) : 0
   const needsProfessionalGpu = nvencSessions > 3
@@ -213,6 +225,9 @@ export async function provisionGpu(args: {
       const created = await provider.create({ candidate: c, name: args.name, imageTag: args.imageTag, env: args.env })
       podId = created.podId
       actualCost = created.costPerHr
+      // Record it NOW so it can always be torn down — before any probe that might
+      // hang or before this function hits its duration ceiling.
+      try { await args.onPodCreated?.(podId, c.provider) } catch { /* best effort */ }
     } catch (err) {
       // No capacity in this location/GPU — fast miss, try the next candidate.
       lastError = err instanceof Error ? err.message : String(err)
@@ -260,9 +275,11 @@ export async function provisionGpu(args: {
       continue
     }
 
-    // SRT mode: the host must (a) have mapped the SRT port and (b) actually forward
-    // UDP — verified with the echo probe. Not all hosts forward UDP even when they
-    // map the port, so a host that fails here is rejected and we cascade.
+    // SRT mode: the host must have MAPPED the SRT + probe ports (verifiable over
+    // HTTP via getStatus — a hard requirement; without the SRT port there is no
+    // ingest). The UDP echo is then only ADVISORY (see probeUdp): we reject solely
+    // on an explicit ECHO:BAD, never on a no-reply, because our own serverless
+    // egress can't reliably round-trip UDP and was rejecting every good host.
     if (srtMode) {
       if (!addr.srtPort || !addr.udpProbePort) {
         console.warn(`[broker] pod ${podId} SRT/UDP ports not mapped (srt=${addr.srtPort} probe=${addr.udpProbePort}) — cascading`)
@@ -272,13 +289,15 @@ export async function provisionGpu(args: {
         continue
       }
       if (!(await probeUdp(addr.ip, addr.udpProbePort))) {
-        console.warn(`[broker] pod ${podId} failed UDP/outbound check (${addr.ip}:${addr.udpProbePort}) — cascading`)
+        // Only reached on an explicit ECHO:BAD — the host itself said outbound to
+        // the platforms is blocked, so it could ingest but never deliver. Reject.
+        console.warn(`[broker] pod ${podId} host self-reported blocked outbound (${addr.ip}:${addr.udpProbePort}) — cascading`)
         try { await provider.destroy(podId) } catch { /* best effort */ }
-        lastError = 'host failed UDP-forwarding or outbound-to-platform check'
+        lastError = 'host reported blocked outbound-to-platform'
         if (bootAttempts >= MAX_BOOT_ATTEMPTS) return { ok: false, attempts, error: 'too many failed boots' }
         continue
       }
-      console.log(`[broker] pod ${podId} SRT ready: udp forwards + outbound ok, srt port ${addr.srtPort}`)
+      console.log(`[broker] pod ${podId} SRT ready: srt port ${addr.srtPort} mapped (outbound advisory passed)`)
     }
 
     return {

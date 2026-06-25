@@ -73,8 +73,7 @@ export async function GET(request: Request) {
   const stale = !lastSeen || (Date.now() - lastSeen.getTime() > 30_000)
   const effectiveStatus = instance.status === 'running' && stale ? 'provisioning' : instance.status
 
-  // OBS server is the pod IP + the RunPod-mapped public port; the stream key is
-  // the per-pod secret (the RTMP path). Both are needed and set by the plugin.
+  // RTMP ingest URL: pod IP + provider-mapped public port + per-pod secret path.
   const server = instance.ip_address && instance.ingest_port
     ? `rtmp://${instance.ip_address}:${instance.ingest_port}`
     : null
