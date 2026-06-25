@@ -56,7 +56,13 @@ export const runpodProvider: GpuProvider = {
 // All providers the broker ranks across, in no particular order (the broker sorts
 // every candidate by distance). Both place deterministically: RunPod secure pins a
 // datacenter; Vast rents a specific machine at a known location.
-export const ACTIVE_PROVIDERS: GpuProvider[] = [runpodProvider, vastProvider]
+//
+// Vast TEMPORARILY DISABLED: it provisions + pairs fine, but the OBS→pod RTMP data
+// path didn't establish on a live test (TCP probe passes, but the stream never
+// reaches MediaMTX → streaming stays false). Needs a real RTMP-reachability check
+// and likely Vast direct-port config work before re-enabling. RunPod secure is the
+// reliable engine meanwhile. Re-add vastProvider here once the data path is fixed.
+export const ACTIVE_PROVIDERS: GpuProvider[] = [runpodProvider]
 
 const PROVIDERS: Record<string, GpuProvider> = {
   runpod: runpodProvider,
