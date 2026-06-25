@@ -8,60 +8,52 @@ export interface Datacenter {
   lon: number
 }
 
-// All RunPod datacenters with approximate coordinates. Verified against the
-// RunPod dataCenters GraphQL API — add new DCs here as RunPod expands.
-// Coordinates only need to be close enough to rank by proximity.
+// RunPod datacenters that the REST `POST /pods` endpoint will actually BUILD a
+// community-cloud pod in, with approximate coordinates for proximity ranking.
+//
+// IMPORTANT — this is the create-valid list, NOT RunPod's full catalog.
+// RunPod exposes TWO disagreeing datacenter lists:
+//   • GraphQL `dataCenters` query  → ~47 DCs (everything they operate)
+//   • REST `POST /pods` enum       → 28 DCs (where community builds are allowed)
+// The create endpoint rejects the ENTIRE request (HTTP 400) if the dataCenterIds
+// array contains even one DC outside its 28-entry enum. So the REST build-list is
+// the only source of truth that matters here — pinning a GraphQL-only DC (e.g.
+// US-KS-1, US-MO-2, US-OR-1) hard-fails provisioning. Keep this list in sync with
+// the enum RunPod returns in that 400 error; add a DC here only after confirming
+// `POST /pods` accepts it. (Coordinates only need to be close enough to rank by
+// proximity.)
 export const RUNPOD_DATACENTERS: Datacenter[] = [
   // North America — US
   { id: 'US-GA-1', lat: 33.75, lon: -84.39 },  // Atlanta
   { id: 'US-GA-2', lat: 33.75, lon: -84.39 },
   { id: 'US-NC-1', lat: 35.23, lon: -80.84 },  // Charlotte
-  { id: 'US-NC-2', lat: 35.23, lon: -80.84 },
   { id: 'US-DE-1', lat: 39.16, lon: -75.52 },  // Delaware
   { id: 'US-MD-1', lat: 39.05, lon: -76.64 },  // Maryland
-  { id: 'US-PA-1', lat: 40.44, lon: -79.99 },  // Pittsburgh
   { id: 'US-IL-1', lat: 41.88, lon: -87.63 },  // Chicago
-  { id: 'US-KS-1', lat: 39.05, lon: -95.70 },  // Kansas
-  { id: 'US-KS-2', lat: 39.05, lon: -95.70 },
+  { id: 'US-KS-2', lat: 39.05, lon: -95.70 },  // Kansas
   { id: 'US-KS-3', lat: 39.05, lon: -95.70 },
-  { id: 'US-MO-1', lat: 38.63, lon: -90.20 },  // St. Louis
-  { id: 'US-MO-2', lat: 39.10, lon: -94.58 },  // Kansas City
-  { id: 'US-NE-1', lat: 41.26, lon: -95.94 },  // Omaha
   { id: 'US-TX-1', lat: 32.78, lon: -96.80 },  // Dallas
-  { id: 'US-TX-2', lat: 32.78, lon: -96.80 },
   { id: 'US-TX-3', lat: 32.78, lon: -96.80 },
   { id: 'US-TX-4', lat: 32.78, lon: -96.80 },
-  { id: 'US-TX-5', lat: 29.76, lon: -95.37 },  // Houston
-  { id: 'US-TX-6', lat: 29.76, lon: -95.37 },
-  { id: 'US-CA-1', lat: 37.40, lon: -122.10 }, // Bay Area
-  { id: 'US-CA-2', lat: 37.40, lon: -122.10 },
+  { id: 'US-CA-2', lat: 37.40, lon: -122.10 }, // Bay Area
   { id: 'US-WA-1', lat: 47.61, lon: -122.33 }, // Seattle
-  { id: 'US-OR-1', lat: 45.52, lon: -122.68 }, // Portland
-  { id: 'US-OR-2', lat: 45.52, lon: -122.68 },
   // North America — Canada
   { id: 'CA-MTL-1', lat: 45.50, lon: -73.57 }, // Montreal
   { id: 'CA-MTL-2', lat: 45.50, lon: -73.57 },
   { id: 'CA-MTL-3', lat: 45.50, lon: -73.57 },
-  { id: 'CA-MTL-4', lat: 45.50, lon: -73.57 },
   // Europe
   { id: 'EU-CZ-1',  lat: 50.08, lon:  14.43 }, // Prague
-  { id: 'EU-DK-1',  lat: 55.68, lon:  12.57 }, // Copenhagen
   { id: 'EU-FR-1',  lat: 48.85, lon:   2.35 }, // Paris
   { id: 'EU-NL-1',  lat: 52.37, lon:   4.90 }, // Amsterdam
   { id: 'EU-RO-1',  lat: 44.43, lon:  26.10 }, // Bucharest
   { id: 'EU-SE-1',  lat: 59.33, lon:  18.07 }, // Stockholm
-  { id: 'EU-SE-2',  lat: 59.33, lon:  18.07 },
   { id: 'EUR-IS-1', lat: 64.13, lon: -21.93 }, // Reykjavik
   { id: 'EUR-IS-2', lat: 64.13, lon: -21.93 },
   { id: 'EUR-IS-3', lat: 64.13, lon: -21.93 },
-  { id: 'EUR-IS-4', lat: 64.13, lon: -21.93 },
-  { id: 'EUR-IS-5', lat: 64.13, lon: -21.93 },
   { id: 'EUR-NO-1', lat: 59.91, lon:  10.75 }, // Oslo
-  { id: 'EUR-NO-2', lat: 59.91, lon:  10.75 },
   // Asia Pacific
   { id: 'AP-IN-1',  lat: 19.08, lon:  72.88 }, // Mumbai
   { id: 'AP-JP-1',  lat: 35.68, lon: 139.69 }, // Tokyo
-  { id: 'SEA-SG-1', lat:  1.35, lon: 103.82 }, // Singapore
   // Oceania
   { id: 'OC-AU-1',  lat: -33.87, lon: 151.21 }, // Sydney
 ]

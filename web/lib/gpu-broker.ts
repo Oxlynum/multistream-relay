@@ -34,7 +34,6 @@ import {
   MAX_RTT_REJECTIONS,
   type Datacenter,
 } from '@/lib/datacenters'
-import { fetchDatacenterIds } from '@/lib/runpod'
 import { ACTIVE_PROVIDERS } from '@/lib/providers/runpod'
 import type { GpuCandidate, GpuProvider, PodEnv } from '@/lib/providers/types'
 import { requiredNvencSessions, type UserOutputConfig } from '@/lib/nvenc-utils'
@@ -165,21 +164,13 @@ export async function provisionGpu(args: {
     console.log(`[broker] user needs ${nvencSessions} NVENC sessions — skipping consumer GPUs`)
   }
 
-  // Fetch the live set of valid datacenter IDs from RunPod so we never send
-  // an ID the API no longer recognises (causes a 400 for the whole request).
-  // On failure we fall back to omitting dataCenterIds (RunPod places freely;
-  // the RTT gate below still rejects wrong-region pods after the fact).
-  const liveDcIds = await fetchDatacenterIds()
-  const datacenters = liveDcIds
-    ? RUNPOD_DATACENTERS.filter(dc => liveDcIds.has(dc.id))
-    : RUNPOD_DATACENTERS
-  if (liveDcIds) {
-    console.log(`[broker] live DCs from RunPod: ${datacenters.length} of ${RUNPOD_DATACENTERS.length} in our map`)
-  } else {
-    console.warn('[broker] could not fetch live DC list from RunPod — proceeding without DC filter')
-  }
-
-  const candidates = rankCandidates(args.lat, args.lon, needsProfessionalGpu, datacenters)
+  // RUNPOD_DATACENTERS is already pinned to the REST `POST /pods` create-valid
+  // enum (see lib/datacenters.ts) — every DC we rank here is one RunPod will
+  // actually build in, so the create request never schema-400s on an unknown DC.
+  // We deliberately do NOT query the GraphQL `dataCenters` list: it returns a
+  // wider catalog (~47) that the create endpoint rejects, which is what caused
+  // every provision to fail instantly with "no capacity".
+  const candidates = rankCandidates(args.lat, args.lon, needsProfessionalGpu)
   let attempts = 0
   let bootAttempts = 0
   let rttRejections = 0
