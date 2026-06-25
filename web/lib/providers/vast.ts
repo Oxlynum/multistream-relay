@@ -68,6 +68,7 @@ async function geolocateIps(ips: string[]): Promise<Array<{ lat: number; lon: nu
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(ips),
+      signal: AbortSignal.timeout(6000),   // never let geo stall a provision
     })
     if (!res.ok) return ips.map(() => null)
     const arr = (await res.json()) as Array<{ status: string; lat: number; lon: number }>
@@ -97,7 +98,7 @@ export const vastProvider: GpuProvider = {
     }
     let offers: VastOffer[]
     try {
-      const res = await fetch(`${BASE}/bundles?q=${encodeURIComponent(JSON.stringify(q))}`, { headers: authHeaders() })
+      const res = await fetch(`${BASE}/bundles?q=${encodeURIComponent(JSON.stringify(q))}`, { headers: authHeaders(), signal: AbortSignal.timeout(8000) })
       if (!res.ok) { console.error(`[vast] offer search → ${res.status}`); return [] }
       offers = ((await res.json()).offers ?? []) as VastOffer[]
     } catch (err) {
