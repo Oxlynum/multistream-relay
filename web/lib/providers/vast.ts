@@ -110,8 +110,14 @@ export const vastProvider: GpuProvider = {
     // users who need >3 simultaneous encodes we can't guarantee it, so skip Vast.
     if (needsProfessionalGpu) return []
 
+    // datacenter:{eq:true} = Vast's datacenter-grade hosts (the secure-cloud analog
+    // of RunPod). These have clean, unrestricted networking — crucially, working
+    // OUTBOUND to the platform ingests, which the consumer/residential hosts often
+    // block (a pod can receive OBS but fail to deliver to Twitch). ~61 of ~499 usable
+    // offers are datacenter; restricting to them trades breadth for reliability.
     const q = {
       verified: { eq: true }, rentable: { eq: true }, rented: { eq: false },
+      datacenter: { eq: true },
       num_gpus: { eq: 1 }, dph_total: { lte: maxPricePerHr }, type: 'on-demand',
       order: [['dph_total', 'asc']], limit: 100,
     }

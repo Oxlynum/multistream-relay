@@ -57,11 +57,10 @@ export const runpodProvider: GpuProvider = {
 // every candidate by distance). Both place deterministically: RunPod secure pins a
 // datacenter; Vast rents a specific machine at a known location.
 //
-// Vast re-enabled: a live RTMP-handshake test confirmed Vast's port forwarding
-// carries RTMP fine — the earlier streaming=false was a readiness race (the broker
-// accepted a pod whose port forwarded TCP before MediaMTX was serving). The broker
-// now probes a real RTMP handshake (gpu-broker.ts `probeRtmp`), so a not-yet-ready
-// pod is rejected and cascades instead of being handed to OBS.
+// Vast enabled alongside RunPod. Inbound is solid (RTMP readiness probe). Known
+// open issue under investigation: the OUTBOUND leg (pod → Twitch) can fail on some
+// consumer Vast hosts that restrict outbound — being addressed with a pod-side
+// outbound readiness self-test so the broker only uses hosts that can deliver.
 export const ACTIVE_PROVIDERS: GpuProvider[] = [runpodProvider, vastProvider]
 
 const PROVIDERS: Record<string, GpuProvider> = {
