@@ -176,19 +176,26 @@ export const vastProvider: GpuProvider = {
 
   async create({ candidate, name, imageTag, env }): Promise<CreatedPod> {
     const offerId = candidate.placement.offerId as number
-    // Port mapping: Vast automatically NAT-forwards every port listed in the image's
-    // EXPOSE directive. Our relay Dockerfile has:
-    //   EXPOSE 1935 8080 8890/udp 8889/udp
-    // so Vast assigns random external ports for each on boot. We read them back via
-    // getStatus(). No `ports` field is needed in the rent body — tested live with
-    // test-vast-rent.mjs: Vast maps EXPOSE ports, silently ignores the `ports` field.
+    // Port mapping: Vast auto-forwards TCP EXPOSE ports but NOT UDP EXPOSE ports.
+    // Verified live: relay image (EXPOSE 1935 8080 8890/udp 8889/udp) → Vast only
+    // mapped 1935/tcp and 8080/tcp; 8890/udp and 8889/udp were absent.
+    // UDP ports require explicit `-p HOST:CONTAINER/udp` entries in the env dict —
+    // Vast passes these as additional `docker run -p` flags. Verified live with
+    // nginx:alpine + {"-p 8890:8890/udp":"1","-p 8889:8889/udp":"1"} → both UDP
+    // ports appeared in the instance ports dict within ~15s.
+    // TCP ports (1935, 8080) come free from EXPOSE; no -p flags needed for them.
+    const envDict: Record<string, string> = {
+      ...Object.fromEntries(env.map(e => [e.key, e.value])),
+      '-p 8890:8890/udp': '1',   // SRT ingest — OBS → pod
+      '-p 8889:8889/udp': '1',   // UDP echo probe — broker readiness gate
+    }
     const body: Record<string, unknown> = {
       client_id: 'me',
       image: imageTag,
       disk: 15,
       label: name,
       runtype: 'args',                                  // run the image's default CMD
-      env: Object.fromEntries(env.map(e => [e.key, e.value])),
+      env: envDict,
     }
     // Private registry pull (e.g. the relay image on ghcr.io). Set VAST_IMAGE_LOGIN
     // to a docker-login string ("-u USER -p TOKEN ghcr.io"); omit if the image is public.
