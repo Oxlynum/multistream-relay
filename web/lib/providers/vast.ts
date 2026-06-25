@@ -1,51 +1,191 @@
-import type { GpuProvider, GpuCandidate } from './types'
+import type { GpuProvider, GpuCandidate, PodStatus, CreatedPod } from './types'
 
-// Vast.ai provider — SCAFFOLD, not yet wired into ACTIVE_PROVIDERS.
+// Vast.ai provider. Vast is a marketplace: you search live offers (each = a
+// specific machine with a known GPU, price, geolocation, bandwidth) and rent one.
+// Each offer becomes a location-stamped GpuCandidate, so Vast machines rank by
+// distance against RunPod datacenters in the same list — closest wins across both.
 //
-// Vast is a marketplace: instead of pinning a datacenter, you search live offers
-// (each offer = a specific machine with a known GPU, price, and geolocation) and
-// rent one. That maps cleanly onto our location-stamped candidate model — each
-// offer becomes a GpuCandidate with the machine's real coordinates, so Vast
-// offers rank against RunPod datacenters by distance automatically.
-//
-// IMPLEMENTATION IS DELIBERATELY DEFERRED until we verify the live API shape with
-// scripts/test-vast.mjs (the same "probe before you trust the API" discipline that
-// caught RunPod's DC-list and stock-status surprises). The probe will confirm:
-//   • offer search endpoint + query format (GET /api/v0/bundles?q=...)
-//   • the exact fields: gpu_name, dph_total (price), geolocation (string like
-//     "US, California" — needs mapping to lat/lon), reliability2, cuda/driver,
-//     inet_up/down (bandwidth matters for streaming), rentable/verified flags
-//   • the rent/create + destroy endpoints and the port-mapping shape
-// Once verified, fill the methods below and add vastProvider to ACTIVE_PROVIDERS
-// + the PROVIDERS registry in runpod.ts.
+// Verified against the live API with scripts/test-vast.mjs (offer search) and
+// scripts/test-vast-rent.mjs (rent → ports → destroy lifecycle).
 
+const BASE = 'https://console.vast.ai/api/v0'
 const VAST_API_KEY = process.env.VAST_API_KEY
+
+function authHeaders(): Record<string, string> {
+  return { Authorization: `Bearer ${VAST_API_KEY}`, 'Content-Type': 'application/json' }
+}
+
+// compute_cap is (compute capability × 100): Pascal=610, Turing=750, Ampere=860,
+// Ada=890, Blackwell=1200. The relay's p6 preset + B-frames + temporal-AQ need
+// Turing or newer, so this is the hard floor that drops Pascal/Maxwell cards.
+const MIN_COMPUTE_CAP = 750
+// Streaming guardrails for a usable host.
+const MIN_UPLOAD_MBPS = 50      // multistream fan-out needs real upload headroom
+const MIN_RELIABILITY = 0.95    // host uptime score (reliability2)
+const MIN_DIRECT_PORTS = 2      // need RTMP (1935) + HLS (8888) mapped
+
+interface VastOffer {
+  id: number
+  gpu_name: string
+  compute_cap: number
+  dph_total: number
+  reliability2: number
+  inet_up: number
+  direct_port_count: number
+  public_ipaddr: string | null
+  geolocation: string | null
+}
+
+// Country-centroid fallback coords (used only if IP geolocation fails). Keyed by
+// the 2-letter code at the tail of Vast's geolocation string ("California, US").
+const COUNTRY_COORDS: Record<string, [number, number]> = {
+  US: [39.8, -98.6], CA: [56.1, -106.3], GB: [54.0, -2.0], DE: [51.2, 10.4],
+  FR: [46.6, 2.2], NL: [52.1, 5.3], SE: [60.1, 18.6], NO: [60.5, 8.5],
+  FI: [61.9, 25.7], CZ: [49.8, 15.5], SK: [48.7, 19.7], PL: [51.9, 19.1],
+  BG: [42.7, 25.5], RO: [45.9, 25.0], ES: [40.4, -3.7], IT: [41.9, 12.6],
+  KR: [35.9, 127.8], JP: [36.2, 138.3], CN: [35.9, 104.2], IN: [20.6, 78.9],
+  SG: [1.35, 103.8], AU: [-25.3, 133.8], AR: [-38.4, -63.6], BR: [-14.2, -51.9],
+  UA: [48.4, 31.2], TR: [39.0, 35.2], AE: [23.4, 53.8], IS: [64.1, -21.9],
+}
+
+function countryFallback(geolocation: string | null): { lat: number; lon: number } | null {
+  const cc = geolocation?.split(',').pop()?.trim().toUpperCase()
+  const c = cc && COUNTRY_COORDS[cc]
+  return c ? { lat: c[0], lon: c[1] } : null
+}
+
+// Batch-geolocate offer IPs (one call) → city-level coords. ip-api free batch is
+// http-only and allows 100 IPs/request. Returns coords aligned to the input; a
+// failed lookup (or whole-call failure) yields null so the caller can fall back.
+async function geolocateIps(ips: string[]): Promise<Array<{ lat: number; lon: number } | null>> {
+  if (ips.length === 0) return []
+  try {
+    const res = await fetch('http://ip-api.com/batch?fields=status,lat,lon', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(ips),
+    })
+    if (!res.ok) return ips.map(() => null)
+    const arr = (await res.json()) as Array<{ status: string; lat: number; lon: number }>
+    return arr.map(r => (r?.status === 'success' ? { lat: r.lat, lon: r.lon } : null))
+  } catch {
+    return ips.map(() => null)
+  }
+}
+
+function gpuKeyOf(name: string): string {
+  return 'vast-' + name.toLowerCase().replace(/[^a-z0-9]+/g, '')
+}
 
 export const vastProvider: GpuProvider = {
   name: 'vast',
 
-  async listCandidates(): Promise<GpuCandidate[]> {
+  async listCandidates({ maxPricePerHr, needsProfessionalGpu }) {
     if (!VAST_API_KEY) return []
-    // TODO(vast): GET offers, filter to NVENC-capable (Turing+) GPUs that are
-    // verified + rentable + on-demand + ≤ maxPricePerHr with adequate upload
-    // bandwidth, map each offer's geolocation → {lat,lon}, return as candidates
-    // with placement: { offerId }. Until verified, contribute nothing.
-    return []
+    // Vast machines are consumer GPUs (3-session NVENC cap on older drivers). For
+    // users who need >3 simultaneous encodes we can't guarantee it, so skip Vast.
+    if (needsProfessionalGpu) return []
+
+    const q = {
+      verified: { eq: true }, rentable: { eq: true }, rented: { eq: false },
+      num_gpus: { eq: 1 }, dph_total: { lte: maxPricePerHr }, type: 'on-demand',
+      order: [['dph_total', 'asc']], limit: 100,
+    }
+    let offers: VastOffer[]
+    try {
+      const res = await fetch(`${BASE}/bundles?q=${encodeURIComponent(JSON.stringify(q))}`, { headers: authHeaders() })
+      if (!res.ok) { console.error(`[vast] offer search → ${res.status}`); return [] }
+      offers = ((await res.json()).offers ?? []) as VastOffer[]
+    } catch (err) {
+      console.error('[vast] offer search failed:', err instanceof Error ? err.message : err)
+      return []
+    }
+
+    const usable = offers.filter(o =>
+      o.compute_cap >= MIN_COMPUTE_CAP &&
+      o.reliability2 >= MIN_RELIABILITY &&
+      o.inet_up >= MIN_UPLOAD_MBPS &&
+      o.direct_port_count >= MIN_DIRECT_PORTS &&
+      o.dph_total <= maxPricePerHr &&
+      !!o.public_ipaddr,
+    )
+    if (usable.length === 0) return []
+
+    const coords = await geolocateIps(usable.map(o => o.public_ipaddr as string))
+    const candidates: GpuCandidate[] = []
+    usable.forEach((o, i) => {
+      const loc = coords[i] ?? countryFallback(o.geolocation)
+      if (!loc) return   // can't place it on the map → can't rank it → skip
+      candidates.push({
+        provider: 'vast',
+        gpuKey: gpuKeyOf(o.gpu_name),
+        gpuTypeId: o.gpu_name,
+        pricePerHr: o.dph_total,
+        lat: loc.lat,
+        lon: loc.lon,
+        label: `vast:${o.id} ${o.gpu_name} ${o.geolocation ?? ''}`.trim(),
+        placement: { offerId: o.id },
+      })
+    })
+    return candidates
   },
 
-  async create(): Promise<never> {
-    throw new Error('vast provider not implemented yet — run scripts/test-vast.mjs to verify the API, then implement')
+  async create({ candidate, name, imageTag, env }): Promise<CreatedPod> {
+    const offerId = candidate.placement.offerId as number
+    // Vast forwards the ports the IMAGE declares with EXPOSE (a rent-time `ports`
+    // param is ignored — verified). The relay Dockerfile EXPOSEs 1935 (RTMP), so
+    // that maps automatically; we read the host port back in getStatus.
+    const body: Record<string, unknown> = {
+      client_id: 'me',
+      image: imageTag,
+      disk: 15,
+      label: name,
+      runtype: 'args',                                  // run the image's default CMD
+      env: Object.fromEntries(env.map(e => [e.key, e.value])),
+    }
+    // Private registry pull (e.g. the relay image on ghcr.io). Set VAST_IMAGE_LOGIN
+    // to a docker-login string ("-u USER -p TOKEN ghcr.io"); omit if the image is public.
+    if (process.env.VAST_IMAGE_LOGIN) body.image_login = process.env.VAST_IMAGE_LOGIN
+
+    const res = await fetch(`${BASE}/asks/${offerId}/`, { method: 'PUT', headers: authHeaders(), body: JSON.stringify(body) })
+    const text = await res.text()
+    let j: { success?: boolean; new_contract?: number; msg?: string } = {}
+    try { j = JSON.parse(text) } catch { /* non-JSON */ }
+    if (!res.ok || !j.success || !j.new_contract) {
+      throw new Error(`Vast rent ${offerId} → ${res.status}: ${j.msg ?? text.slice(0, 200)}`)
+    }
+    return { podId: String(j.new_contract), costPerHr: candidate.pricePerHr }
   },
 
-  async getStatus(): Promise<never> {
-    throw new Error('vast provider not implemented yet')
+  async getStatus(podId): Promise<PodStatus> {
+    // Single-instance endpoint returns { instances: <object> } (the list endpoint
+    // returns nothing usable). cur_state is the live status; ports appear once the
+    // container is up, Docker-binding shape: { "1935/tcp": [{ HostIp, HostPort }] }.
+    const res = await fetch(`${BASE}/instances/${podId}/`, { headers: authHeaders() })
+    if (!res.ok) return { status: 'unknown', ip: null, port: null, hlsPort: null, dataCenterId: null }
+    const inst = (await res.json()).instances as {
+      cur_state?: string; actual_status?: string; public_ipaddr?: string
+      ports?: Record<string, Array<{ HostIp: string; HostPort: string }>>
+    } | undefined
+    if (!inst) return { status: 'terminated', ip: null, port: null, hlsPort: null, dataCenterId: null }
+    const ip = inst.public_ipaddr ?? null
+    const rtmp = inst.ports?.['1935/tcp']?.[0]?.HostPort
+    const hls = inst.ports?.['8888/tcp']?.[0]?.HostPort
+    return {
+      status: inst.cur_state ?? inst.actual_status ?? 'unknown',
+      ip: rtmp && ip ? ip : null,      // ready only once the RTMP port is mapped
+      port: rtmp ? Number(rtmp) : null,
+      hlsPort: hls ? Number(hls) : null,
+      dataCenterId: null,              // Vast has no datacenter id; placement is by offer
+    }
   },
 
-  async stop(): Promise<void> {
-    throw new Error('vast provider not implemented yet')
+  async stop(podId): Promise<void> {
+    // Vast has no cheap "stop" — destroying is the right teardown (no idle billing).
+    await this.destroy(podId)
   },
 
-  async destroy(): Promise<void> {
-    throw new Error('vast provider not implemented yet')
+  async destroy(podId): Promise<void> {
+    await fetch(`${BASE}/instances/${podId}/`, { method: 'DELETE', headers: authHeaders() })
   },
 }
