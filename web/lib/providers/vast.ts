@@ -21,6 +21,9 @@ function authHeaders(): Record<string, string> {
 const MIN_COMPUTE_CAP = 750
 // Streaming guardrails for a usable host.
 const MIN_UPLOAD_MBPS = 50      // multistream fan-out needs real upload headroom
+const MIN_DOWNLOAD_MBPS = 300   // host pulls the multi-GB relay image on every rent;
+                                // slow download → cold-start blows the readiness window
+                                // (verified: 801 Mbps host mapped RTMP in ~83s)
 const MIN_RELIABILITY = 0.95    // host uptime score (reliability2)
 const MIN_DIRECT_PORTS = 2      // need RTMP (1935) + HLS (8888) mapped
 
@@ -31,6 +34,7 @@ interface VastOffer {
   dph_total: number
   reliability2: number
   inet_up: number
+  inet_down: number
   direct_port_count: number
   public_ipaddr: string | null
   geolocation: string | null
@@ -105,6 +109,7 @@ export const vastProvider: GpuProvider = {
       o.compute_cap >= MIN_COMPUTE_CAP &&
       o.reliability2 >= MIN_RELIABILITY &&
       o.inet_up >= MIN_UPLOAD_MBPS &&
+      o.inet_down >= MIN_DOWNLOAD_MBPS &&
       o.direct_port_count >= MIN_DIRECT_PORTS &&
       o.dph_total <= maxPricePerHr &&
       !!o.public_ipaddr,

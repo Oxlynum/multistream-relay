@@ -126,8 +126,10 @@ export const RUNPOD_CLOUD_TYPE = 'SECURE'
 // Readiness gate: after a pod is created we poll until it has a public IP (i.e.
 // it actually booted). If it never does within the timeout, abandon it and try
 // the next candidate — inventory is not the same as a working pod.
-// RunPod cold start: Docker pull (60-90s) + container start (~10s) ≈ 100s.
-export const READINESS_TIMEOUT_MS = 120_000
+// RunPod secure boots in ~45-100s; Vast fresh hosts pull the full relay image
+// every rent (~83s measured on an 800Mbps host), so 180s gives margin on slower
+// hosts while staying well under Vercel's 300s function limit.
+export const READINESS_TIMEOUT_MS = 180_000
 export const READINESS_POLL_MS = 5_000
 
 // Cap how many pods we'll boot-and-abandon before giving up. Capacity misses

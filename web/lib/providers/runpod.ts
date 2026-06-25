@@ -1,5 +1,6 @@
 import { createPod, getPodStatus, stopPod, destroyPod } from '@/lib/runpod'
 import { GPU_CATALOG, RUNPOD_DATACENTERS, RUNPOD_CLOUD_TYPE } from '@/lib/datacenters'
+import { vastProvider } from './vast'
 import type { GpuProvider, GpuCandidate } from './types'
 
 export const runpodProvider: GpuProvider = {
@@ -53,13 +54,13 @@ export const runpodProvider: GpuProvider = {
 }
 
 // All providers the broker ranks across, in no particular order (the broker sorts
-// every candidate by distance). Vast.ai joins here once its implementation is
-// verified against the live API — see lib/providers/vast.ts.
-export const ACTIVE_PROVIDERS: GpuProvider[] = [runpodProvider]
+// every candidate by distance). Both place deterministically: RunPod secure pins a
+// datacenter; Vast rents a specific machine at a known location.
+export const ACTIVE_PROVIDERS: GpuProvider[] = [runpodProvider, vastProvider]
 
 const PROVIDERS: Record<string, GpuProvider> = {
   runpod: runpodProvider,
-  // vast: vastProvider,   // wire in after the live-API probe (scripts/test-vast.mjs)
+  vast: vastProvider,
 }
 
 /** Resolve the provider that owns an existing instance (for stop/teardown). */
