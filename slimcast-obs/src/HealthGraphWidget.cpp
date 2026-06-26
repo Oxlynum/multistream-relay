@@ -16,27 +16,11 @@
 
 static const QString BASE_URL = QStringLiteral("https://slimcast-oxlynum.vercel.app");
 
-static QColor colorForKey(const QString &key)
-{
-    if (key.isEmpty())     return QColor(0xff, 0xff, 0xff);  // white  — ingest
-    if (key == "twitch")   return QColor(0x9b, 0x59, 0xf5);  // purple
-    if (key == "youtube")  return QColor(0xff, 0x33, 0x33);  // red
-    if (key == "facebook") return QColor(0x4d, 0x8e, 0xf0);  // blue
-    if (key == "kick")     return QColor(0x37, 0xd6, 0x7a);  // green
-    if (key == "tiktok")   return QColor(0xff, 0x69, 0xb4);  // pink
-    return QColor(0x8a, 0x93, 0xa3);
-}
-
 // ── GraphCanvas ───────────────────────────────────────────────────────────────
 
 class GraphCanvas : public QWidget {
     Q_OBJECT
 public:
-    struct Line {
-        QColor        color;
-        QList<double> bitrate;
-    };
-
     explicit GraphCanvas(QWidget *parent = nullptr) : QWidget(parent)
     {
         setMinimumHeight(180);
@@ -44,10 +28,11 @@ public:
         setAutoFillBackground(false);
     }
 
-    void setData(bool streaming, const QList<Line> &lines)
+    void setData(bool streaming, const QList<double> &bitrates, double currentHealth)
     {
-        m_streaming = streaming;
-        m_lines     = lines;
+        m_streaming     = streaming;
+        m_bitrates      = bitrates;
+        m_currentHealth = currentHealth;
         update();
     }
 
@@ -59,71 +44,70 @@ protected:
         const QRect r = rect().adjusted(6, 6, -6, -6);
         p.fillRect(rect(), QColor(0x0f, 0x13, 0x1c));
 
-        if (!m_streaming) {
+        auto drawCenteredText = [&](const QString &text) {
             p.setPen(QColor(0x6b, 0x72, 0x80));
             QFont f = font();
             f.setPointSize(10);
             p.setFont(f);
-            p.drawText(r, Qt::AlignCenter | Qt::TextWordWrap,
-                       "Start streaming to see connection health");
+            p.drawText(r, Qt::AlignCenter | Qt::TextWordWrap, text);
+        };
+
+        if (!m_streaming) {
+            drawCenteredText("Start streaming to see connection health");
             return;
         }
 
-        // Shared y-scale: max bitrate across all lines
+        if (m_bitrates.size() < 2) {
+            drawCenteredText("Waiting for data...");
+            return;
+        }
+
+        // Line color from health score
+        QColor lineColor;
+        if (m_currentHealth < 0)       lineColor = QColor(0x8a, 0x93, 0xa3);
+        else if (m_currentHealth >= 80) lineColor = QColor(0x10, 0xb9, 0x81); // green
+        else if (m_currentHealth >= 50) lineColor = QColor(0xf5, 0x9e, 0x0b); // amber
+        else                            lineColor = QColor(0xf4, 0x3f, 0x5e); // red
+
+        // y-scale: max bitrate with 8% headroom
         double mx = 1.0;
-        for (const Line &l : m_lines)
-            for (double v : l.bitrate)
-                if (v > mx) mx = v;
+        for (double v : m_bitrates)
+            if (v > mx) mx = v;
         mx *= 1.08;
 
-        // Vertical separator at 1/3 — the relay node in the pipeline
-        const int sepX  = r.left() + r.width() / 3;
-        const int nodeY = r.top()  + r.height() / 2;
-
-        QPen sepPen(QColor(0x55, 0x60, 0x70, 160));
-        sepPen.setWidthF(1.0);
-        sepPen.setStyle(Qt::DashLine);
-        p.setPen(sepPen);
-        p.drawLine(sepX, r.top(), sepX, r.bottom());
-
-        p.setPen(Qt::NoPen);
-        p.setBrush(QColor(0x55, 0x60, 0x70, 200));
-        p.drawEllipse(QPoint(sepX, nodeY), 5, 5);
-
-        // All bitrate lines on the same scale
-        for (const Line &l : m_lines) {
-            if (l.bitrate.size() < 2) continue;
-            drawLine(p, r, l.bitrate, l.color, mx);
-        }
-    }
-
-private:
-    void drawLine(QPainter &p, const QRect &r,
-                  const QList<double> &data, const QColor &color, double mx)
-    {
-        const int    n     = data.size();
+        const int    n     = m_bitrates.size();
         const double xStep = double(r.width()) / double(n - 1);
 
         QPolygon poly;
         for (int i = 0; i < n; ++i) {
             const int x = r.left() + int(i * xStep + 0.5);
-            const int y = r.bottom() - int(data[i] / mx * r.height() + 0.5);
+            const int y = r.bottom() - int(m_bitrates[i] / mx * r.height() + 0.5);
             poly << QPoint(x, std::clamp(y, r.top(), r.bottom()));
         }
 
-        QPen pen(color);
-        pen.setWidthF(1.6);
+        QPen pen(lineColor);
+        pen.setWidthF(1.8);
         p.setPen(pen);
         p.drawPolyline(poly);
     }
 
-    bool        m_streaming = false;
-    QList<Line> m_lines;
+private:
+    bool          m_streaming     = false;
+    double        m_currentHealth = -1.0;
+    QList<double> m_bitrates;
 };
 
 #include "HealthGraphWidget.moc"
 
 // ── HealthGraphWidget ─────────────────────────────────────────────────────────
+
+static QColor healthColor(double score)
+{
+    if (score < 0)       return QColor(0x8a, 0x93, 0xa3);
+    if (score >= 80)     return QColor(0x10, 0xb9, 0x81);
+    if (score >= 50)     return QColor(0xf5, 0x9e, 0x0b);
+    return QColor(0xf4, 0x3f, 0x5e);
+}
 
 static QString chipStyle(const QColor &c)
 {
@@ -142,6 +126,17 @@ HealthGraphWidget::HealthGraphWidget(QWidget *parent)
     ly->setContentsMargins(8, 8, 8, 8);
     ly->setSpacing(6);
 
+    // Dropdown: "SlimCast (OBS → GPU)" + per-platform entries added by setActivePlatforms
+    m_selector = new QComboBox(this);
+    m_selector->addItem(QStringLiteral("→ SlimCast"), QString(""));
+    m_selector->setStyleSheet(
+        "QComboBox { background: #1e2535; color: #94a3b8; border: 1px solid #2d3a50;"
+        " border-radius: 6px; padding: 3px 8px; font-size: 11px; }"
+        "QComboBox::drop-down { border: none; }"
+        "QComboBox QAbstractItemView { background: #1e2535; color: #94a3b8;"
+        " border: 1px solid #2d3a50; selection-background-color: #2d3a50; }");
+    ly->addWidget(m_selector);
+
     m_canvas = new GraphCanvas(this);
     ly->addWidget(m_canvas, 1);
 
@@ -152,11 +147,14 @@ HealthGraphWidget::HealthGraphWidget(QWidget *parent)
     m_chipsLayout->addStretch();
     ly->addWidget(chipsRow);
 
+    connect(m_selector, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, &HealthGraphWidget::onSelectorChanged);
+
     m_timer->setInterval(5000);
     connect(m_timer, &QTimer::timeout, this, &HealthGraphWidget::onTimer);
     m_timer->start();
 
-    rebuildSources();
+    pushToCanvas();
 }
 
 void HealthGraphWidget::setApiKey(const QString &key)
@@ -169,7 +167,7 @@ void HealthGraphWidget::setStreaming(bool streaming)
     if (m_streaming == streaming) return;
     m_streaming = streaming;
     if (!streaming)
-        for (Source &s : m_sources) s.pts.clear();
+        m_points.clear();
     pushToCanvas();
 }
 
@@ -177,75 +175,49 @@ void HealthGraphWidget::setActivePlatforms(const QStringList &platforms)
 {
     if (m_platforms == platforms) return;
     m_platforms = platforms;
-    rebuildSources();
+
+    const QString prevKey = m_selectedKey;
+
+    m_selector->blockSignals(true);
+    // Always keep index 0 (SlimCast); rebuild everything after it
+    while (m_selector->count() > 1)
+        m_selector->removeItem(1);
+    for (const QString &plat : platforms) {
+        const QString label = QStringLiteral("→ ") + plat[0].toUpper() + plat.mid(1);
+        m_selector->addItem(label, plat);
+    }
+    // Restore prior selection if still present, else fall back to SlimCast
+    int restoreIdx = 0;
+    for (int i = 0; i < m_selector->count(); ++i) {
+        if (m_selector->itemData(i).toString() == prevKey) {
+            restoreIdx = i;
+            break;
+        }
+    }
+    m_selector->setCurrentIndex(restoreIdx);
+    m_selectedKey = m_selector->itemData(restoreIdx).toString();
+    m_selector->blockSignals(false);
 }
 
-void HealthGraphWidget::rebuildSources()
+void HealthGraphWidget::onSelectorChanged(int index)
 {
-    QList<Source> fresh;
-    {
-        Source s;
-        s.label = "OBS → SlimCast";
-        s.key   = "";
-        for (const Source &old : m_sources)
-            if (old.key == s.key) { s.pts = old.pts; break; }
-        fresh.append(s);
-    }
-    for (const QString &plat : m_platforms) {
-        Source s;
-        s.label = QStringLiteral("→ ") + plat[0].toUpper() + plat.mid(1);
-        s.key   = plat;
-        for (const Source &old : m_sources)
-            if (old.key == s.key) { s.pts = old.pts; break; }
-        fresh.append(s);
-    }
-    m_sources = fresh;
+    m_selectedKey = m_selector->itemData(index).toString();
+    m_points.clear();
     pushToCanvas();
-}
-
-void HealthGraphWidget::updateChips()
-{
-    // Remove all chips (everything except the trailing stretch)
-    while (m_chipsLayout->count() > 1)
-        delete m_chipsLayout->takeAt(0)->widget();
-
-    if (!m_streaming) return;
-
-    for (const Source &s : m_sources) {
-        if (s.pts.isEmpty()) continue;
-        const QColor c = colorForKey(s.key);
-        auto *chip = new QLabel(
-            QString("%1  %2 kbps").arg(s.label).arg(int(s.pts.last().bitrateKbps)));
-        chip->setStyleSheet(chipStyle(c));
-        m_chipsLayout->insertWidget(m_chipsLayout->count() - 1, chip);
-    }
-}
-
-void HealthGraphWidget::pushToCanvas()
-{
-    QList<GraphCanvas::Line> lines;
-    for (const Source &s : m_sources) {
-        if (s.pts.isEmpty()) continue;
-        GraphCanvas::Line l;
-        l.color = colorForKey(s.key);
-        for (const DataPoint &pt : s.pts)
-            l.bitrate.append(pt.bitrateKbps);
-        lines.append(l);
-    }
-    m_canvas->setData(m_streaming, lines);
-    updateChips();
-}
-
-void HealthGraphWidget::onTimer()
-{
     if (m_streaming && !m_apiKey.isEmpty())
         fetchMetrics();
 }
 
 void HealthGraphWidget::fetchMetrics()
 {
-    QNetworkRequest req(QUrl(BASE_URL + "/api/metrics/connection"));
-    req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+    QString urlStr = BASE_URL + QStringLiteral("/api/metrics/connection?window=10");
+    if (m_selectedKey.isEmpty())
+        urlStr += QStringLiteral("&direction=inbound");
+    else
+        urlStr += QStringLiteral("&direction=outbound&platform=") + m_selectedKey;
+
+    QUrl url(urlStr);
+    QNetworkRequest req(url);
     req.setRawHeader("Authorization", ("Bearer " + m_apiKey).toUtf8());
     req.setTransferTimeout(8000);
 
@@ -256,33 +228,58 @@ void HealthGraphWidget::fetchMetrics()
 
         const auto doc = QJsonDocument::fromJson(reply->readAll());
         if (!doc.isObject()) return;
-        const auto obj = doc.object();
 
-        if (!m_sources.isEmpty()) {
+        QList<DataPoint> fresh;
+        for (const QJsonValue &v : doc.object()["points"].toArray()) {
+            const auto obj = v.toObject();
             DataPoint dp;
-            dp.bitrateKbps = obj["ingest_kbps"].toDouble();
-            dp.healthScore  = obj["health_score"].toDouble();
-            auto &pts = m_sources[0].pts;
-            pts.append(dp);
-            if (pts.size() > MAX_POINTS) pts.removeFirst();
+            dp.bitrateKbps   = obj["bitrate_kbps"].toDouble();
+            dp.healthScore   = obj["health_score"].toDouble();
+            dp.droppedFrames = obj["dropped_frames"].toInt();
+            fresh.append(dp);
         }
-
-        for (const QJsonValue &v : obj["outputs"].toArray()) {
-            const auto o   = v.toObject();
-            const QString key = o["platform"].toString();
-            for (int i = 1; i < m_sources.size(); ++i) {
-                if (m_sources[i].key == key) {
-                    DataPoint dp;
-                    dp.bitrateKbps = o["outbound_kbps"].toDouble();
-                    dp.healthScore  = o["health_score"].toDouble();
-                    auto &pts = m_sources[i].pts;
-                    pts.append(dp);
-                    if (pts.size() > MAX_POINTS) pts.removeFirst();
-                    break;
-                }
-            }
-        }
-
+        m_points = fresh;
         pushToCanvas();
     });
+}
+
+void HealthGraphWidget::onTimer()
+{
+    if (m_streaming && !m_apiKey.isEmpty())
+        fetchMetrics();
+}
+
+void HealthGraphWidget::pushToCanvas()
+{
+    QList<double> bitrates;
+    double currentHealth = -1.0;
+    for (const DataPoint &pt : m_points)
+        bitrates.append(pt.bitrateKbps);
+    if (!m_points.isEmpty())
+        currentHealth = m_points.last().healthScore;
+
+    m_canvas->setData(m_streaming, bitrates, currentHealth);
+    updateChips();
+}
+
+void HealthGraphWidget::updateChips()
+{
+    while (m_chipsLayout->count() > 1)
+        delete m_chipsLayout->takeAt(0)->widget();
+
+    if (!m_streaming || m_points.isEmpty()) return;
+
+    const DataPoint &last = m_points.last();
+    const QColor c = healthColor(last.healthScore);
+
+    QString text = QString("%1  %2 kbps  %3%")
+        .arg(m_selector->currentText())
+        .arg(int(last.bitrateKbps))
+        .arg(int(last.healthScore));
+    if (last.droppedFrames > 0)
+        text += QString("  (%1 dropped)").arg(last.droppedFrames);
+
+    auto *chip = new QLabel(text);
+    chip->setStyleSheet(chipStyle(c));
+    m_chipsLayout->insertWidget(0, chip);
 }

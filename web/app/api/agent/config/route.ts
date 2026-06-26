@@ -27,15 +27,25 @@ export async function GET(request: NextRequest) {
 
   const outputSettings: OutputSettingsMap = (profile?.output_settings as OutputSettingsMap) ?? {}
 
+  const outputs = buildAgentOutputs(
+    (platforms ?? []) as PlatformRow[],
+    outputSettings,
+    {
+      landscape: profile?.landscape_bitrate_kbps ?? 6000,
+      portrait: profile?.portrait_bitrate_kbps ?? 4000,
+    },
+  )
+
+  const enabled = outputs.filter(o => o.enabled)
+  console.log(
+    `[agent/config] user=${userId.slice(0, 8)} total=${outputs.length} enabled=${enabled.length}`,
+    enabled.map(o =>
+      `${o.name}(${o.orientation},mode=${o.mode},url=${(o.url ?? '').slice(0, 40)},key=${o.key ? o.key.slice(0, 6) + '…' : 'MISSING'})`
+    ).join(' | ')
+  )
+
   return Response.json({
-    outputs: buildAgentOutputs(
-      (platforms ?? []) as PlatformRow[],
-      outputSettings,
-      {
-        landscape: profile?.landscape_bitrate_kbps ?? 6000,
-        portrait: profile?.portrait_bitrate_kbps ?? 4000,
-      },
-    ),
+    outputs,
     crop: {
       zoom: profile?.portrait_zoom ?? 1.0,
       pos_x: profile?.portrait_pos_x ?? 0.5,

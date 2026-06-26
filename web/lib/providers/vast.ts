@@ -38,7 +38,13 @@ const MIN_DIRECT_PORTS = 3      // need RTMP (1935) + SRT (8890/udp) + UDP probe
 // Estimated traffic for a typical 4–5 platform 1080p60 fan-out:
 const EGRESS_GB_PER_HR = 14     // ~30 Mbps out (landscape tee + YT passthrough + portrait)
 const INGRESS_GB_PER_HR = 6     // ~13 Mbps in (OBS → pod)
-const MAX_EGRESS_COST_PER_TB = 8  // hard reject: caps bandwidth at ~$0.11/hr regardless of distance
+// Raised from $8 to $40: the original $8 cap cut 85% of the datacenter pool
+// (all Turing/Ampere hosts in the US/EU have $12–40/TB egress), leaving only
+// 3 non-regressed machines globally (2× A40 in AU, 1× A100 in SI). The all-in
+// price ceiling (PRICE_CEILING) already guards against expensive-bandwidth+cheap-GPU
+// combos — e.g. a $40/TB host at $0.05 GPU runs $0.61/hr, well under $1. Keeping
+// a cap at $40 excludes any future gougers above that tier without stranding the pool.
+const MAX_EGRESS_COST_PER_TB = 40
 
 // All-in $/hr = GPU rate + estimated bandwidth cost. Used for the price ceiling
 // AND for ranking, so Vast competes with RunPod on true cost, not just GPU price.

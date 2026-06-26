@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QWidget>
+#include <QComboBox>
 #include <QHBoxLayout>
 #include <QTimer>
 #include <QNetworkAccessManager>
@@ -22,33 +23,28 @@ public:
 
 private slots:
     void onTimer();
+    void onSelectorChanged(int index);
 
 private:
     void fetchMetrics();
-    void rebuildSources();
     void pushToCanvas();
     void updateChips();
 
-    static constexpr int MAX_POINTS = 60;
-
     struct DataPoint {
-        double bitrateKbps = 0;
-        double healthScore  = 0;
-    };
-
-    struct Source {
-        QString label;
-        QString key;   // "" = ingest, else platform id
-        QList<DataPoint> pts;
+        double bitrateKbps   = 0;
+        double healthScore   = 0;
+        int    droppedFrames = 0;
     };
 
     GraphCanvas           *m_canvas      = nullptr;
+    QComboBox             *m_selector    = nullptr;
     QHBoxLayout           *m_chipsLayout = nullptr;
     QNetworkAccessManager *m_nam         = nullptr;
     QTimer                *m_timer       = nullptr;
 
-    QString       m_apiKey;
-    bool          m_streaming = false;
-    QStringList   m_platforms;
-    QList<Source> m_sources;
+    QString          m_apiKey;
+    QString          m_selectedKey;   // "" = inbound (SlimCast), else platform id
+    bool             m_streaming   = false;
+    QStringList      m_platforms;
+    QList<DataPoint> m_points;
 };

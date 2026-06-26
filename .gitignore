@@ -16,3 +16,6 @@ multistream-relay.zip
 # macOS
 .DS_Store
 .vercel
+
+# Research / scratch notes (not for the repo)
+nvidia-research.txt
