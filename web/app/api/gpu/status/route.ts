@@ -26,7 +26,7 @@ export async function GET(request: Request) {
 
   const { data: instance } = await supabase
     .from('gpu_instances')
-    .select('status, ip_address, ingest_port, hls_port, srt_port, ingest_key, last_seen_at, burn_rate, outputs, streaming, max_session_at, datacenter, gpu_type')
+    .select('status, ip_address, ingest_port, hls_port, srt_port, ingest_key, srt_passphrase, last_seen_at, burn_rate, outputs, streaming, max_session_at, datacenter, gpu_type')
     .eq('user_id', userId)
     .maybeSingle()
 
@@ -80,8 +80,12 @@ export async function GET(request: Request) {
   // SRT uplink: when the pod has an SRT port, the plugin should publish SRT instead
   // of RTMP. The streamid carries the per-pod ingest path (publish:<key>), so the
   // key both routes the publish and gates access — same secret as the RTMP path.
+  // latency=5000 → 5s jitter buffer (SRT negotiates MAX(caller,listener); OBS is
+  // caller). When the pod has a per-pod passphrase, append it so OBS publishes an
+  // AES-encrypted uplink (MediaMTX requires the same passphrase to accept it).
   const srtUrl = instance.ip_address && instance.srt_port && instance.ingest_key
-    ? `srt://${instance.ip_address}:${instance.srt_port}?streamid=publish:${instance.ingest_key}&latency=5000`
+    ? `srt://${instance.ip_address}:${instance.srt_port}?streamid=publish:${instance.ingest_key}&latency=5000` +
+      (instance.srt_passphrase ? `&passphrase=${instance.srt_passphrase}&pbkeylen=16` : '')
     : null
   console.log(`[gpu/status] effectiveStatus=${effectiveStatus} streaming=${instance.streaming} ip=${instance.ip_address} port=${instance.ingest_port} hls_port=${instance.hls_port ?? 'null'} srt_port=${instance.srt_port ?? 'null'} key=${instance.ingest_key ? instance.ingest_key.slice(0,8)+'…' : 'null'} rtmp_url=${server}`)
 

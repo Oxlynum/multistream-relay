@@ -46,6 +46,13 @@ LOCAL_SOURCE = os.environ.get(
 LOG_LINES = 250
 RESTART_MIN = 2.0      # seconds
 RESTART_MAX = 30.0     # seconds
+# Crash-loop detection: a process that keeps dying within seconds is broken (bad
+# codec/flag/host), not just disconnected. After this many consecutive fast exits
+# the runner flips to a clear 'error' state (surfaced in status()/heartbeat/panel)
+# instead of masquerading as 'restarting' forever — so a real failure is visible
+# rather than looking like an endless "connecting".
+CRASH_LOOP_THRESHOLD = 5
+CRASH_LOOP_MIN_RUNTIME = 15.0   # an exit sooner than this counts as a crash, not a clean disconnect
 
 # ---- secret redaction ----------------------------------------------------
 # Stream keys end up embedded in the FFmpeg command (rtmp://host/app/<KEY>) and
@@ -126,6 +133,15 @@ SOURCE_HEIGHT = int(os.environ.get("SOURCE_HEIGHT", "1080"))
 PORTRAIT_WIDTH = 1080
 PORTRAIT_HEIGHT = 1920
 
+# Force the decoded CUDA surface to 8-bit 4:2:0 (nv12) before it reaches
+# h264_nvenc, which is 8-bit ONLY. Apple VideoToolbox commonly emits 10-bit
+# (HEVC Main10); NVDEC decodes that to a p010le CUDA surface, and handing a
+# p010le/4:2:2 surface to h264_nvenc makes it abort with AVERROR(ENOSYS) — exit
+# code 218 — on a restart loop. scale_cuda does the convert entirely on the GPU
+# (zero host copy, near-free passthrough when the source is already nv12), so the
+# landscape path stays NVDEC -> scale_cuda -> NVENC with no PCIe roundtrip.
+GPU_NORMALIZE = "scale_cuda=format=nv12"
+
 
 def _even(n: int) -> int:
     """NVENC requires even dimensions."""
@@ -184,12 +200,30 @@ def _encode_flags(bv: int, fps: int) -> list[str]:
     ]
 
 
+# Characters that would let a stream key/URL break out of the FFmpeg `tee` target
+# string and inject an extra destination ("...|[f=flv]rtmp://attacker/...") or a
+# local file sink ("[f=mp4]/tmp/x"). Real RTMP/stream keys are URL-safe and never
+# contain these, so any output carrying one is malformed or hostile — we drop it
+# rather than fan the user's stream out to an attacker-controlled target. The
+# PRIMARY guard is web-side validation on save (POST /api/platforms); this is the
+# pod's defense-in-depth so a bad key can never reach the tee muxer.
+_TEE_UNSAFE = ("|", "[", "]", "\n", "\r", " ", "\t", "\\")
+
+
+def _tee_safe(url: str) -> bool:
+    return not any(c in url for c in _TEE_UNSAFE)
+
+
 def _tee_targets(outputs: list[dict]) -> str:
     """Build the FFmpeg `tee` output string. onfail=ignore keeps the shared
-    encode alive when a single platform's ingest drops or rejects the stream."""
+    encode alive when a single platform's ingest drops or rejects the stream.
+    Targets whose URL/key contain tee control characters are skipped (injection
+    guard) — a real key never has them."""
     parts = []
     for o in outputs:
         url = _full_rtmp_url(o)
+        if not _tee_safe(url):
+            continue
         parts.append(f"[f=flv:onfail=ignore]{url}")
     return "|".join(parts)
 
@@ -242,10 +276,17 @@ def build_group_cmd(
     """
     One decode -> one NVENC H.264 encode -> tee fan-out to every output in the group.
 
-    Landscape: stays entirely on the GPU (NVDEC -> NVENC), no filter.
-    Portrait : NVDEC -> hwdownload -> crop (user framing) -> scale 1080×1920 -> NVENC.
-               Crop/scale runs on the CPU (scale_cuda can't crop+pad); it's a single
-               low-cost pass and the portrait group is the lower-bitrate one.
+    Both orientations normalize the decoded surface to 8-bit nv12 first (GPU_NORMALIZE)
+    so a 10-bit Apple-VT HEVC source can never reach the 8-bit-only h264_nvenc
+    unconverted (which would abort with AVERROR(ENOSYS) / exit 218).
+
+    Landscape: stays entirely on the GPU — NVDEC -> scale_cuda(nv12) -> NVENC.
+    Portrait : NVDEC -> scale_cuda(nv12) -> hwdownload -> crop (user framing) ->
+               scale 1080×1920 -> NVENC. The GPU normalize before hwdownload makes
+               the download deterministic regardless of source bit depth (you can't
+               hwdownload a p010le surface as nv12). Crop/scale stay on the CPU
+               (scale_cuda can't crop); it's a single low-cost pass and the portrait
+               group is the lower-bitrate one.
     """
     bv = _group_bitrate(outputs)
     fps = _group_fps(outputs)
@@ -261,12 +302,19 @@ def build_group_cmd(
 
     if orientation == "portrait":
         cw, ch, cx, cy = portrait_crop_rect(crop)
+        # Normalize to nv12 on the GPU FIRST so the hwdownload is deterministic
+        # regardless of source bit depth, then crop+scale on the CPU.
         vf = (
+            f"{GPU_NORMALIZE},"
             f"hwdownload,format=nv12,"
             f"crop={cw}:{ch}:{cx}:{cy},"
             f"scale={PORTRAIT_WIDTH}:{PORTRAIT_HEIGHT}"
         )
         cmd += ["-vf", vf]
+    else:
+        # Landscape stays entirely on the GPU: NVDEC -> scale_cuda(nv12) -> NVENC.
+        # This normalize is the load-bearing fix for the exit-218 crash loop.
+        cmd += ["-vf", GPU_NORMALIZE]
 
     cmd += _encode_flags(bv, fps)
     cmd += ["-f", "tee", _tee_targets(outputs)]
@@ -289,6 +337,7 @@ class OutputRunner:
         self._logs: collections.deque[str] = collections.deque(maxlen=LOG_LINES)
         self.state = "stopped"   # stopped | running | restarting | error
         self.restarts = 0
+        self.fast_exits = 0      # consecutive sub-CRASH_LOOP_MIN_RUNTIME exits
         self.last_exit: int | None = None
 
     # ---- lifecycle -------------------------------------------------------
@@ -348,10 +397,29 @@ class OutputRunner:
                 return
 
             # crashed/disconnected -> back off and retry
-            self.state = "restarting"
             self.restarts += 1
-            # reset backoff if the process was healthy for a while
-            backoff = RESTART_MIN if ran_for > 60 else min(backoff * 2, RESTART_MAX)
+            # A healthy run (>=60s) resets both the crash counter and the backoff.
+            # A sub-CRASH_LOOP_MIN_RUNTIME exit is a "fast" (crash) exit; count it.
+            if ran_for >= 60:
+                self.fast_exits = 0
+                backoff = RESTART_MIN
+            else:
+                if ran_for < CRASH_LOOP_MIN_RUNTIME:
+                    self.fast_exits += 1
+                backoff = min(backoff * 2, RESTART_MAX)
+
+            # Once we've crash-looped past the threshold, surface a clear 'error'
+            # state (and one loud log line) instead of an endless 'restarting' —
+            # but keep retrying so a transient host/codec hiccup can still recover.
+            if self.fast_exits >= CRASH_LOOP_THRESHOLD:
+                if self.state != "error":
+                    self._log(f"CRASH-LOOP: exited (code {self.last_exit}) "
+                              f"{self.fast_exits}x in a row, each <{CRASH_LOOP_MIN_RUNTIME:.0f}s "
+                              f"— pipeline is broken; see the FFmpeg lines above.")
+                self.state = "error"
+            else:
+                self.state = "restarting"
+
             self._log(f"exited (code {self.last_exit}) after {ran_for:.0f}s; "
                       f"retry in {backoff:.0f}s")
             self._stop.wait(backoff)

@@ -42,6 +42,13 @@ export async function POST(request: Request) {
   if (!stream_key?.trim()) {
     return Response.json({ error: 'stream_key is required' }, { status: 400 })
   }
+  // Injection guard: the key is concatenated into the pod's FFmpeg `tee` target
+  // string. Characters like | [ ] whitespace/backslash could break out and inject
+  // an extra destination (stream exfiltration) or a local file sink. Real platform
+  // stream keys are URL-safe and never contain these, so reject them outright.
+  if (/[|\[\]\\\s]/.test(stream_key)) {
+    return Response.json({ error: 'stream_key contains invalid characters' }, { status: 400 })
+  }
 
   const effectiveBitrate = bitrate_kbps
     ? Math.min(bitrate_kbps, defaults.max_bitrate)

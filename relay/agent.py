@@ -39,7 +39,20 @@ import urllib.error
 # v1.15.0 (issue #4892). We now require v1.19.1+. RELAY_SOURCE must be set BEFORE
 # importing supervisor (it reads it at import time). Defaults to "live" locally.
 INGEST_KEY = (os.environ.get("SLIMCAST_INGEST_KEY", "live").strip() or "live")
-os.environ.setdefault("RELAY_SOURCE", f"srt://127.0.0.1:8890?streamid=read:{INGEST_KEY}")
+# Per-pod SRT AES passphrase (set by provision via SLIMCAST_SRT_PASSPHRASE). When
+# present, MediaMTX requires it to publish/read this path and both the OBS uplink
+# and the encoder loopback carry it, so the HEVC feed is AES-encrypted in flight.
+# Empty locally → encryption disabled (the loopback is localhost-only there).
+SRT_PASSPHRASE = os.environ.get("SLIMCAST_SRT_PASSPHRASE", "").strip()
+# Encoder loopback read URL. Tuned for the localhost link: low latency (no jitter
+# to absorb) + a short connect timeout so a not-yet-ready path fails fast and the
+# OutputRunner restarts cleanly instead of hanging. Carries the passphrase when
+# encryption is on. RELAY_SOURCE must be set BEFORE importing supervisor (it reads
+# it at import time).
+_loopback = f"srt://127.0.0.1:8890?streamid=read:{INGEST_KEY}&latency=120&timeout=5000000"
+if SRT_PASSPHRASE:
+    _loopback += f"&passphrase={SRT_PASSPHRASE}&pbkeylen=16"
+os.environ.setdefault("RELAY_SOURCE", _loopback)
 
 from supervisor import Supervisor
 
@@ -104,10 +117,16 @@ def _api(method: str, path: str, body: dict | None = None, timeout: int = 10) ->
 
 
 def _render_mediamtx_config() -> str:
-    """Substitute the per-pod ingest path into the MediaMTX config template."""
+    """Substitute the per-pod ingest path + SRT passphrase into the MediaMTX template."""
     with open(MEDIAMTX_CONFIG) as f:
         cfg = f.read()
     cfg = cfg.replace("__INGEST_PATH__", INGEST_KEY)
+    if SRT_PASSPHRASE:
+        cfg = cfg.replace("__SRT_PASSPHRASE__", SRT_PASSPHRASE)
+    else:
+        # No passphrase (local/dev): strip the encryption lines so MediaMTX runs
+        # the path unencrypted rather than choking on the literal placeholder.
+        cfg = "\n".join(l for l in cfg.splitlines() if "__SRT_PASSPHRASE__" not in l)
     runtime_path = "/tmp/mediamtx.runtime.yml"
     with open(runtime_path, "w") as f:
         f.write(cfg)
@@ -207,58 +226,83 @@ def build_outputs(config: dict) -> list[dict]:
 
 
 def _gpu_self_test(attempts: int = 2) -> bool:
-    """Verify the container can actually reach the GPU (both NVENC and NVDEC).
+    """Verify the container can actually run the LIVE transcode path on this GPU.
 
     Some Vast hosts attach the GPU at the host level but never inject the device
     into the container: the driver libraries mount, yet every NVENC/NVDEC call
-    returns CUDA_ERROR_NO_DEVICE ("no CUDA-capable device is detected"). The relay
-    pipeline is GPU-only, so on such a host every transcode dies in a restart loop.
+    returns CUDA_ERROR_NO_DEVICE ("no CUDA-capable device is detected"). Others can
+    do H.264 but fail on HEVC NVDEC, or choke on 10-bit. The live pipeline is
+    HEVC-in (often 10-bit from Apple VideoToolbox) -> H.264-out, so we validate
+    EXACTLY that — not just H.264 — or a bad host slips through and crash-loops live.
 
-    Two-pass test:
-      Pass 1: NVENC encode from lavfi (synthetic source, no NVDEC).  Quick.
-      Pass 2: NVDEC decode of the output from pass 1. This catches the class of
-              host where NVENC works at boot but NVDEC (and later NVENC) fail once
-              a real stream is decoded — e.g. machines 8914 and 78446 which pass
-              pass 1 but crash-loop on NVDEC with CUDA_ERROR_NO_DEVICE.
-    Returns True iff BOTH passes succeed."""
+    Four passes (all must succeed):
+      1. H.264 NVENC from lavfi                      — encode works at all.
+      2. H.264 NVDEC decode of pass 1 -> NVENC       — decode + re-encode works.
+      3. 10-bit HEVC NVENC from lavfi                — make a Main10 clip like Apple VT.
+      4. 10-bit HEVC NVDEC -> scale_cuda(nv12) -> H.264 NVENC — the real pipeline.
+    Pass 4 is what catches the AVERROR(ENOSYS)/exit-218 class: a host that can't
+    decode HEVC or normalize 10-bit->8-bit on the GPU is rejected at boot so the
+    broker cascades to another machine instead of crash-looping a live stream.
+    Returns True iff ALL passes succeed."""
     import tempfile, os as _os
-    for i in range(attempts):
-        tmp = tempfile.mktemp(suffix=".h264")
-        try:
-            # Pass 1: lavfi → h264_nvenc → temp file
-            enc = subprocess.run([
-                "ffmpeg", "-hide_banner", "-loglevel", "error",
-                "-f", "lavfi", "-i", "color=c=black:s=128x128:r=5:d=0.4",
-                "-c:v", "h264_nvenc", "-f", "h264", tmp,
-            ], capture_output=True, text=True, timeout=25)
-            if enc.returncode != 0:
-                tail = (enc.stderr or "").strip().splitlines()
-                log.warning("GPU self-test attempt %d/%d NVENC failed (code %d): %s",
-                            i + 1, attempts, enc.returncode, tail[-1] if tail else "(no stderr)")
-                continue
 
-            # Pass 2: h264_cuvid (NVDEC) decode of that file → h264_nvenc → null
-            dec = subprocess.run([
-                "ffmpeg", "-hide_banner", "-loglevel", "error",
-                "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
-                "-i", tmp,
-                "-c:v", "h264_nvenc", "-f", "null", "-",
-            ], capture_output=True, text=True, timeout=25)
-            if dec.returncode == 0:
-                log.info("GPU self-test passed (NVENC + NVDEC both OK).")
+    def _run(cmd: list[str]) -> "subprocess.CompletedProcess[str]":
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=25)
+
+    for i in range(attempts):
+        h264 = tempfile.mktemp(suffix=".h264")
+        hevc = tempfile.mktemp(suffix=".hevc")
+        try:
+            steps = [
+                ("H264 NVENC", [
+                    "ffmpeg", "-hide_banner", "-loglevel", "error",
+                    "-f", "lavfi", "-i", "color=c=black:s=128x128:r=5:d=0.4",
+                    "-c:v", "h264_nvenc", "-f", "h264", h264,
+                ]),
+                ("H264 NVDEC", [
+                    "ffmpeg", "-hide_banner", "-loglevel", "error",
+                    "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
+                    "-i", h264,
+                    "-c:v", "h264_nvenc", "-f", "null", "-",
+                ]),
+                ("HEVC10 NVENC", [
+                    "ffmpeg", "-hide_banner", "-loglevel", "error",
+                    "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=5:duration=0.6",
+                    "-vf", "format=p010le",
+                    "-c:v", "hevc_nvenc", "-preset", "p1", "-f", "hevc", hevc,
+                ]),
+                ("HEVC10->nv12->H264 (live path)", [
+                    "ffmpeg", "-hide_banner", "-loglevel", "error",
+                    "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
+                    "-i", hevc,
+                    "-vf", "scale_cuda=format=nv12",
+                    "-c:v", "h264_nvenc", "-f", "null", "-",
+                ]),
+            ]
+            failed = False
+            for label, cmd in steps:
+                r = _run(cmd)
+                if r.returncode != 0:
+                    tail = (r.stderr or "").strip().splitlines()
+                    log.warning("GPU self-test attempt %d/%d FAILED at [%s] (code %d): %s",
+                                i + 1, attempts, label, r.returncode,
+                                tail[-1] if tail else "(no stderr)")
+                    failed = True
+                    break
+            if not failed:
+                log.info("GPU self-test passed "
+                         "(H264 NVENC/NVDEC + 10-bit HEVC NVDEC->nv12->H264).")
                 return True
-            tail = (dec.stderr or "").strip().splitlines()
-            log.warning("GPU self-test attempt %d/%d NVDEC failed (code %d): %s",
-                        i + 1, attempts, dec.returncode, tail[-1] if tail else "(no stderr)")
         except subprocess.TimeoutExpired:
             log.warning("GPU self-test attempt %d/%d timed out.", i + 1, attempts)
         except Exception as exc:
             log.warning("GPU self-test attempt %d/%d error: %s", i + 1, attempts, exc)
         finally:
-            try:
-                _os.unlink(tmp)
-            except FileNotFoundError:
-                pass
+            for p in (h264, hevc):
+                try:
+                    _os.unlink(p)
+                except FileNotFoundError:
+                    pass
         if i + 1 < attempts:
             time.sleep(3)
     return False

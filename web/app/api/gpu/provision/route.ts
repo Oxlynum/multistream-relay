@@ -162,6 +162,18 @@ export async function POST(request: Request) {
   // can publish to the pod (no more open "live" ingest on a public port).
   const ingestKey = generateApiKey().slice(0, 24)
 
+  // Per-pod SRT AES passphrase (32 chars — within SRT's 10–79 requirement).
+  // Encrypts the OBS→pod HEVC uplink in flight; MediaMTX requires it to publish
+  // AND read the path, so the secret streamid is no longer the only protection.
+  // Stored on the row so /api/gpu/status can hand it to the OBS plugin (it rides
+  // in srt_url) and the agent can substitute it into MediaMTX.
+  const srtPassphrase = generateApiKey().slice(0, 32)
+
+  // Per-pod debug-panel password, replacing the shared weak RELAY_PASSWORD.
+  // app.py fails closed without it so it's always set; per-pod means leaking one
+  // pod's panel can never reach another's. Stored so we can reach the panel to debug.
+  const panelPassword = generateApiKey().slice(0, 24)
+
   // Fetch the user's platform connections to determine how many simultaneous
   // NVENC sessions their config requires. Consumer GPUs (GeForce RTX 3090/4090/5090)
   // are capped at 3 concurrent sessions in hardware; if the user needs more the
@@ -210,7 +222,9 @@ export async function POST(request: Request) {
       { key: 'SLIMCAST_API_KEY', value: podRawKey },
       { key: 'SLIMCAST_VERCEL_URL', value: callbackUrl },
       { key: 'SLIMCAST_INGEST_KEY', value: ingestKey },
-      ...(process.env.RELAY_PASSWORD ? [{ key: 'RELAY_PASSWORD', value: process.env.RELAY_PASSWORD }] : []),
+      { key: 'SLIMCAST_SRT_PASSPHRASE', value: srtPassphrase },
+      // Per-pod panel password (not the shared process.env.RELAY_PASSWORD anymore).
+      { key: 'RELAY_PASSWORD', value: panelPassword },
     ],
     userOutputs,
     // Save provider_id the moment a pod is created — before any readiness probe —
@@ -256,6 +270,8 @@ export async function POST(request: Request) {
       hls_port: result.hlsPort ?? null,
       srt_port: result.srtPort ?? null,
       ingest_key: ingestKey,
+      srt_passphrase: srtPassphrase,
+      panel_password: panelPassword,
       provider: result.provider,
       gpu_type: result.gpuKey,
       datacenter: result.datacenter,

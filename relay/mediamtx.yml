@@ -54,6 +54,14 @@ paths:
   __INGEST_PATH__:
     source: publisher
 
+    # SRT AES encryption (per-pod passphrase, substituted by agent.py from
+    # SLIMCAST_SRT_PASSPHRASE). With these set, MediaMTX requires the passphrase to
+    # BOTH publish (OBS uplink) and read (encoder loopback), so the HEVC feed is
+    # encrypted in flight over the public internet — not just gated by the secret
+    # streamid. agent.py strips these two lines when no passphrase is set (local/dev).
+    srtReadPassphrase: __SRT_PASSPHRASE__
+    srtPublishPassphrase: __SRT_PASSPHRASE__
+
     # Auto start/stop the transcoder with OBS:
     #   runOnReady    fires when OBS starts publishing  -> turn relay ON
     #   runOnNotReady fires when OBS stops publishing    -> turn relay OFF
