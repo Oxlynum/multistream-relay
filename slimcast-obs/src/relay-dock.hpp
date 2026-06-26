@@ -99,6 +99,9 @@ private:
     QLabel         *m_ingestLabel  = nullptr;
     QPushButton    *m_goLiveBtn    = nullptr;   // hidden; kept for render() state logic
     QPushButton    *m_obsStreamBtn = nullptr;   // native OBS "Start Streaming" button
+    QString         m_obsStreamBtnSavedStyle;
+    QString         m_obsStreamBtnSavedText;
+    bool            m_obsStreamBtnOverridden = false;
     QMap<QString, ChannelRow> m_channels;
     QCheckBox      *m_lockCheck    = nullptr;
     QSpinBox       *m_landscapeSpin   = nullptr;

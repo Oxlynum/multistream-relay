@@ -686,6 +686,8 @@ void RelayDock::onDeviceLinkFailed(QString message)
 void RelayDock::setObsStreamBtn(QPushButton *btn)
 {
     m_obsStreamBtn = btn;
+    m_obsStreamBtnSavedStyle = btn->styleSheet();
+    m_obsStreamBtnSavedText  = btn->text();
     btn->installEventFilter(this);
 }
 
@@ -866,6 +868,22 @@ void RelayDock::render(const GpuInfo &info)
             m_goLiveBtn->setText("Go Live");
             m_goLiveBtn->setStyleSheet(goLiveStyle(C_CTA));
         }
+    }
+
+    // ── Native OBS stream button: amber "Cancel" while provisioning ───────────
+    if (m_obsStreamBtn) {
+        if (m_autoLaunching) {
+            m_obsStreamBtn->setText("Cancel");
+            m_obsStreamBtn->setStyleSheet(goLiveStyle(C_WARN));
+            m_obsStreamBtnOverridden = true;
+        } else if (m_obsStreamBtnOverridden && !obs_frontend_streaming_active() && !m_resumingStream) {
+            // Provisioning ended without reaching streaming (cancel / failure).
+            // Restore OBS's original appearance; OBS manages it from here.
+            m_obsStreamBtn->setText(m_obsStreamBtnSavedText);
+            m_obsStreamBtn->setStyleSheet(m_obsStreamBtnSavedStyle);
+            m_obsStreamBtnOverridden = false;
+        }
+        // When streaming is active, OBS already set the button to "Stop Streaming".
     }
 
     m_creditsLabel->setText(formatCredits(info.creditsTokens));
