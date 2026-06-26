@@ -458,11 +458,17 @@ They just aren't the brand. The brand is "stream everywhere, no setup."
   dots, faint per-channel + total token-rate fine print. Resolution/fps are read-only,
   pulled from OBS via obs_get_video_info (never editable — OBS owns them). Everything
   the dock changes is the same Supabase config the website edits, so dock ↔
-  slimcast.com stay in sync. `render()` also drives the native OBS button appearance:
-  amber "Cancel" while `m_autoLaunching`; restored to OBS's original style on cancel
-  or failure; OBS takes over with "Stop Streaming" once streaming starts.
-  `onObsStreamingStarting()` has a queued safety-net fallback (stops OBS + triggers
-  provisioning) in case the event filter ever misses a click.
+  slimcast.com stay in sync. `render()` drives the native OBS button appearance:
+  amber "Cancel" while `m_autoLaunching` OR while the pod is running but
+  `info.streaming` is still false (OBS connecting to relay) — it stays amber through
+  the entire pre-live window, not just during GPU search. `restoreObsStreamBtn()`
+  snaps it back immediately on cancel/failure (called directly in `onMainBtnClicked`
+  cancel branch and `abortLaunch`); on success, OBS takes over with "Stop Streaming"
+  once `info.streaming` flips true. `m_ingestLabel` (resolution/fps line) gets
+  `· ~Xs` appended during provisioning — ~30s estimate while searching, ~60s while
+  booting/pairing — updating every 5s poll tick. `onObsStreamingStarting()` has a
+  queued safety-net fallback (stops OBS + triggers provisioning) in case the event
+  filter ever misses a click.
 - `HealthGraphWidget.cpp/h` — real-time canvas widget showing inbound (OBS→pod)
   + per-platform outbound bitrate and health score. Polls `/api/metrics/connection`
   every 10s; keeps MAX_POINTS=60 samples (10 min history). Rendered as chip row +
