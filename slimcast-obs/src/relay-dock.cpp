@@ -900,6 +900,13 @@ void RelayDock::render(const GpuInfo &info)
     m_wasStreaming = info.streaming;
 
     updateIngestLabel();
+    // Append estimated time remaining during provisioning phases.
+    if (m_autoLaunching && m_ingestLabel) {
+        const int eta = info.ip.isEmpty()
+            ? qMax(5, 30  - elapsed)   // searching for a GPU: ~30s
+            : qMax(5, 60  - elapsed);  // booting / agent pairing: ~60s total
+        m_ingestLabel->setText(m_ingestLabel->text() + QString(" · ~%1s").arg(eta));
+    }
     renderConfirm(info);
     renderServiceBanner();
     renderChannels();
