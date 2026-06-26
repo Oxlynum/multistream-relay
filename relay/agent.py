@@ -189,36 +189,58 @@ def build_outputs(config: dict) -> list[dict]:
 
 
 def _gpu_self_test(attempts: int = 2) -> bool:
-    """Verify the container can actually reach the GPU before we depend on it.
+    """Verify the container can actually reach the GPU (both NVENC and NVDEC).
 
-    Some hosts (seen on Vast 'Secure' datacenter machines) attach the GPU at the
-    host level — it shows in the provider's monitoring — but never inject the
-    device into the container: the driver libraries mount, yet every NVENC/NVDEC
-    call returns CUDA_ERROR_NO_DEVICE ("no CUDA-capable device is detected").
-    The whole relay pipeline is GPU-only, so on such a host EVERY transcode dies
-    in a ~6s FFmpeg restart loop and the user sees an endless "connecting" with
-    nothing reaching the platforms (verified live, RTX 5090 host).
+    Some Vast hosts attach the GPU at the host level but never inject the device
+    into the container: the driver libraries mount, yet every NVENC/NVDEC call
+    returns CUDA_ERROR_NO_DEVICE ("no CUDA-capable device is detected"). The relay
+    pipeline is GPU-only, so on such a host every transcode dies in a restart loop.
 
-    Catch it at boot with a sub-second synthetic NVENC encode: it either succeeds
-    (device present) or fails fast (device blind). Returns True iff NVENC works."""
-    probe = [
-        "ffmpeg", "-hide_banner", "-loglevel", "error",
-        "-f", "lavfi", "-i", "color=c=black:s=128x128:r=5:d=0.2",
-        "-c:v", "h264_nvenc", "-f", "null", "-",
-    ]
+    Two-pass test:
+      Pass 1: NVENC encode from lavfi (synthetic source, no NVDEC).  Quick.
+      Pass 2: NVDEC decode of the output from pass 1. This catches the class of
+              host where NVENC works at boot but NVDEC (and later NVENC) fail once
+              a real stream is decoded — e.g. machines 8914 and 78446 which pass
+              pass 1 but crash-loop on NVDEC with CUDA_ERROR_NO_DEVICE.
+    Returns True iff BOTH passes succeed."""
+    import tempfile, os as _os
     for i in range(attempts):
+        tmp = tempfile.mktemp(suffix=".h264")
         try:
-            r = subprocess.run(probe, capture_output=True, text=True, timeout=25)
-            if r.returncode == 0:
-                log.info("GPU self-test passed (NVENC encode OK).")
+            # Pass 1: lavfi → h264_nvenc → temp file
+            enc = subprocess.run([
+                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                "-f", "lavfi", "-i", "color=c=black:s=128x128:r=5:d=0.4",
+                "-c:v", "h264_nvenc", "-f", "h264", tmp,
+            ], capture_output=True, text=True, timeout=25)
+            if enc.returncode != 0:
+                tail = (enc.stderr or "").strip().splitlines()
+                log.warning("GPU self-test attempt %d/%d NVENC failed (code %d): %s",
+                            i + 1, attempts, enc.returncode, tail[-1] if tail else "(no stderr)")
+                continue
+
+            # Pass 2: h264_cuvid (NVDEC) decode of that file → h264_nvenc → null
+            dec = subprocess.run([
+                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
+                "-i", tmp,
+                "-c:v", "h264_nvenc", "-f", "null", "-",
+            ], capture_output=True, text=True, timeout=25)
+            if dec.returncode == 0:
+                log.info("GPU self-test passed (NVENC + NVDEC both OK).")
                 return True
-            tail = (r.stderr or "").strip().splitlines()
-            log.warning("GPU self-test attempt %d/%d failed (code %d): %s",
-                        i + 1, attempts, r.returncode, tail[-1] if tail else "(no stderr)")
+            tail = (dec.stderr or "").strip().splitlines()
+            log.warning("GPU self-test attempt %d/%d NVDEC failed (code %d): %s",
+                        i + 1, attempts, dec.returncode, tail[-1] if tail else "(no stderr)")
         except subprocess.TimeoutExpired:
             log.warning("GPU self-test attempt %d/%d timed out.", i + 1, attempts)
-        except Exception as exc:  # ffmpeg missing, etc. — treat as a failed probe
+        except Exception as exc:
             log.warning("GPU self-test attempt %d/%d error: %s", i + 1, attempts, exc)
+        finally:
+            try:
+                _os.unlink(tmp)
+            except FileNotFoundError:
+                pass
         if i + 1 < attempts:
             time.sleep(3)
     return False

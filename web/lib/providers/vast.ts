@@ -75,24 +75,29 @@ interface VastOffer {
 // self-test in relay/agent.py — a GPU-blind pod self-terminates before opening
 // RTMP, which makes the broker cascade to the next-nearest candidate. This
 // denylist is the belt-and-suspenders: machines we've already seen fail are
-// skipped at ranking time so we don't keep landing on them. 8914 (an RTX 5090
-// host at 198.53.64.194) failed the live test twice; extend via the
-// VAST_MACHINE_DENYLIST env (comma-separated machine ids). Remove an id once the
-// host is confirmed fixed.
+// skipped at ranking time so we don't keep landing on them. Known bad machines:
+//   8914  — RTX 5090 at 198.53.64.194: boot NVENC self-test passes but NVDEC
+//            crash-loops with exit 218/-38 (ENOSYS). Observed twice.
+//   78446 — RTX 4090 at 185.61.165.201: same failure — NVDEC returns
+//            CUDA_ERROR_NO_DEVICE and libnvidia-encode.so.1 fails to load mid-
+//            stream even after the self-test passed at boot (2026-06-25).
+// Extend via VAST_MACHINE_DENYLIST env (comma-separated machine ids).
+// Remove an id once the host is confirmed fixed.
 const MACHINE_DENYLIST = new Set<number>([
   8914,
+  78446,
   ...(process.env.VAST_MACHINE_DENYLIST ?? '')
     .split(',').map(s => parseInt(s.trim(), 10)).filter(Number.isFinite),
 ])
 
 // IP-level denylist. The same physical host re-registers under new machine-ids at
-// one IP, dodging MACHINE_DENYLIST (198.53.64.194 has appeared as 8914, 25132, and
-// 1569 — all GPU-broken: the boot NVENC self-test passes, but the real transcode
-// crash-loops with FFmpeg exit 218 / -38 (ENOSYS) because `-hwaccel cuda` NVDEC
-// decode isn't usable on that box). Blocking by IP survives re-registration.
+// one IP, dodging MACHINE_DENYLIST. Known bad IPs:
+//   198.53.64.194 — appeared as machine 8914, 25132, 1569 (all GPU-broken).
+//   185.61.165.201 — machine 78446 (RTX 4090); NVDEC fails mid-stream.
 // Extend via VAST_IP_DENYLIST (comma-separated). Remove once a host is fixed.
 const IP_DENYLIST = new Set<string>([
   '198.53.64.194',
+  '185.61.165.201',
   ...(process.env.VAST_IP_DENYLIST ?? '').split(',').map(s => s.trim()).filter(Boolean),
 ])
 
