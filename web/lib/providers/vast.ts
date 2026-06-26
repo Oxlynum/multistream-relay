@@ -76,22 +76,20 @@ interface VastOffer {
 // RTMP, which makes the broker cascade to the next-nearest candidate. This
 // denylist is the belt-and-suspenders: machines we've already seen fail are
 // skipped at ranking time so we don't keep landing on them. Known bad machines:
-//   8914 — RTX 5090 at 198.53.64.194: passes the H.264 NVENC/NVDEC self-test but
-//            crash-loops the real HEVC→H264 transcode (exit 218). The "10-bit
-//            pixfmt" theory was WRONG — the OBS source is confirmed 8-bit (NV12,
-//            Main, bt709), so the original crash predates and is unrelated to any
-//            10-bit filter. This board genuinely fails real HEVC decode while
-//            passing the H.264 self-test, so the self-test can't catch it — RE-ADDED
-//            2026-06-26 after it was mistakenly removed in b10b363.
+//   8914 — RTX 5090 at 198.53.64.194: the original exit-218 host. Deliberately
+//            LEFT OFF the denylist: its crash was blamed on a "10-bit pixfmt" bug,
+//            but the OBS source is confirmed 8-bit (NV12, Main, bt709), so that
+//            theory is dead. Keeping 8914 in the pool lets the reverted (no-10-bit)
+//            image prove whether the board was ever actually bad. Re-add only if it
+//            crash-loops the real transcode again on the clean image.
 //   78446 — RTX 4090 at 185.61.165.201: GENUINE GPU-injection failure — NVDEC
 //            returns CUDA_ERROR_NO_DEVICE and libnvidia-encode.so.1 fails to load
 //            mid-stream even after the self-test passed at boot (2026-06-25).
 //   67876 — RTX 4090 at 45.143.122.55 (UK): passed the H.264 self-test but HEVC
-//            NVDEC failed on a real OBS stream — exit 255. Same class as 8914.
+//            NVDEC failed on a real OBS stream — exit 255.
 // Extend via VAST_MACHINE_DENYLIST env (comma-separated machine ids).
 // Remove an id once the host is confirmed fixed.
 const MACHINE_DENYLIST = new Set<number>([
-  8914,   // RTX 5090 198.53.64.194 — H.264 self-test passes, real HEVC transcode crash-loops
   78446,
   67876,
   ...(process.env.VAST_MACHINE_DENYLIST ?? '')
