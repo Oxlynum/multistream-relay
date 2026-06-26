@@ -44,7 +44,7 @@ export async function POST(request: NextRequest) {
       .maybeSingle(),
     supabase
       .from('profiles')
-      .select('streaming_credits, output_settings, has_2k_addon, landscape_bitrate_kbps, portrait_bitrate_kbps, srt_enabled')
+      .select('streaming_credits, output_settings, has_2k_addon, landscape_bitrate_kbps, portrait_bitrate_kbps')
       .eq('id', userId)
       .single(),
     // Only needed by the pod agent for billing; skip for dashboard/dock polls.
@@ -71,7 +71,6 @@ export async function POST(request: NextRequest) {
       outputSettings,
       has2kAddon,
       streaming,
-      profile?.srt_enabled ?? false,
     )
     burnRate = computeBurnRate(ctx, streaming)
 

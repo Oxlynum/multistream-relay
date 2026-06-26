@@ -173,7 +173,7 @@ export async function POST(request: Request) {
   const [{ data: profileBitrates }, { data: platformRows }] = await Promise.all([
     supabase
       .from('profiles')
-      .select('landscape_bitrate_kbps, portrait_bitrate_kbps, srt_enabled')
+      .select('landscape_bitrate_kbps, portrait_bitrate_kbps')
       .eq('id', userId)
       .single(),
     supabase
@@ -184,7 +184,6 @@ export async function POST(request: Request) {
 
   const landscapeCap: number = (profileBitrates as { landscape_bitrate_kbps?: number } | null)?.landscape_bitrate_kbps ?? 6000
   const portraitCap: number  = (profileBitrates as { portrait_bitrate_kbps?: number } | null)?.portrait_bitrate_kbps ?? 4000
-  const srtMode: boolean      = !!(profileBitrates as { srt_enabled?: boolean } | null)?.srt_enabled
 
   const userOutputs: UserOutputConfig[] = (platformRows ?? []).map((p: {
     platform: string; orientation: string | null; enabled: boolean; bitrate_kbps: number | null
@@ -214,7 +213,6 @@ export async function POST(request: Request) {
       ...(process.env.RELAY_PASSWORD ? [{ key: 'RELAY_PASSWORD', value: process.env.RELAY_PASSWORD }] : []),
     ],
     userOutputs,
-    srtMode,
     // Save provider_id the moment a pod is created — before any readiness probe —
     // so teardownInstance can destroy the pod even if this function is killed
     // mid-cascade by Vercel's maxDuration (otherwise provider_id stays '' and

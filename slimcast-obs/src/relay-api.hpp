@@ -13,10 +13,10 @@ class QTimer;
 struct GpuInfo {
     QString status;            // "provisioning" | "running" | "stopped"
     QString ip;
-    QString rtmpUrl;           // rtmp://{ip}:{port}
-    QString srtUrl;            // srt://{ip}:{port}?streamid=publish:{key} when SRT mode (else empty)
-    QString ingestKey;         // per-pod RTMP path secret
-    QString datacenter;        // placement label: RunPod DC id ("US-TX-3") or Vast offer label
+    QString rtmpUrl;           // rtmp://{ip}:{port} — readiness beacon only; OBS never publishes here
+    QString srtUrl;            // srt://{ip}:{port}?streamid=publish:{key} — the only ingest URL OBS uses
+    QString ingestKey;         // per-pod ingest path secret (rides in the SRT streamid)
+    QString datacenter;        // placement label (Vast offer label, e.g. "vast:123 … California, US")
     double  creditsTokens = 0; // balance in tokens (3dp)
     double  burnRate      = 0; // tokens/hr
     bool    streaming     = false;
@@ -71,8 +71,6 @@ public:
     void setPlatformEnabled(const QString &platform, bool enabled);
     void fetchEncode();
     void setEncode(int landscapeKbps, int portraitKbps);
-    void fetchSrt();
-    void setSrt(bool enabled);
 
 signals:
     void gpuStatusUpdated(GpuInfo info);
@@ -81,7 +79,6 @@ signals:
     void gpuDestroyed();
     void platformsUpdated(QList<PlatformConfig> platforms);
     void encodeUpdated(EncodeConfig encode);
-    void srtUpdated(bool enabled);
     void networkError(QString message);
     void deviceLinked(QString apiKey);     // device link succeeded → raw key
     void deviceLinkFailed(QString message);

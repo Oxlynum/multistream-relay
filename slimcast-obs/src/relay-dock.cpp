@@ -176,7 +176,6 @@ RelayDock::RelayDock(QWidget *parent)
     connect(m_api, &RelayApi::gpuDestroyed,      this, &RelayDock::onGpuDestroyed);
     connect(m_api, &RelayApi::platformsUpdated,  this, &RelayDock::onPlatformsUpdated);
     connect(m_api, &RelayApi::encodeUpdated,     this, &RelayDock::onEncodeUpdated);
-    connect(m_api, &RelayApi::srtUpdated,        this, &RelayDock::onSrtUpdated);
     connect(m_api, &RelayApi::networkError,      this, &RelayDock::onNetworkError);
     connect(m_api, &RelayApi::deviceLinked,      this, &RelayDock::onDeviceLinked);
     connect(m_api, &RelayApi::deviceLinkFailed,  this, &RelayDock::onDeviceLinkFailed);
@@ -534,20 +533,6 @@ QWidget *RelayDock::buildSlimSyncTab()
 
     ly->addWidget(makeSep());
 
-    // ── SRT uplink ────────────────────────────────────────────────────────────
-    m_srtCheck = new QCheckBox("SRT uplink  (+0.1 tkn/hr)");
-    m_srtCheck->setStyleSheet("color:#e7ebf2; font-size:13px; font-weight:600;");
-    ly->addWidget(m_srtCheck);
-    auto *srtNote = new QLabel(
-        "More resilient ingest over UDP for weak / unstable uploads. Provisions a "
-        "UDP-capable host; applies on your next stream.");
-    srtNote->setWordWrap(true);
-    srtNote->setStyleSheet(QString("color:%1; font-size:11px").arg(C_MUTE));
-    ly->addWidget(srtNote);
-    connect(m_srtCheck, &QCheckBox::toggled, this, [this](bool on) { m_api->setSrt(on); });
-
-    ly->addWidget(makeSep());
-
     // ── Account ───────────────────────────────────────────────────────────────
     auto *title = new QLabel("Account");
     title->setStyleSheet("font-size:13px; font-weight:600; color:#e7ebf2");
@@ -629,7 +614,6 @@ void RelayDock::enterActive()
     m_api->fetchGpuStatus();
     m_api->fetchPlatforms();
     m_api->fetchEncode();
-    m_api->fetchSrt();
     if (m_healthWidget)
         m_healthWidget->setApiKey(m_apiKeyEdit->text().trimmed());
 }
@@ -747,17 +731,14 @@ void RelayDock::onGpuStatusUpdated(GpuInfo info)
     // Agent paired → status flips 'provisioning' → 'running'. That means
     // MediaMTX is up and RTMP is accepting. Set OBS's URL and start streaming.
     if (m_autoLaunching && info.status == "running") {
-        // The SRT uplink checkbox is AUTHORITATIVE over the protocol. When SRT is
-        // selected the pod is provisioned for SRT, so OBS must publish srt:// — we
-        // must NEVER fall back to RTMP (that would push an RTMP stream at a pod
-        // expecting SRT, and OBS would "connect" to nothing). So we wait for the
-        // server to report srt_url (the pod's UDP port has mapped) and launch only
-        // then. When SRT is unchecked, use RTMP. Both share OBS's rtmp_custom
-        // service — OBS routes by the URL scheme (srt:// → SRT output). The SRT
-        // url carries the publish key in its streamid, so OBS's key field is empty.
-        const bool srtSelected = m_srtCheck && m_srtCheck->isChecked();
-        const QString server = srtSelected ? info.srtUrl : info.rtmpUrl;
-        const QString key    = srtSelected ? QString()   : info.ingestKey;
+        // SRT is the ONLY ingest path: OBS always publishes srt:// with the publish
+        // key carried in the streamid (so OBS's key field stays empty). OBS routes
+        // by URL scheme on its rtmp_custom service (srt:// → SRT output). We wait
+        // for the server to report srt_url — the pod's UDP port maps a few seconds
+        // after the TCP one — and NEVER fall back to RTMP (the pod expects SRT, so
+        // an RTMP publish would "connect" to nothing).
+        const QString server = info.srtUrl;
+        const QString key    = QString();
         if (!server.isEmpty()) {
             // Port mapping is in the DB — we have everything we need.
             if (m_launchTimeout) m_launchTimeout->stop();
@@ -1038,13 +1019,6 @@ void RelayDock::onEncodeUpdated(EncodeConfig encode)
         m_portraitSpin->setValue(encode.portrait);
 }
 
-void RelayDock::onSrtUpdated(bool enabled)
-{
-    if (!m_srtCheck) return;
-    QSignalBlocker block(m_srtCheck);   // reflect server state without echoing a PATCH
-    m_srtCheck->setChecked(enabled);
-}
-
 void RelayDock::onChannelToggled(const QString &platform, bool enabled)
 {
     if (!m_platforms.contains(platform)) return;
@@ -1152,11 +1126,10 @@ void RelayDock::applyObsStreamUrl(const QString &server, const QString &key)
 // (Go Live configures everything itself).
 QString RelayDock::obsServiceIssue()
 {
-    // In SRT mode the expected output is the srt:// URL with an empty key (the
-    // publish key rides in the streamid); otherwise the rtmp:// URL + ingest key.
-    const bool srt = !m_lastGpuInfo.srtUrl.isEmpty();
-    const QString expectServer = srt ? m_lastGpuInfo.srtUrl : m_lastGpuInfo.rtmpUrl;
-    const QString expectKey    = srt ? QString() : m_lastGpuInfo.ingestKey;
+    // SRT is the only ingest path: the expected output is the srt:// URL with an
+    // empty key (the publish key rides in the streamid).
+    const QString expectServer = m_lastGpuInfo.srtUrl;
+    const QString expectKey    = QString();
     if (m_lastGpuInfo.status != "running" || expectServer.isEmpty())
         return "";
     obs_service_t *svc = obs_frontend_get_streaming_service();  // borrowed

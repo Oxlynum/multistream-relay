@@ -3,7 +3,7 @@ import dgram from 'dgram'
 
 // GPU availability broker.
 //
-// Model: every provider (RunPod secure today; Vast.ai next) reports a list of
+// Model: every provider (Vast.ai today; Vultr next) reports a list of
 // LOCATION-STAMPED candidates via listCandidates(). The broker merges them into
 // one list, ranks by distance-to-user (then price), and creates them nearest-first
 // until one boots. Because each candidate carries coordinates and a deterministic
@@ -11,14 +11,15 @@ import dgram from 'dgram'
 // and there is no post-boot geolocation/region-guessing, because we only use
 // providers that place the pod where they said they would.
 //
-// This replaced the old community-cloud machinery (subregion rings, RTT tiers,
-// stock preflight, null-DC handling). All of that existed to clean up after
-// RunPod community placing pods globally at random; we no longer use community.
+// SRT (UDP) is the only OBS→pod transport, so every active provider must be
+// UDP-capable. RunPod was removed — its pods are TCP-only and can't carry SRT.
+// Readiness is gated on the RTMP beacon (proves MediaMTX is serving) PLUS the
+// SRT + UDP-probe ports being mapped; the UDP echo itself is advisory only.
 
 import {
   PRICE_CEILING, READINESS_TIMEOUT_MS, READINESS_POLL_MS, MAX_BOOT_ATTEMPTS,
 } from '@/lib/datacenters'
-import { ACTIVE_PROVIDERS } from '@/lib/providers/runpod'
+import { ACTIVE_PROVIDERS } from '@/lib/providers'
 import type { GpuCandidate, GpuProvider, PodEnv } from '@/lib/providers/types'
 import { requiredNvencSessions, type UserOutputConfig } from '@/lib/nvenc-utils'
 export type { UserOutputConfig } from '@/lib/nvenc-utils'
@@ -115,15 +116,16 @@ function probeUdp(host: string, port: number, timeoutMs = 8000): Promise<boolean
 interface PodAddr { ip: string; port: number; hlsPort: number | null; dataCenterId: string | null; srtPort: number | null; udpProbePort: number | null }
 
 /** Poll until the pod reports a public IP + mapped ports (booted), or time out.
- * In SRT mode we also wait for the UDP ports (SRT + probe) to map — Vast maps UDP
- * ports a few seconds AFTER the TCP ones, so returning on the RTMP port alone would
- * make the SRT readiness check see null ports and wrongly reject the pod. */
-async function waitForIp(provider: GpuProvider, podId: string, srtMode = false): Promise<PodAddr | null> {
+ * We wait for BOTH the RTMP beacon port (proves MediaMTX answered, mapped TCP) AND
+ * the UDP ports (SRT ingest + probe). Vast maps the UDP ports a few seconds AFTER
+ * the TCP ones, so returning on the RTMP port alone would make the SRT readiness
+ * check see null ports and wrongly reject the pod. */
+async function waitForIp(provider: GpuProvider, podId: string): Promise<PodAddr | null> {
   const deadline = Date.now() + READINESS_TIMEOUT_MS
   while (Date.now() < deadline) {
     try {
       const s = await provider.getStatus(podId)
-      const ready = s.ip && s.port && (!srtMode || (s.srtPort && s.udpProbePort))
+      const ready = s.ip && s.port && s.srtPort && s.udpProbePort
       if (ready) return { ip: s.ip!, port: s.port!, hlsPort: s.hlsPort ?? null, dataCenterId: s.dataCenterId ?? null, srtPort: s.srtPort ?? null, udpProbePort: s.udpProbePort ?? null }
       if (s.status === 'error' || s.status === 'terminated') return null
     } catch {
@@ -149,15 +151,14 @@ export interface ProvisionResult {
   error?: string
 }
 
-/** Build the distance-then-price ranked candidate list across all providers.
- * srtMode restricts to UDP-capable providers (Vast) — RunPod is TCP-only, so it
- * can't carry SRT and is excluded entirely. */
-async function rankedCandidates(lat: number, lon: number, needsProfessionalGpu: boolean, srtMode: boolean): Promise<Array<{ c: GpuCandidate; distKm: number }>> {
-  const providers = srtMode ? ACTIVE_PROVIDERS.filter(p => p.name === 'vast') : ACTIVE_PROVIDERS
+/** Build the distance-then-price ranked candidate list across all providers. Every
+ * active provider is UDP-capable (SRT is the only OBS→pod transport), so there's no
+ * protocol filter — all candidates compete uniformly on distance then price. */
+async function rankedCandidates(lat: number, lon: number, needsProfessionalGpu: boolean): Promise<Array<{ c: GpuCandidate; distKm: number }>> {
   const lists = await Promise.all(
-    providers.map(async p => {
+    ACTIVE_PROVIDERS.map(async p => {
       try {
-        return await p.listCandidates({ maxPricePerHr: PRICE_CEILING, needsProfessionalGpu, srtMode })
+        return await p.listCandidates({ maxPricePerHr: PRICE_CEILING, needsProfessionalGpu })
       } catch (err) {
         console.error(`[broker] ${p.name} listCandidates failed:`, err instanceof Error ? err.message : err)
         return []
@@ -182,7 +183,6 @@ export async function provisionGpu(args: {
   imageTag: string
   env: PodEnv[]
   userOutputs?: UserOutputConfig[]
-  srtMode?: boolean
   // Called the instant a pod is created, BEFORE the slow readiness probes, so the
   // caller can persist provider_id onto the claim row and the pod is reapable even
   // if this function is killed mid-cascade (Vercel maxDuration) — otherwise a pod
@@ -195,16 +195,13 @@ export async function provisionGpu(args: {
   if (needsProfessionalGpu) {
     console.log(`[broker] user needs ${nvencSessions} NVENC sessions — skipping consumer GPUs`)
   }
-  const srtMode = !!args.srtMode
-  if (srtMode) console.log('[broker] SRT mode — restricting to UDP-capable (Vast) hosts')
-
-  const candidates = await rankedCandidates(args.lat, args.lon, needsProfessionalGpu, srtMode)
+  const candidates = await rankedCandidates(args.lat, args.lon, needsProfessionalGpu)
   if (candidates.length === 0) {
-    return { ok: false, attempts: 0, error: srtMode ? 'no SRT-capable (Vast) host available right now' : 'no candidates available' }
+    return { ok: false, attempts: 0, error: 'no SRT-capable host available right now' }
   }
   const providerByName = new Map(ACTIVE_PROVIDERS.map(p => [p.name, p]))
   const nearest = candidates[0]
-  console.log(`[broker] ${candidates.length} candidates${srtMode ? ' (SRT/Vast)' : ` across ${ACTIVE_PROVIDERS.length} provider(s)`}; nearest: ${nearest.c.label} (${nearest.distKm.toFixed(0)}km, ${nearest.c.gpuKey} $${nearest.c.pricePerHr})`)
+  console.log(`[broker] ${candidates.length} candidates across ${ACTIVE_PROVIDERS.length} provider(s); nearest: ${nearest.c.label} (${nearest.distKm.toFixed(0)}km, ${nearest.c.gpuKey} $${nearest.c.pricePerHr})`)
 
   let attempts = 0
   let bootAttempts = 0
@@ -245,7 +242,7 @@ export async function provisionGpu(args: {
     // Got inventory — make sure it actually boots (IP + mapped ports; in SRT mode
     // that includes the UDP ports, which Vast maps a few seconds after the TCP ones).
     bootAttempts++
-    const addr = await waitForIp(provider, podId, srtMode)
+    const addr = await waitForIp(provider, podId)
     if (!addr) {
       try { await provider.destroy(podId) } catch { /* best effort */ }
       lastError = 'pod created but failed to boot'
@@ -263,42 +260,29 @@ export async function provisionGpu(args: {
       continue
     }
 
-    // Placement sanity: with a deterministic provider the pod must land where we
-    // asked. If it reports a different datacenter than requested (should never
-    // happen on RunPod secure), reject it rather than stream from the wrong place.
-    const requestedDc = c.placement.datacenterId
-    if (addr.dataCenterId && requestedDc && addr.dataCenterId !== requestedDc) {
-      console.warn(`[broker] pod ${podId} landed in ${addr.dataCenterId}, expected ${requestedDc} — rejecting`)
+    // The host must have MAPPED the SRT + probe ports (verifiable over HTTP via
+    // getStatus — a hard requirement; without the SRT port there is no ingest).
+    // waitForIp already gates on these; re-check defensively before the UDP probe.
+    // The UDP echo is only ADVISORY (see probeUdp): we reject solely on an explicit
+    // ECHO:BAD, never on a no-reply, because our own serverless egress can't
+    // reliably round-trip UDP and was rejecting every good host.
+    if (!addr.srtPort || !addr.udpProbePort) {
+      console.warn(`[broker] pod ${podId} SRT/UDP ports not mapped (srt=${addr.srtPort} probe=${addr.udpProbePort}) — cascading`)
       try { await provider.destroy(podId) } catch { /* best effort */ }
-      lastError = `placement mismatch: ${addr.dataCenterId} != ${requestedDc}`
-      bootAttempts--   // provider misbehaviour, not a boot failure
+      lastError = 'SRT ports not mapped'
+      if (bootAttempts >= MAX_BOOT_ATTEMPTS) return { ok: false, attempts, error: 'too many failed boots' }
       continue
     }
-
-    // SRT mode: the host must have MAPPED the SRT + probe ports (verifiable over
-    // HTTP via getStatus — a hard requirement; without the SRT port there is no
-    // ingest). The UDP echo is then only ADVISORY (see probeUdp): we reject solely
-    // on an explicit ECHO:BAD, never on a no-reply, because our own serverless
-    // egress can't reliably round-trip UDP and was rejecting every good host.
-    if (srtMode) {
-      if (!addr.srtPort || !addr.udpProbePort) {
-        console.warn(`[broker] pod ${podId} SRT/UDP ports not mapped (srt=${addr.srtPort} probe=${addr.udpProbePort}) — cascading`)
-        try { await provider.destroy(podId) } catch { /* best effort */ }
-        lastError = 'SRT ports not mapped'
-        if (bootAttempts >= MAX_BOOT_ATTEMPTS) return { ok: false, attempts, error: 'too many failed boots' }
-        continue
-      }
-      if (!(await probeUdp(addr.ip, addr.udpProbePort))) {
-        // Only reached on an explicit ECHO:BAD — the host itself said outbound to
-        // the platforms is blocked, so it could ingest but never deliver. Reject.
-        console.warn(`[broker] pod ${podId} host self-reported blocked outbound (${addr.ip}:${addr.udpProbePort}) — cascading`)
-        try { await provider.destroy(podId) } catch { /* best effort */ }
-        lastError = 'host reported blocked outbound-to-platform'
-        if (bootAttempts >= MAX_BOOT_ATTEMPTS) return { ok: false, attempts, error: 'too many failed boots' }
-        continue
-      }
-      console.log(`[broker] pod ${podId} SRT ready: srt port ${addr.srtPort} mapped (outbound advisory passed)`)
+    if (!(await probeUdp(addr.ip, addr.udpProbePort))) {
+      // Only reached on an explicit ECHO:BAD — the host itself said outbound to
+      // the platforms is blocked, so it could ingest but never deliver. Reject.
+      console.warn(`[broker] pod ${podId} host self-reported blocked outbound (${addr.ip}:${addr.udpProbePort}) — cascading`)
+      try { await provider.destroy(podId) } catch { /* best effort */ }
+      lastError = 'host reported blocked outbound-to-platform'
+      if (bootAttempts >= MAX_BOOT_ATTEMPTS) return { ok: false, attempts, error: 'too many failed boots' }
+      continue
     }
+    console.log(`[broker] pod ${podId} SRT ready: srt port ${addr.srtPort} mapped (outbound advisory passed)`)
 
     return {
       ok: true,
@@ -307,7 +291,7 @@ export async function provisionGpu(args: {
       ip: addr.ip,
       port: addr.port,
       hlsPort: addr.hlsPort,
-      srtPort: srtMode ? addr.srtPort : null,
+      srtPort: addr.srtPort,
       gpuKey: c.gpuKey,
       datacenter: c.label,
       pricePerHr: actualCost ?? c.pricePerHr,

@@ -17,18 +17,17 @@ billed in seconds; +0.2 token/hr per extra transcoded platform. No subscription.
 
 ## Current status
 - Pipeline confirmed working end-to-end (Twitch at 1080p60).
-- Provider: **RunPod SECURE cloud**, picked by the availability broker (Arch #8) —
-  never by hand. Hard $1/hr ceiling. NOTE: this replaced RunPod *community* cloud,
-  which is unusable for a "nearest server" product — it ignores the datacenter pin
-  and places pods globally at random (a pod pinned to Atlanta landed in Sweden).
-  Secure honors the pin and reports the real DC, so placement is deterministic.
-- **Multi-provider broker**: RunPod-secure + **Vast.ai** ranked together by
-  distance (`ACTIVE_PROVIDERS`). **Vast is currently DISABLED** (commented out of
-  `ACTIVE_PROVIDERS`) — it provisions/pairs fine but a live test showed the OBS→pod
-  RTMP data path didn't establish (likely the `NVIDIA_DRIVER_CAPABILITIES=video`
-  gap, now fixed in the slim image — re-test before re-enabling). Vast adds cheap
-  consumer GPUs ($0.05–0.14/hr all-in) and is priced INCLUDING bandwidth (it bills
-  egress per TB; RunPod doesn't).
+- **Ingest is SRT-only (UDP).** OBS → pod is SRT; there is no RTMP ingest path. This
+  makes the GPU provider **necessarily UDP-capable**, which is why RunPod is gone
+  (see below). Outputs to platforms stay RTMP/RTMPS (Arch #1).
+- **Provider: Vast.ai is the SOLE provider** (`ACTIVE_PROVIDERS = [vastProvider]`),
+  picked by the availability broker (Arch #8) — never by hand. Hard $1/hr ceiling,
+  all-in (GPU + bandwidth). Vast hosts are cheap consumer GPUs ($0.05–0.14/hr) and
+  forward UDP, so they carry SRT. **RunPod was REMOVED** — its pods are TCP-only (no
+  UDP/SRT, confirmed against RunPod's own docs), so it physically cannot carry the
+  SRT uplink. `lib/runpod.ts` + `lib/providers/runpod.ts` were deleted; the provider
+  registry now lives in `lib/providers/index.ts`. **Vultr is the planned next
+  provider** (UDP-capable; bigger geographic coverage) — see Arch #8.
 - **Relay Docker image slimmed 1.6GB → 0.23GB** (cuda `-runtime` → `-base`; the
   CUDA toolkit was unused dead weight — see Arch #4/#14). Faster cold starts.
 - Web app (Next.js 16) in `web/` — Supabase + Stripe wired, deploys to Vercel.
@@ -38,13 +37,16 @@ billed in seconds; +0.2 token/hr per extra transcoded platform. No subscription.
   lifecycle (Start Streaming → provision nearest GPU; Stop → destroy pod, no idle
   billing — NO manual GPU controls). Dock controls stream config (channel on/off,
   group bitrate caps) synced to the same Supabase rows as the website; res/fps
-  shown read-only from OBS. cloud-provider/provider-presets removed. Builds +
-  installs clean locally (CMake/Ninja); .pkg/.exe via CI.
+  shown read-only from OBS. The SRT-vs-RTMP toggle was removed (SRT is always on).
+  Builds + installs clean locally (CMake/Ninja); .pkg/.exe via CI.
 - **Most of the self-serve SaaS is built** (agent, broker, billing, dashboard,
   crop editor, OBS plugin). stream_sessions are now recorded by the heartbeat
   (open on first streaming beat → accumulate duration/credits/platforms → close
-  on stop or teardown), so stats/history populate. Remaining gap: end-to-end
-  RunPod provision not yet verified live (gpuTypeId / dataCenterIds unconfirmed).
+  on stop or teardown), so stats/history populate. Remaining gap: end-to-end Vast
+  provision + the **OBS-publishes-SRT path** not yet verified live (the `read:` SRT
+  loopback is proven; OBS publishing `publish:<key>` SRT is the new untested leg —
+  smoke-test that MediaMTX `runOnReady` fires on it, since the whole watchdog net
+  keys off that).
   Plan: `/Users/danielaltom/.claude/plans/alright-lets-plan-this-eventual-clover.md`
 
 ## Layout
@@ -87,9 +89,34 @@ with `docker buildx imagetools create --tag ...:latest ...:slim` (instant promot
 
 **Probes** (verify provider APIs against reality before trusting them — this repo
 has been bitten 3× by assumed API shapes; always probe first):
-`web/scripts/test-dc-pin.mjs` (RunPod single-DC placement), `test-vast.mjs` (Vast
-offer search), `test-vast-rent.mjs` (Vast rent→ports→destroy). Each reads its key
-from `web/.env.local`.
+`web/scripts/test-vast.mjs` (Vast offer search), `test-vast-rent.mjs` (Vast
+rent→ports→destroy lifecycle). Each reads its key from `web/.env.local`.
+
+## Working conventions (do these when wrapping up — standing authorization)
+After completing a substantial task, run the relevant items below without
+re-asking — the user wants this to be the default flow:
+- **Update this CLAUDE.md** when a big task changes architecture, the provider/
+  ingest model, the schema, commands, or any load-bearing assumption. Keep it the
+  source of truth; a future instance reads it first.
+- **Push to GitHub** when the change is complete and verified (`npx tsc --noEmit`
+  passing for web). Branch off `main` first if not already on a feature branch;
+  write a real commit message. (Pushing `relay/**` to `main` triggers the CI that
+  builds + publishes the relay Docker image — see the relay Commands above.)
+- **Apply Supabase migrations** when a change adds/edits SQL in
+  `web/supabase/migrations/` — run the migration against the project so the DB
+  matches the code before the dependent code is relied on.
+- **Rebuild + reinstall the OBS plugin whenever `slimcast-obs/` changes**, then
+  restart OBS so it loads:
+  ```bash
+  cd slimcast-obs
+  cmake --build --preset macos-arm64
+  cmake --install build/macos-arm64 --prefix "$HOME/Library/Application Support/obs-studio/plugins"
+  ```
+  Install to the `.plugin` bundle path ONLY — never `cp` into `bin/64bit` (dupes the
+  dock). Then restart OBS (the plugin loads at startup, not hot).
+
+Still confirm before genuinely destructive or irreversible actions (deleting data,
+force-pushing, tearing down live infra); the above are the routine wrap-up steps.
 
 ## Target user flow (the north star — nothing should require a terminal)
 1. Sign up → onboarding wizard auto-starts
@@ -107,17 +134,27 @@ Technical terms (RTMP, GPU, stream key) are fine as labels in the UI.
 They just aren't the brand. The brand is "stream everywhere, no setup."
 
 ## Architecture (load-bearing — read before changing)
-1. **OBS → GPU transport: enhanced-RTMP HEVC over TCP** (RunPod is TCP-only).
-   If/when migrating to a UDP-capable host (Vultr/AWS), switch OBS + mediamtx.yml
-   to SRT. MediaMTX accepts both; only the ingest URL and mediamtx.yml change.
+1. **OBS → GPU transport: HEVC over SRT (UDP).** This is the ONLY ingest path —
+   there is no RTMP ingest. OBS publishes
+   `srt://<pod>:<mapped-udp-port>?streamid=publish:<ingest-key>`; the OBS dock
+   always uses the `srt_url` from `/api/gpu/status` and never falls back to RTMP.
+   Because ingest is UDP, **the GPU provider must forward UDP** — that's the hard
+   constraint that rules out RunPod (TCP-only) and makes Vast the provider. Platform
+   OUTPUTS are still RTMP/RTMPS (Arch #7). **RTMP `:1935` still binds on the pod but
+   only as a readiness beacon** (Arch #8): the broker's RTMP-handshake probe confirms
+   MediaMTX is serving over TCP, which a serverless prober can't do over UDP. OBS
+   never publishes to it.
 
-2. **Internal loopback: SRT, NOT RTSP.** MediaMTX re-publishes the ingest feed
-   internally. FFmpeg encoders pull from `srt://127.0.0.1:8890?streamid=read:live`.
-   RTSP/RTP mangles Apple's temporal-layered HEVC → "Illegal temporal ID" →
-   dropped frames → artifacts. Keep this SRT loopback. Do not switch to RTSP.
+2. **Internal loopback: SRT, NOT RTSP — and it's the SAME server as ingest.**
+   MediaMTX runs one SRT server on `:8890`: OBS publishes to it from outside
+   (`streamid=publish:<key>`) and the FFmpeg encoders read the same path back over
+   the loopback (`srt://127.0.0.1:8890?streamid=read:<key>`). RTSP/RTP mangles
+   Apple's temporal-layered HEVC → "Illegal temporal ID" → dropped frames →
+   artifacts. Keep SRT. Do not switch to RTSP. (The `read:` loopback is battle-
+   tested; OBS publishing `publish:<key>` SRT is the newer leg — see Current status.)
 
 3. **FFmpeg pinned to jellyfin-ffmpeg 7.1.4-3.** Generic BtbN "latest" needs
-   NVIDIA driver 610+. RunPod typically runs driver 550.x (NVENC API 12.2).
+   NVIDIA driver 610+. Cloud GPU hosts typically run driver ~550.x (NVENC API 12.2).
    This version is verified. Do not swap for a bleeding-edge build.
 
 4. **Hardware codecs only.** NVDEC decode + NVENC H.264 encode. No software
@@ -147,39 +184,50 @@ They just aren't the brand. The brand is "stream everywhere, no setup."
    broker merges every provider's candidates into one list, ranks by **distance to
    the user** (Vercel geo headers, `haversine`) then price, and `create()`s them
    **nearest-first until one boots**. "Closest server wins" spans providers for
-   free. Hard $1/hr ceiling (catalog filter + runtime cost guard), readiness gate
-   (abandon pods that never get an IP), RTMP TCP probe (forwarded port must accept),
-   placement sanity check (reject a pod that reports a different DC than requested).
-   - **RunPod** (`lib/providers/runpod.ts`): candidates = catalog GPUs × the 28
-     create-valid datacenters, `cloudType: SECURE`, **single-DC pin** (one DC per
-     create — secure honors it and reports it back; no post-boot geolocation).
-   - **Vast.ai** (`lib/providers/vast.ts`): live offer search → each rentable
-     machine becomes a candidate, geolocated by its `public_ipaddr`, **priced
-     all-in (GPU + estimated bandwidth)** and filtered to NVENC Turing+
-     (`compute_cap >= 750`), ≤$8/TB egress, ≥300 Mbps down. Currently disabled in
-     `ACTIVE_PROVIDERS` (see Current status).
-   - **DELETED this rewrite** (don't reintroduce): subregion rings, RTT/latency
-     tiers, GraphQL stock preflight, null-DC handling, IP-geolocation of pods. All
-     existed to clean up after RunPod *community*'s random placement, which is gone.
-   - **The RunPod two-list trap** (cost us a day): the GraphQL `dataCenters` query
-     returns ~47 DCs, but the REST `POST /pods` endpoint accepts a **different,
-     smaller enum (28)** and 400s the whole request if ANY pinned DC is outside it.
-     `RUNPOD_DATACENTERS` in `lib/datacenters.ts` is pinned to that **create-valid
-     28** — keep it in sync with the enum RunPod returns in the 400 error, never
-     with the GraphQL list. RunPod's per-DC stock API is also unreliable (disagreed
-     with the console) — `create()` is the source of truth, not a stock query.
-   - Tuning surfaces: `lib/datacenters.ts` (RunPod DCs, GPU catalog, `RUNPOD_CLOUD_TYPE`,
-     `PRICE_CEILING`, readiness timeouts), `lib/providers/vast.ts` (Vast filters).
+   free. Hard $1/hr all-in ceiling (candidate filter + runtime cost guard), readiness
+   gate (abandon pods that never get an IP + mapped SRT/UDP ports), then the
+   **RTMP-handshake beacon probe** (TCP — proves MediaMTX is serving; a serverless
+   prober can't verify the UDP path) and the SRT/UDP-port + advisory outbound checks.
+   - **Registry + resolver live in `lib/providers/index.ts`** (`ACTIVE_PROVIDERS`,
+     `getProvider()` — defaults to Vast). NOT in any single provider file.
+   - **Vast.ai** (`lib/providers/vast.ts`, the only active provider): live offer
+     search → each rentable **datacenter** machine becomes a candidate, geolocated by
+     its `public_ipaddr`, **priced all-in (GPU + estimated bandwidth)** and filtered
+     to NVENC Turing+ (`compute_cap >= 750`), ≤$8/TB egress, ≥300 Mbps down, ≥3
+     direct ports (RTMP beacon + SRT + UDP-probe). UDP ports need explicit
+     `-p HOST:CONTAINER/udp` flags at create (EXPOSE alone maps only TCP on Vast).
+   - **Vultr is the planned next provider** (UDP-capable via firewall rules, broader
+     geographic coverage). Adding it = a new `GpuProvider` in `lib/providers/` +
+     append to `ACTIVE_PROVIDERS` in `index.ts` + probe scripts. **RunPod can NOT be
+     re-added** — it's TCP-only and SRT ingest is mandatory.
+   - **SRT readiness (unconditional)**: a pod is accepted only once it maps the SRT
+     (8890/udp) + probe (8889/udp) ports AND passes the RTMP beacon handshake. The
+     UDP echo (8889) is ADVISORY — reject only on an explicit `ECHO:BAD` (host
+     self-reported blocked outbound), never on a no-reply (serverless can't reliably
+     round-trip UDP). The pod's boot-time GPU self-test + machine denylist back this.
+   - **DELETED (don't reintroduce):** RunPod (both clouds), `lib/runpod.ts`, the
+     RunPod provider, `RUNPOD_DATACENTERS`/`GPU_CATALOG`/`RUNPOD_CLOUD_TYPE`/
+     `dataCenterToRegion`, the DC-placement sanity check, the RunPod two-list
+     datacenter trap, subregion rings, RTT tiers, stock preflight. All RunPod-specific.
+   - Tuning surfaces: `lib/datacenters.ts` (now provider-agnostic broker knobs only —
+     `PRICE_CEILING`, readiness timeouts, `FALLBACK_LAT/LON`), `lib/providers/vast.ts`
+     (Vast filters).
 
-9. **Billing runs on the pod agent heartbeat.** burn rate = 1 token/hr base
-   (incl. YouTube passthrough + first transcode) + 0.2/extra transcoded platform.
-   The pod agent's heartbeat (label='pod') is the billing clock and the only thing
-   that deducts; the dashboard/OBS dock poll the same endpoint with the user key
-   and must never deduct. See `lib/billing.ts`.
+9. **Billing runs on the pod agent heartbeat.** Base 1 token/hr covers the first
+   output (any orientation or passthrough). Adders while streaming:
+   +0.2 token/hr per extra landscape platform; +0.2/portrait platform on a
+   different orientation; +0.1/portrait platform in "dual-format" (same platform
+   gets both); +0.5 if any output is at 1440p
+   (requires `has_2k_addon`); +0.5 if the config needs >3 NVENC sessions
+   (professional GPU required). `lib/nvenc-utils.ts` `requiredNvencSessions()`
+   counts simultaneous NVENC sessions; consumer GPUs (RTX 3090/4090/5090) cap at
+   3 — the broker skips them when this returns >3. The pod heartbeat (label='pod')
+   is the billing clock and the only thing that deducts; dashboard/OBS dock must
+   never deduct. See `lib/billing.ts` + `lib/nvenc-utils.ts`.
 
 10. **Pod safety is defense-in-depth — a rogue pod is the #1 financial risk.**
-    A running pod bills RunPod 24/7, so destruction (not just stopping outputs)
-    must happen on every failure path. Layers, each independent:
+    A running pod bills the provider 24/7, so destruction (not just stopping
+    outputs) must happen on every failure path. Layers, each independent:
     - **Atomic provision claim** (`/api/gpu/provision`): the row is reserved
       (insert-as-lock on `unique(user_id)`) BEFORE the pod is created. A second
       concurrent/retried call conflicts → 409, no pod made. Prevents the
@@ -196,10 +244,12 @@ They just aren't the brand. The brand is "stream everywhere, no setup."
       (No local max-session kill — the server owns the confirmable deadline.)
     - **Cron reaper** (`/api/cron/reap`, daily via `web/vercel.json`): the backstop
       for pods that stop phoning home — destroys on stale heartbeat (>150s),
-      never-paired (>180s), past-deadline, or idle. **Also reconciles against the
-      provider**: lists real RunPod pods and destroys any `slimcast-*` with no
-      gpu_instances row (the only path that can see a true orphan; safe vs. the
-      provisioning window because the row is reserved first). **Daily because
+      never-paired (>180s), past-deadline, or idle. **Also reconciles against every
+      provider** in `ACTIVE_PROVIDERS` (`listInstances()`): destroys any `slimcast-*`
+      instance with no gpu_instances row (the only path that can see a true orphan;
+      safe vs. the provisioning window because the row is reserved first). NOTE:
+      RunPod is no longer in `ACTIVE_PROVIDERS`, so a still-running RunPod pod (if any
+      survived the migration) is NOT reapable here — destroy those manually. **Daily because
       Vercel Hobby caps crons at once/day.** Optional `CRON_SECRET` protects it.
     - All teardown goes through `lib/pod-teardown.ts` `teardownInstance()`
       (idempotent: provider destroy + revoke pod key + delete row; also closes any
@@ -224,9 +274,12 @@ They just aren't the brand. The brand is "stream everywhere, no setup."
     - Relay: stream keys get embedded in the FFmpeg command + FFmpeg's stderr
       banner, so `supervisor._redact()` literal-scrubs every known key from the
       log ring buffer (refreshed each `apply()` via `_register_secrets`). The
-      FastAPI debug panel (`app.py`, key-bearing `/api/logs`) is **not** exposed
-      publicly — RunPod pods open `1935/tcp` only (see `runpod.ts`), and the panel
-      fails closed without `RELAY_PASSWORD`.
+      FastAPI debug panel (`app.py`, key-bearing `/api/logs`) on `:8080` **is
+      EXPOSE'd and Vast maps it** (TCP comes free from EXPOSE) — unlike RunPod,
+      which opened only `1935/tcp`. So on Vast the panel IS reachable, and the
+      guarantee now rests ENTIRELY on it **failing closed without `RELAY_PASSWORD`**
+      (provision only sets that env if the Vercel env has it). If you want the panel
+      truly private, set `RELAY_PASSWORD` or drop `8080` from the Dockerfile EXPOSE.
 
 12. **The 12h cap is a confirmable deadline, not a hard kill.** Each pod has
     `gpu_instances.max_session_at` (set to now+12h at provision). Within its final
@@ -255,7 +308,8 @@ They just aren't the brand. The brand is "stream everywhere, no setup."
     filters are CPU). So the base is the tiny `-base` CUDA image, not `-runtime`.
     For the driver libs to be mounted, `NVIDIA_DRIVER_CAPABILITIES` MUST include
     `video` (NVENC/NVDEC) + `compute` (hwaccel cuda) — set explicitly in the
-    Dockerfile so it works on any host, not just RunPod. **Rollback for a bad relay
+    Dockerfile so it works on any host (some set it implicitly via `all`; Vast may
+    not). **Rollback for a bad relay
     image:** every CI build is tagged `:<commit-sha>`; retag a known-good sha to
     `:latest` via `docker buildx imagetools create` (~2s), no rebuild needed.
 
@@ -270,30 +324,33 @@ They just aren't the brand. The brand is "stream everywhere, no setup."
 - `agent.py` — Docker entrypoint: pairs with Vercel, starts MediaMTX + uvicorn,
   polls config (outputs + crop) every 10s, posts heartbeats, runs control commands.
 - `app.py` — FastAPI control plane (kept for debug; agent wraps it).
-- `mediamtx.yml` — RTMP :1935 ingest + SRT :8890 loopback; runOnReady → hook.sh.
+- `mediamtx.yml` — SRT :8890 (OBS ingest + encoder loopback, same server) + RTMP
+  :1935 readiness beacon; runOnReady → hook.sh (fires on the SRT publish).
 - `hook.sh` — triggers supervisor start/stop-with-grace when OBS connects/drops.
 - `Dockerfile` — **nvidia/cuda:12.4.1-BASE-ubuntu22.04** (~150MB, NOT `-runtime`:
   the 1.37GB CUDA toolkit is unused — see Arch #14), jellyfin-ffmpeg 7.1.4-3,
   MediaMTX. Sets `NVIDIA_DRIVER_CAPABILITIES=compute,video,utility` (the `video`
-  cap is REQUIRED for NVENC/NVDEC; RunPod set it implicitly via `all`, other hosts
-  may not). CMD = python3 agent.py. Built/pushed to
+  cap is REQUIRED for NVENC/NVDEC; some hosts set it implicitly via `all`, Vast may
+  not). `EXPOSE 1935 8080 8890/udp 8889/udp` (UDP needs `-p` flags on Vast).
+  CMD = python3 agent.py. Built/pushed to
   `ghcr.io/oxlynum/multistream-relay:latest` + a `:<sha>` tag by
   `.github/workflows/relay-docker.yml` on any `relay/**` change. Total image ~0.23GB.
 
 ### web/
 - `lib/supabase.ts` — browser (SSR cookie) + server Supabase clients.
 - `lib/stripe.ts` — Stripe client (lazy Proxy to survive build w/o key).
-- `lib/runpod.ts` — RunPod REST wrapper (createPod w/ gpuType/cloud/dataCenterIds,
-  stop/destroy/getPodStatus via GraphQL; returns costPerHr for the price guard).
 - `lib/gpu-broker.ts` — multi-provider distance-ranked nearest-first cascade +
-  readiness gate + RTMP probe + placement check (Arch #8). `rankedCandidates()`
-  merges every provider's `listCandidates()`, sorts by haversine then price.
-- `lib/datacenters.ts` — the **28 create-valid** RunPod DC coords + 16-card NVENC
-  GPU catalog + broker knobs (`PRICE_CEILING`, `RUNPOD_CLOUD_TYPE='SECURE'`,
-  readiness timeouts). **Tune here, not in code.**
+  readiness gate + RTMP-beacon probe + SRT/UDP-port + advisory UDP-outbound checks
+  (Arch #8). `rankedCandidates()` merges every provider's `listCandidates()`, sorts
+  by haversine then price. SRT readiness is unconditional (no more `srtMode` param).
+- `lib/datacenters.ts` — **provider-agnostic broker knobs only** now (`PRICE_CEILING`,
+  `READINESS_*`, `MAX_BOOT_ATTEMPTS`, `FALLBACK_LAT/LON`). The RunPod DC list + GPU
+  catalog + `RUNPOD_CLOUD_TYPE` + `dataCenterToRegion` were deleted. **Tune here.**
 - `lib/providers/types.ts` — `GpuProvider` interface + location-stamped
-  `GpuCandidate`. `providers/runpod.ts` (secure single-DC), `providers/vast.ts`
-  (offer search, all-in pricing, NVENC Turing+ filter), registry + `ACTIVE_PROVIDERS`.
+  `GpuCandidate`. `lib/providers/index.ts` — registry + `ACTIVE_PROVIDERS = [vast]` +
+  `getProvider()` (defaults to vast). `lib/providers/vast.ts` (offer search, all-in
+  pricing, NVENC Turing+ filter, UDP `-p` flags at create) is the only provider.
+  (`providers/runpod.ts` + `lib/runpod.ts` deleted — RunPod is TCP-only.)
 - `lib/billing.ts` — transcodeCount + burnRatePerSec (Arch #9).
 - `lib/agent-config.ts` — shared output builder for config+pair routes (incl. the
   YouTube HLS passthrough URL from the stream key).
@@ -314,8 +371,25 @@ They just aren't the brand. The brand is "stream everywhere, no setup."
 - `app/dashboard/` — stats panel + live CostMeter + API key; `/platforms`,
   `/settings` (group bitrate caps + orientation + portrait crop; fps/res are
   OBS-owned, not editable), `/credits`.
-- `app/onboarding/`, `app/obs-dock/` (shows live cost meter), `middleware.ts` — built.
+- `app/onboarding/`, `app/obs-dock/` (shows live cost meter), `proxy.ts` (auth
+  gate, renamed from `middleware.ts` per Next 16) — built.
 - `components/cost-meter.tsx`, `components/portrait-crop-editor.tsx`.
+- `lib/nvenc-utils.ts` — `requiredNvencSessions()`: counts simultaneous NVENC
+  sessions the user's output config requires, used by broker to skip consumer GPUs
+  (hardware cap=3) and by billing to apply the +0.5 professional GPU adder.
+- `lib/oauth.ts` — platform OAuth helpers: HMAC-signed state tokens, token exchange
+  + refresh, per-platform configs (Twitch/YouTube/Facebook). Env vars required:
+  `TWITCH_CLIENT_ID/SECRET`, `GOOGLE_CLIENT_ID/SECRET`, `FACEBOOK_APP_ID/SECRET`.
+- `app/api/oauth/[platform]/` — OAuth callback + `/status` (connected/scopes) +
+  `/connection` route; lets users import stream keys via OAuth instead of copy-paste.
+- (`app/api/srt/` was DELETED — SRT is always on, no toggle. The `srt_enabled`
+  column was dropped; provision always provisions SRT.)
+- `app/api/output-settings/` — GET/PATCH per-platform resolution (720p/1080p/1440p)
+  + bitrate overrides. 1440p requires `has_2k_addon`. Used by dashboard settings +
+  OBS dock; supersedes the coarser per-group bitrate-only encode endpoint.
+- `app/api/metrics/connection/` — time-series connection quality (bitrate_kbps,
+  health_score, dropped_frames) for inbound (OBS→pod) and per-platform outbound,
+  from the `connection_metrics` table. Windowed up to 120 min at 10s granularity.
 
 ### slimcast-obs/
 - v2.1.0 C++ plugin, rebuilt for the agent architecture. CI/CD, .pkg/.exe.
@@ -355,13 +429,17 @@ bitrate-tiered landscape grouping if wanted.
 ## Supabase schema
 Tables: profiles, agent_api_keys, platform_connections, gpu_instances,
 stream_sessions, achievements, agent_commands, credited_payments (Stripe
-payment-id dedup for idempotent crediting), rate_limits (fixed-window counters).
+payment-id dedup for idempotent crediting), rate_limits (fixed-window counters),
+connection_metrics (time-series inbound/outbound quality at 10s intervals:
+bitrate_kbps, health_score, dropped_frames, direction, platform).
 profiles cols: streaming_credits_seconds (default 7200), portrait_zoom/pos_x/pos_y,
 landscape_bitrate_kbps (default 6000), portrait_bitrate_kbps (default 4000) — the
 per-encode-group bitrate caps (NOT per-platform; the GPU encodes once per
-orientation, so agent-config writes the group cap onto every member output).
-gpu_instances cols: provider, gpu_type, datacenter, burn_rate, ip_address, status,
-outputs (jsonb), streaming (bool), idle_since (timestamptz), session_id (uuid →
+orientation, so agent-config writes the group cap onto every member output);
+`has_2k_addon` bool (1440p unlocked). (`srt_enabled` was DROPPED — SRT is always on.)
+gpu_instances cols: provider (default `'vast'`), gpu_type, datacenter, burn_rate,
+ip_address, status, outputs (jsonb), streaming (bool), idle_since (timestamptz),
+srt_port (host-mapped 8890/udp — set on every pod now), session_id (uuid →
 stream_sessions, the pod's currently-open session), max_session_at (timestamptz,
 the confirmable 12h deadline). The pod heartbeat persists outputs+streaming so
 `/api/gpu/status` can feed the dashboard + OBS plugin per-platform dots.
@@ -373,8 +451,9 @@ Postgres fns: credit_payment_once (atomic idempotent credit), rate_limit_hit
 (fixed-window limiter). agent_api_keys has NO client SELECT policy (service-role
 only — hashes never reach the browser); label is now ('user','pod','device') with
 optional device_name/last_used_at. device_link_codes holds short-lived PKCE
-auth codes for browser-based device linking. Migrations through
-`20260622000003_device_link.sql`.
+auth codes for browser-based device linking. SQL migrations live in
+`web/supabase/migrations/`; latest is `20260625000002_srt_only_vast.sql` (drops
+`srt_enabled`, flips `gpu_instances.provider` default to `'vast'`).
 
 ## How the OBS plugin links to an account
 Two ways, both ending in a Bearer agent key the dock sends on every request

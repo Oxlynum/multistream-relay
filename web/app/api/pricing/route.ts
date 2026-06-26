@@ -22,7 +22,7 @@ export async function GET(request: Request) {
       .eq('user_id', userId),
     supabase
       .from('profiles')
-      .select('streaming_credits, output_settings, has_2k_addon, srt_enabled')
+      .select('streaming_credits, output_settings, has_2k_addon')
       .eq('id', userId)
       .single(),
   ])
@@ -36,7 +36,6 @@ export async function GET(request: Request) {
     outputSettings,
     has2kAddon,
     true, // compute as-if streaming to show live rate
-    profile?.srt_enabled ?? false,
   )
 
   const breakdown = buildPricingBreakdown(ctx)

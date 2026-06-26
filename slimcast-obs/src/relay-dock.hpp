@@ -49,7 +49,6 @@ private slots:
     void onGpuDestroyed();
     void onPlatformsUpdated(QList<PlatformConfig> platforms);
     void onEncodeUpdated(EncodeConfig encode);
-    void onSrtUpdated(bool enabled);
     void onNetworkError(QString message);
     void onPollTick();
     void onChannelToggled(const QString &platform, bool enabled);
@@ -98,7 +97,6 @@ private:
     QPushButton    *m_goLiveBtn    = nullptr;   // dock-driven Go Live / Stop
     QMap<QString, ChannelRow> m_channels;
     QCheckBox      *m_lockCheck    = nullptr;
-    QCheckBox      *m_srtCheck     = nullptr;
     QSpinBox       *m_landscapeSpin   = nullptr;
     QSpinBox       *m_portraitSpin    = nullptr;
     QLabel         *m_totalLabel   = nullptr;

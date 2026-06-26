@@ -1,5 +1,5 @@
 import { createServerClient } from '@/lib/supabase'
-import { getProvider } from '@/lib/providers/runpod'
+import { getProvider } from '@/lib/providers'
 import { authenticateUserOrAgent } from '@/lib/agent-auth'
 
 export async function POST(request: Request) {

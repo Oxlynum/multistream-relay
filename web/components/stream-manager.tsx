@@ -3,7 +3,14 @@
 import { useEffect, useRef, useState } from 'react'
 import { createBrowserClient } from '@/lib/supabase'
 import { secondsRemaining, formatTokens } from '@/lib/billing'
-import { dataCenterToRegion } from '@/lib/datacenters'
+
+// The stored `datacenter` is the provider's candidate label. Vast labels look like
+// "vast:12345 m678 RTX 4090 California, US" — the trailing "City, CC" is the real
+// geolocation. Show that when present; otherwise fall back to the raw value.
+function formatLocation(dc: string): string {
+  const geo = dc.match(/([A-Za-z .'-]+,\s*[A-Z]{2})\s*$/)
+  return geo ? geo[1].trim() : dc
+}
 
 interface OutputStatus {
   name: string
@@ -311,7 +318,7 @@ export function StreamManager() {
             <div className="text-sm font-semibold text-amber-400">Server ready · waiting for OBS</div>
             <div className="text-xs text-ink-faint mt-0.5">
               {datacenter
-                ? `Connected to ${dataCenterToRegion(datacenter)} · press Go Live in the SlimCast panel.`
+                ? `Connected to ${formatLocation(datacenter)} · press Go Live in the SlimCast panel.`
                 : 'Set OBS to HEVC and click Go Live in the SlimCast panel.'}
             </div>
           </div>
@@ -345,7 +352,7 @@ export function StreamManager() {
         </div>
         {datacenter && (
           <div className="text-xs text-ink-faint border-t border-line pt-3">
-            {dataCenterToRegion(datacenter)}
+            {formatLocation(datacenter)}
           </div>
         )}
       </div>
@@ -402,7 +409,7 @@ export function StreamManager() {
       {/* Region badge */}
       {datacenter && (
         <div className="border-t border-line pt-4 text-xs text-ink-faint">
-          {dataCenterToRegion(datacenter)}
+          {formatLocation(datacenter)}
         </div>
       )}
 

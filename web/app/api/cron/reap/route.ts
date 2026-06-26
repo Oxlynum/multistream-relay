@@ -1,10 +1,10 @@
 import { createServerClient } from '@/lib/supabase'
 import { teardownInstance } from '@/lib/pod-teardown'
-import { ACTIVE_PROVIDERS } from '@/lib/providers/runpod'
+import { ACTIVE_PROVIDERS } from '@/lib/providers'
 
 // The independent backstop. Runs daily (Vercel Hobby caps crons at once/day) and
 // destroys any pod that the in-pod safeties can't catch — chiefly a pod that has
-// stopped phoning home (agent crashed, lost network, RunPod node died) and would
+// stopped phoning home (agent crashed, lost network, host node died) and would
 // otherwise bill forever. The live agent self-destructs within seconds on
 // idle/credits/max-session, so this only matters when the agent is dead; for
 // faster reaping of that case, move to a Pro plan (every-minute) or point an
@@ -66,8 +66,7 @@ export async function GET(request: Request) {
   // ── Orphan reconcile: destroy any provider instance with no gpu_instances row ──
   // The only path that can see a pod the DB doesn't know about (the classic
   // "created but the row write lost a race / the function died"). Runs across
-  // EVERY active provider — RunPod AND Vast — so a stray Vast rental can't bill
-  // forever any more than a RunPod pod can. Safe against the provisioning window
+  // EVERY active provider so a stray rental can't bill forever. Safe against the provisioning window
   // because provision reserves the row BEFORE creating the pod, so a mid-provision
   // instance's user always has a row — matched here by the user-prefix baked into
   // the instance name (`slimcast-<8 chars>`).

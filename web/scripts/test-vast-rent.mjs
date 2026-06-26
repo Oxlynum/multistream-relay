@@ -1,6 +1,6 @@
 // test-vast-rent.mjs — Verify the Vast RENT → ports → destroy lifecycle for real,
-// before we trust create()/getStatus()/destroy() in production. Same discipline
-// as test-dc-pin.mjs: don't believe the API until a live round-trip proves it.
+// before we trust create()/getStatus()/destroy() in production. The discipline:
+// don't believe the provider API until a live round-trip proves it.
 //
 // Rents the cheapest usable offer with a TINY image (nginx:alpine — fast pull,
 // stays running), waits for the host to map our ports + assign an IP, dumps

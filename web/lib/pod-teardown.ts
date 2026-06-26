@@ -1,5 +1,5 @@
 import { createServerClient } from '@/lib/supabase'
-import { getProvider } from '@/lib/providers/runpod'
+import { getProvider } from '@/lib/providers'
 
 // The single, idempotent way to destroy a user's pod. Used by manual stop
 // (DELETE /api/gpu), the heartbeat self-destruct, the agent terminate request,
