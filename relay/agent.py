@@ -80,7 +80,11 @@ HEARTBEAT_FAIL_LIMIT = int(os.environ.get("AGENT_HB_FAIL_LIMIT", "6"))   # ~60s
 DISCONNECT_GRACE_S = int(os.environ.get("RELAY_DISCONNECT_GRACE", "20"))
 # If OBS never connects within this many seconds of the pod being ready, terminate.
 # Prevents paying for a pod that OBS can't reach (wrong region, port issue, etc.)
-STARTUP_TIMEOUT_S = int(os.environ.get("RELAY_STARTUP_TIMEOUT", "120"))
+# 180s (not 120): the SRT UDP port can take ~60s to map on Vast, and the dock can
+# only hand OBS the srt:// URL after the broker finishes its readiness gate — so the
+# OBS-connect clock effectively starts well after the agent pairs. 120s could expire
+# mid-provision on a slow host and self-destruct a pod that was about to go live.
+STARTUP_TIMEOUT_S = int(os.environ.get("RELAY_STARTUP_TIMEOUT", "180"))
 
 if not API_KEY:
     log.error("SLIMCAST_API_KEY is not set — cannot authenticate with Vercel.")

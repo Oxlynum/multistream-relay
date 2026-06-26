@@ -290,7 +290,11 @@ export async function POST(request: Request) {
   // to 'provisioning' or clearing last_seen_at would permanently hide it from the
   // dock's stale check and keep the dock stuck on "Booting server..." forever.
   // The claim INSERT set status='provisioning'; the pair route flips it to 'running'.
-  await supabase
+  // Log the exact ingest coordinates the dock will receive — if a stream ever fails
+  // to start, this line confirms whether srt_url was deliverable (ip + srt_port +
+  // ingest_key all present) and when, vs. the pod being torn down before this save.
+  console.log(`[provision] pod ready, saving ingest: ip=${result.ip} srt_port=${result.srtPort} rtmp_port=${result.port} key=${ingestKey.slice(0, 8)}… (srt_url ${result.ip && result.srtPort ? 'DELIVERABLE' : 'INCOMPLETE'})`)
+  const { error: saveErr } = await supabase
     .from('gpu_instances')
     .update({
       provider_id: result.podId!,
@@ -307,6 +311,7 @@ export async function POST(request: Request) {
       datacenter: result.datacenter,
     })
     .eq('user_id', userId)
+  if (saveErr) console.error(`[provision] FAILED to save ingest coords (row gone?): ${saveErr.message}`)
 
   return Response.json({
     ok: true,

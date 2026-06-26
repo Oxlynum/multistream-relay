@@ -30,6 +30,13 @@ export type { UserOutputConfig } from '@/lib/nvenc-utils'
 // them to retry rather than booting a pod on another continent.
 const MAX_CREATE_ATTEMPTS = 120
 
+// The RTMP beacon can lag the port mapping by a beat (MediaMTX rebinds after the
+// agent's GPU self-test; Vast may briefly bounce the container while finalising port
+// forwards). Retry the handshake a few times before discarding a pod — a single miss
+// is transient, not a bad host. ~3 tries × 4s covers the rebind window.
+const RTMP_PROBE_RETRIES = 3
+const RTMP_PROBE_RETRY_MS = 4000
+
 function haversineKm(aLat: number, aLon: number, bLat: number, bLon: number): number {
   const R = 6371
   const dLat = ((bLat - aLat) * Math.PI) / 180
@@ -119,13 +126,22 @@ interface PodAddr { ip: string; port: number; hlsPort: number | null; dataCenter
  * We wait for BOTH the RTMP beacon port (proves MediaMTX answered, mapped TCP) AND
  * the UDP ports (SRT ingest + probe). Vast maps the UDP ports a few seconds AFTER
  * the TCP ones, so returning on the RTMP port alone would make the SRT readiness
- * check see null ports and wrongly reject the pod. */
+ * check see null ports and wrongly reject the pod.
+ *
+ * Readiness requires the IP, the RTMP beacon port (proves MediaMTX answered), and
+ * the SRT ingest port (8890/udp — the ONLY port OBS actually publishes to). We do
+ * NOT require the 8889/udp probe port: it exists solely for the ADVISORY echo, which
+ * we never gate on (a no-reply already means "proceed"). Hard-requiring it here was
+ * an SRT-era regression — on hosts where 8890 maps but 8889 lags or never maps,
+ * waitForIp would spin to the 180s timeout and the broker would throw away a pod the
+ * agent had already paired with, cascading until it exhausted boot attempts. The SRT
+ * leg only needs 8890; carry 8889 opportunistically for the advisory probe. */
 async function waitForIp(provider: GpuProvider, podId: string): Promise<PodAddr | null> {
   const deadline = Date.now() + READINESS_TIMEOUT_MS
   while (Date.now() < deadline) {
     try {
       const s = await provider.getStatus(podId)
-      const ready = s.ip && s.port && s.srtPort && s.udpProbePort
+      const ready = s.ip && s.port && s.srtPort   // 8889 (probe) is optional — advisory only
       if (ready) return { ip: s.ip!, port: s.port!, hlsPort: s.hlsPort ?? null, dataCenterId: s.dataCenterId ?? null, srtPort: s.srtPort ?? null, udpProbePort: s.udpProbePort ?? null }
       if (s.status === 'error' || s.status === 'terminated') return null
     } catch {
@@ -258,39 +274,46 @@ export async function provisionGpu(args: {
       continue
     }
 
-    // MediaMTX must actually answer RTMP (not just accept TCP) — proves the pod
-    // is truly ready to ingest before we hand the address to OBS.
-    if (!(await probeRtmp(addr.ip, addr.port))) {
-      console.warn(`[broker] pod ${podId} RTMP ${addr.ip}:${addr.port} not serving yet — cascading`)
+    // MediaMTX must actually answer RTMP (not just accept TCP) — proves the pod is
+    // truly ready to ingest before we hand the address to OBS. The beacon can lag
+    // the port mapping by a beat (MediaMTX rebinds after the agent's GPU self-test,
+    // and Vast's container can briefly bounce while finalising port forwards), so a
+    // SINGLE miss does NOT mean a bad host. Retry a few times before discarding —
+    // throwing away an already-paired pod on one transient miss was a prime cause of
+    // cascades that exhausted boot attempts and left the user with no stream.
+    let rtmpOk = false
+    for (let r = 0; r < RTMP_PROBE_RETRIES; r++) {
+      if (await probeRtmp(addr.ip, addr.port)) { rtmpOk = true; break }
+      if (r < RTMP_PROBE_RETRIES - 1) await sleep(RTMP_PROBE_RETRY_MS)
+    }
+    if (!rtmpOk) {
+      console.warn(`[broker] pod ${podId} RTMP ${addr.ip}:${addr.port} not serving after ${RTMP_PROBE_RETRIES} tries — cascading`)
       try { await provider.destroy(podId) } catch { /* best effort */ }
       lastError = 'RTMP not ready (MediaMTX not answering)'
       if (bootAttempts >= MAX_BOOT_ATTEMPTS) return { ok: false, attempts, error: 'too many failed boots' }
       continue
     }
 
-    // The host must have MAPPED the SRT + probe ports (verifiable over HTTP via
-    // getStatus — a hard requirement; without the SRT port there is no ingest).
-    // waitForIp already gates on these; re-check defensively before the UDP probe.
-    // The UDP echo is only ADVISORY (see probeUdp): we reject solely on an explicit
-    // ECHO:BAD, never on a no-reply, because our own serverless egress can't
-    // reliably round-trip UDP and was rejecting every good host.
-    if (!addr.srtPort || !addr.udpProbePort) {
-      console.warn(`[broker] pod ${podId} SRT/UDP ports not mapped (srt=${addr.srtPort} probe=${addr.udpProbePort}) — cascading`)
+    // The SRT ingest port (8890/udp) is the ONLY hard requirement — without it there
+    // is no OBS uplink. waitForIp already gated on it; re-check defensively.
+    if (!addr.srtPort) {
+      console.warn(`[broker] pod ${podId} SRT port not mapped — cascading`)
       try { await provider.destroy(podId) } catch { /* best effort */ }
-      lastError = 'SRT ports not mapped'
+      lastError = 'SRT port not mapped'
       if (bootAttempts >= MAX_BOOT_ATTEMPTS) return { ok: false, attempts, error: 'too many failed boots' }
       continue
     }
-    if (!(await probeUdp(addr.ip, addr.udpProbePort))) {
-      // Only reached on an explicit ECHO:BAD — the host itself said outbound to
-      // the platforms is blocked, so it could ingest but never deliver. Reject.
+    // UDP echo is ADVISORY and only run when the 8889 probe port actually mapped
+    // (it's optional now — see waitForIp). We reject solely on an explicit ECHO:BAD;
+    // a no-reply or an unmapped probe port never blocks a pod whose SRT leg is good.
+    if (addr.udpProbePort && !(await probeUdp(addr.ip, addr.udpProbePort))) {
       console.warn(`[broker] pod ${podId} host self-reported blocked outbound (${addr.ip}:${addr.udpProbePort}) — cascading`)
       try { await provider.destroy(podId) } catch { /* best effort */ }
       lastError = 'host reported blocked outbound-to-platform'
       if (bootAttempts >= MAX_BOOT_ATTEMPTS) return { ok: false, attempts, error: 'too many failed boots' }
       continue
     }
-    console.log(`[broker] pod ${podId} SRT ready: srt port ${addr.srtPort} mapped (outbound advisory passed)`)
+    console.log(`[broker] pod ${podId} SRT ready: srt port ${addr.srtPort} mapped (probe=${addr.udpProbePort ?? 'unmapped/advisory-skipped'})`)
 
     return {
       ok: true,
