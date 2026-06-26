@@ -34,6 +34,14 @@ billed in seconds; +0.2 token/hr per extra transcoded platform. No subscription.
   SRT uplink. `lib/runpod.ts` + `lib/providers/runpod.ts` were deleted; the provider
   registry now lives in `lib/providers/index.ts`. **Vultr is the planned next
   provider** (UDP-capable; bigger geographic coverage) — see Arch #8.
+- **GPU denylist: machines 8914 and 78446 (IPs 198.53.64.194 and 185.61.165.201)**
+  are hard-blocked in `lib/providers/vast.ts` (`MACHINE_DENYLIST`, `IP_DENYLIST`).
+  Both pass the boot NVENC self-test but fail on real NVDEC decode with
+  `CUDA_ERROR_NO_DEVICE` / `Cannot load libnvidia-encode.so.1` mid-stream.
+  The **GPU self-test** in `relay/agent.py` was upgraded from a single-pass
+  lavfi→NVENC probe to a two-pass round-trip: encode a tiny H.264 clip via
+  h264_nvenc → decode it with `-hwaccel cuda` + h264_nvenc → null. This catches
+  flaky NVDEC injection that the old lavfi-only probe never triggered.
 - **Relay Docker image slimmed 1.6GB → 0.23GB** (cuda `-runtime` → `-base`; the
   CUDA toolkit was unused dead weight — see Arch #4/#14). Faster cold starts.
 - Web app (Next.js 16) in `web/` — Supabase + Stripe wired, deploys to Vercel.
@@ -77,6 +85,12 @@ There is no unit-test suite; `npx tsc --noEmit` is the gate. Prod is debugged vi
 `vercel logs` — the broker/agent/billing all `console.log` structured lines
 (`[broker]`, `[provision]`, `[agent/status]`, `[gpu/status]`).
 
+> **Next.js 16 breaking changes:** `web/AGENTS.md` warns that this version has
+> breaking API changes vs. prior training data. Before writing any Next.js-specific
+> code (routing, caching, middleware, server actions), read the relevant guide in
+> `web/node_modules/next/dist/docs/`. The auth gate is `web/proxy.ts` (renamed from
+> `middleware.ts` in Next 16).
+
 **slimcast-obs/** (C++ OBS plugin, macOS arm64; needs OBS.app + CMake ≥3.26):
 ```bash
 cd slimcast-obs
@@ -93,10 +107,38 @@ push to `main`. The `:<sha>` tags are rollback points. To build/test out-of-band
 `docker buildx build --platform linux/amd64 -t ...:slim --push relay`, then retag
 with `docker buildx imagetools create --tag ...:latest ...:slim` (instant promote).
 
+**relay/** local testing (with NVIDIA GPU):
+```bash
+cd relay
+docker compose up --build   # uses relay/docker-compose.yml; requires RELAY_PASSWORD env
+```
+Maps RTMP :1935 + control panel :8080; persists `config.json` via volume. UDP ports
+for SRT are NOT in the compose file (it's a pre-SRT artifact) — test SRT ingest on
+a real Vast pod.
+
+**One-time Stripe setup** (run once per environment to create the price object):
+```bash
+cd web
+STRIPE_SECRET_KEY=sk_... node scripts/setup-stripe.mjs
+# Prints the price ID — add it to Vercel as STRIPE_PRICE_HOURLY
+```
+
 **Probes** (verify provider APIs against reality before trusting them — this repo
 has been bitten 3× by assumed API shapes; always probe first):
 `web/scripts/test-vast.mjs` (Vast offer search), `test-vast-rent.mjs` (Vast
 rent→ports→destroy lifecycle). Each reads its key from `web/.env.local`.
+
+**Required env vars** (see `web/.env.example` for the full list):
+- `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`
+- `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_HOURLY`
+- `SLIMCAST_RELAY_IMAGE` (e.g. `ghcr.io/oxlynum/multistream-relay:latest`)
+- `SLIMCAST_AGENT_CALLBACK_URL` (the Vercel URL the GPU agent calls home to)
+- `STREAM_KEY_SECRET` — AES-256-GCM key; **losing it makes all stored keys unrecoverable**
+- `CRON_SECRET` (optional but recommended; protects `/api/cron/reap`)
+- `TWITCH_CLIENT_ID/SECRET`, `GOOGLE_CLIENT_ID/SECRET`, `FACEBOOK_APP_ID/SECRET` (OAuth)
+- `SLIMCAST_DEV_NO_BILLING_USER_ID` — dev bypass: skips billing checks for this UUID (leave blank in prod)
+- `VAST_API_KEY` — not in `.env.example` but required; add manually
+- Note: `.env.example` still lists `RUNPOD_API_KEY` — this is stale (RunPod removed); ignore it
 
 ## Working conventions (do these when wrapping up — standing authorization)
 After completing a substantial task, run the relevant items below without
@@ -418,6 +460,14 @@ They just aren't the brand. The brand is "stream everywhere, no setup."
 - OBS-driven flow depends on the MediaMTX ingest hook to start outputs once OBS
   pushes RTMP — the plugin no longer sends start/stop control commands (those
   remain for the dashboard via /api/agent/control).
+- `HealthGraphWidget.cpp/h` — real-time canvas widget showing inbound (OBS→pod)
+  + per-platform outbound bitrate and health score. Polls `/api/metrics/connection`
+  every 10s; keeps MAX_POINTS=60 samples (10 min history). Rendered as chip row +
+  line graph inside the active dock page.
+- `plugin-main.cpp` — OBS module init: registers bundled Qt TLS backend (needed
+  because OBS ships without TLS; without this, all HTTPS calls silently fail),
+  declares module metadata, wires `frontendEventCb` (STREAMING_STARTING /
+  STREAMING_STOPPED → dock lifecycle).
 
 ## Platforms supported
 | Platform | Protocol | Max kbps | Orientation | Encode |
