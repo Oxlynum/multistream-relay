@@ -172,9 +172,11 @@ force-pushing, tearing down live infra); the above are the routine wrap-up steps
 3. Onboarding shows the SlimCast API key once → paste into OBS plugin
 4. Download OBS plugin (.pkg Mac / .exe Windows) → double-click to install
 5. Open OBS → SlimCast panel present → enter SlimCast API key once → done
-6. **Every stream:** click Start Streaming in OBS → the broker provisions the
-   nearest available GPU (~45s), all platforms go live automatically; clicking
-   Stop destroys the pod (no idle billing).
+6. **Every stream:** click Start Streaming in OBS → button turns amber "Cancel"
+   while the broker provisions the nearest available GPU (~45s); once the pod is
+   ready OBS connects automatically and all platforms go live. Clicking Cancel
+   during provisioning aborts and destroys any partial pod. Clicking Stop
+   Streaming destroys the pod (no idle billing).
 7. **Low credits:** OBS plugin warns at 30 min left → hard stop at zero
    (enforced on the agent heartbeat, burn-rate aware).
 
@@ -446,20 +448,21 @@ They just aren't the brand. The brand is "stream everywhere, no setup."
   (flattened from grouped `outputs`). Methods: fetchGpuStatus, provisionGpu,
   destroyGpu (DELETE /api/gpu — no idle billing).
 - `relay-dock.cpp/hpp` — single status-first QStackedWidget dock (setup page →
-  active page). **No manual start/stop, no tabs:** lifecycle is 100% OBS-driven
-  (STREAMING_STARTING → provision + wait + set ingest URL + resume; STREAMING_STOPPED
-  → destroy). **No manual GPU controls of any kind** — GPU start/stop is
-  exclusively OBS-driven (product rule). The dock IS a control panel for stream
-  config though: per-channel on/off toggles (PATCH enabled; applies mid-stream
-  in ≤10s), a channel-lock that auto-engages on stream start, per-encode-group
-  bitrate cap sliders (PATCH /api/encode), live per-platform dots, faint
-  per-channel + total token-rate fine print. Resolution/fps are read-only,
-  pulled from OBS via obs_get_video_info (never editable — OBS owns them).
-  Everything the dock changes is the same Supabase config the website edits, so
-  dock ↔ slimcast.com stay in sync.
-- OBS-driven flow depends on the MediaMTX ingest hook to start outputs once OBS
-  pushes RTMP — the plugin no longer sends start/stop control commands (those
-  remain for the dashboard via /api/agent/control).
+  active page). **No manual start/stop, no tabs:** lifecycle is 100% OBS-driven.
+  **No manual GPU controls of any kind** — GPU start/stop is exclusively OBS-driven
+  (product rule). The dock's own Go Live button is hidden; the native OBS Start
+  Streaming button is the single user-facing control (see plugin-main.cpp below).
+  The dock IS a control panel for stream config: per-channel on/off toggles (PATCH
+  enabled; applies mid-stream in ≤10s), a channel-lock that auto-engages on stream
+  start, per-encode-group bitrate cap sliders (PATCH /api/encode), live per-platform
+  dots, faint per-channel + total token-rate fine print. Resolution/fps are read-only,
+  pulled from OBS via obs_get_video_info (never editable — OBS owns them). Everything
+  the dock changes is the same Supabase config the website edits, so dock ↔
+  slimcast.com stay in sync. `render()` also drives the native OBS button appearance:
+  amber "Cancel" while `m_autoLaunching`; restored to OBS's original style on cancel
+  or failure; OBS takes over with "Stop Streaming" once streaming starts.
+  `onObsStreamingStarting()` has a queued safety-net fallback (stops OBS + triggers
+  provisioning) in case the event filter ever misses a click.
 - `HealthGraphWidget.cpp/h` — real-time canvas widget showing inbound (OBS→pod)
   + per-platform outbound bitrate and health score. Polls `/api/metrics/connection`
   every 10s; keeps MAX_POINTS=60 samples (10 min history). Rendered as chip row +
@@ -467,7 +470,11 @@ They just aren't the brand. The brand is "stream everywhere, no setup."
 - `plugin-main.cpp` — OBS module init: registers bundled Qt TLS backend (needed
   because OBS ships without TLS; without this, all HTTPS calls silently fail),
   declares module metadata, wires `frontendEventCb` (STREAMING_STARTING /
-  STREAMING_STOPPED → dock lifecycle).
+  STREAMING_STOPPED → dock lifecycle). Also finds OBS's native `streamButton`
+  (`win->findChild<QPushButton*>("streamButton")`) and installs the dock as a Qt
+  event filter on it — clicks are intercepted before OBS handles them and routed
+  through `onMainBtnClicked()` (Go Live when idle, Cancel when provisioning). When
+  OBS is already streaming, clicks pass through so Stop Streaming works normally.
 
 ## Platforms supported
 | Platform | Protocol | Max kbps | Orientation | Encode |
