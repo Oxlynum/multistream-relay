@@ -20,6 +20,12 @@ billed in seconds; +0.2 token/hr per extra transcoded platform. No subscription.
 - **Ingest is SRT-only (UDP).** OBS → pod is SRT; there is no RTMP ingest path. This
   makes the GPU provider **necessarily UDP-capable**, which is why RunPod is gone
   (see below). Outputs to platforms stay RTMP/RTMPS (Arch #1).
+- **SRT ingest uses a hardcoded 5000ms latency buffer** (`&latency=5000` appended to
+  the SRT URL in `/api/gpu/status`). SRT negotiates effective latency as
+  `MAX(caller, listener)`; OBS is the caller so 5000ms wins automatically over
+  MediaMTX's ~120ms default. This gives low-bandwidth users maximum jitter/packet-loss
+  resilience at no perceptible cost — platform buffering (Twitch 3–8s, YouTube 5–30s)
+  already swallows the delay. Do not lower this without good reason.
 - **Provider: Vast.ai is the SOLE provider** (`ACTIVE_PROVIDERS = [vastProvider]`),
   picked by the availability broker (Arch #8) — never by hand. Hard $1/hr ceiling,
   all-in (GPU + bandwidth). Vast hosts are cheap consumer GPUs ($0.05–0.14/hr) and

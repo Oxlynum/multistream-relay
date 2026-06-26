@@ -81,7 +81,7 @@ export async function GET(request: Request) {
   // of RTMP. The streamid carries the per-pod ingest path (publish:<key>), so the
   // key both routes the publish and gates access — same secret as the RTMP path.
   const srtUrl = instance.ip_address && instance.srt_port && instance.ingest_key
-    ? `srt://${instance.ip_address}:${instance.srt_port}?streamid=publish:${instance.ingest_key}`
+    ? `srt://${instance.ip_address}:${instance.srt_port}?streamid=publish:${instance.ingest_key}&latency=5000`
     : null
   console.log(`[gpu/status] effectiveStatus=${effectiveStatus} streaming=${instance.streaming} ip=${instance.ip_address} port=${instance.ingest_port} hls_port=${instance.hls_port ?? 'null'} srt_port=${instance.srt_port ?? 'null'} key=${instance.ingest_key ? instance.ingest_key.slice(0,8)+'…' : 'null'} rtmp_url=${server}`)
 
