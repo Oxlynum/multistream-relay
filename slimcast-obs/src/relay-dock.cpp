@@ -683,6 +683,15 @@ void RelayDock::onDeviceLinkFailed(QString message)
 
 // ── OBS stream lifecycle (the only GPU triggers) ───────────────────────────────
 
+void RelayDock::restoreObsStreamBtn()
+{
+    if (!m_obsStreamBtn || !m_obsStreamBtnOverridden) return;
+    m_obsStreamBtn->setStyleSheet(m_obsStreamBtnSavedStyle);
+    if (!obs_frontend_streaming_active())
+        m_obsStreamBtn->setText(m_obsStreamBtnSavedText);
+    m_obsStreamBtnOverridden = false;
+}
+
 void RelayDock::setObsStreamBtn(QPushButton *btn)
 {
     m_obsStreamBtn = btn;
@@ -870,20 +879,25 @@ void RelayDock::render(const GpuInfo &info)
         }
     }
 
-    // ── Native OBS stream button: amber "Cancel" while provisioning ───────────
+    // ── Native OBS stream button: amber "Cancel" until relay confirms streaming ─
     if (m_obsStreamBtn) {
-        if (m_autoLaunching) {
+        // Hold "Cancel" through all phases: GPU search, boot, AND OBS connecting
+        // to the relay. Only clear once info.streaming is true (relay confirmed)
+        // or the pod is gone (cancel / failure — status != "running").
+        const bool shouldCancel = m_autoLaunching
+            || (m_obsStreamBtnOverridden && !info.streaming && info.status == "running");
+        if (shouldCancel) {
             m_obsStreamBtn->setText("Cancel");
             m_obsStreamBtn->setStyleSheet(goLiveStyle(C_WARN));
             m_obsStreamBtnOverridden = true;
-        } else if (m_obsStreamBtnOverridden && !obs_frontend_streaming_active() && !m_resumingStream) {
-            // Provisioning ended without reaching streaming (cancel / failure).
-            // Restore OBS's original appearance; OBS manages it from here.
-            m_obsStreamBtn->setText(m_obsStreamBtnSavedText);
+        } else if (m_obsStreamBtnOverridden) {
+            // Restore style. If streaming, OBS already set text to "Stop Streaming";
+            // if cancelled/failed, restore saved text ("Start Streaming") too.
             m_obsStreamBtn->setStyleSheet(m_obsStreamBtnSavedStyle);
+            if (!obs_frontend_streaming_active())
+                m_obsStreamBtn->setText(m_obsStreamBtnSavedText);
             m_obsStreamBtnOverridden = false;
         }
-        // When streaming is active, OBS already set the button to "Stop Streaming".
     }
 
     m_creditsLabel->setText(formatCredits(info.creditsTokens));
@@ -1121,6 +1135,7 @@ void RelayDock::abortLaunch(const QString &message)
     m_autoLaunching = false;
     m_launchStartMs = 0;
     m_api->destroyGpu();        // clean up any half-provisioned pod (idempotent)
+    restoreObsStreamBtn();
     setStatus("Couldn't start", C_ERR);
     if (m_totalLabel) m_totalLabel->setText("Go Live failed — see the popup.");
     // Clear popup so the user sees exactly why it failed.
@@ -1253,6 +1268,7 @@ void RelayDock::onMainBtnClicked()
         if (m_launchTimeout) m_launchTimeout->stop();
         m_api->cancelProvision();
         m_api->destroyGpu();   // no-op if pod never got created
+        restoreObsStreamBtn();
         setStatus("Cancelled", C_IDLE);
         render(m_lastGpuInfo);
         return;

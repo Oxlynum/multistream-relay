@@ -76,6 +76,7 @@ private:
     void applyRecommendedSettings(const QString &encId, int bframeFamily, int bitrate);
 
     bool eventFilter(QObject *obj, QEvent *event) override;
+    void restoreObsStreamBtn();   // snap back to OBS's saved style/text immediately
 
     void render(const GpuInfo &info);
     void renderConfirm(const GpuInfo &info);
