@@ -2,6 +2,22 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+---
+## ⚡ CLI TOOLS AVAILABLE IN THIS SESSION — READ FIRST
+
+The following CLIs are authenticated and ready to use. Use them directly instead of guessing or calling web APIs manually:
+
+| CLI | What it covers |
+|-----|----------------|
+| `vastai` | List/destroy/SSH into running Vast.ai GPU instances (`vastai show instances-v1 --raw`, `vastai logs <id>`, `vastai destroy instance <id> --yes`) |
+| `gh` | GitHub — PRs, issues, CI status, release tags (`gh run list`, `gh pr create`, `gh release view`) |
+| `supabase` | DB migrations, inspect tables, run SQL (`supabase db diff`, `supabase migration new`, `supabase db push`) |
+| `vercel` | Deploy, logs, env vars (`vercel logs --environment=production --since=10m -x`, `vercel env pull`, `vercel --prod`) |
+
+**Debug flow for a crashing pod:** `vastai show instances-v1 --raw` → get instance ID → `vastai logs <id> --tail 100` for container stdout + agent.py lines. The debug panel on `:8080` now shows live FFmpeg stderr (dual-supervisor gap fixed 2026-06-26 — uvicorn runs in-process sharing agent.py's Supervisor).
+
+---
+
 ## What it is
 **SlimCast** — a consumer multistreaming SaaS. User pushes one HEVC stream from
 OBS on a Mac mini M4 (Apple VT hardware encoder) to a cloud GPU; the GPU transcodes
@@ -34,14 +50,18 @@ billed in seconds; +0.2 token/hr per extra transcoded platform. No subscription.
   SRT uplink. `lib/runpod.ts` + `lib/providers/runpod.ts` were deleted; the provider
   registry now lives in `lib/providers/index.ts`. **Vultr is the planned next
   provider** (UDP-capable; bigger geographic coverage) — see Arch #8.
-- **GPU denylist: machines 8914 and 78446 (IPs 198.53.64.194 and 185.61.165.201)**
-  are hard-blocked in `lib/providers/vast.ts` (`MACHINE_DENYLIST`, `IP_DENYLIST`).
-  Both pass the boot NVENC self-test but fail on real NVDEC decode with
-  `CUDA_ERROR_NO_DEVICE` / `Cannot load libnvidia-encode.so.1` mid-stream.
-  The **GPU self-test** in `relay/agent.py` was upgraded from a single-pass
-  lavfi→NVENC probe to a two-pass round-trip: encode a tiny H.264 clip via
-  h264_nvenc → decode it with `-hwaccel cuda` + h264_nvenc → null. This catches
-  flaky NVDEC injection that the old lavfi-only probe never triggered.
+- **GPU denylist: machine 8914** is hard-blocked in `lib/providers/vast.ts`
+  (`MACHINE_DENYLIST` only — the IP denylist was removed 2026-06-26 since IPs
+  change on re-registration and the denylist has no removal mechanism).
+  Machine 8914 passes the boot NVENC self-test but fails real NVDEC decode.
+  The **GPU self-test** in `relay/agent.py` is a two-pass round-trip:
+  encode a tiny H.264 clip via h264_nvenc → decode it with `-hwaccel cuda` +
+  h264_nvenc → null. NOTE: the self-test only validates H.264 NVDEC; it does NOT
+  test HEVC NVDEC, which is what the live pipeline actually uses (OBS sends HEVC).
+  Machines that pass the self-test but fail on real HEVC streams slip through.
+  **Open investigation (2026-06-26):** the landscape FFmpeg group exits code 255
+  after ~6s on every pod tested so far (see relay/app.py debug panel for FFmpeg
+  stderr now that the dual-supervisor gap is fixed).
 - **Relay Docker image slimmed 1.6GB → 0.23GB** (cuda `-runtime` → `-base`; the
   CUDA toolkit was unused dead weight — see Arch #4/#14). Faster cold starts.
 - Web app (Next.js 16) in `web/` — Supabase + Stripe wired, deploys to Vercel.
@@ -373,7 +393,11 @@ They just aren't the brand. The brand is "stream everywhere, no setup."
   2x bufsize, bf=3, rc-lookahead=32, spatial/temporal-aq. Do not degrade these.
 - `agent.py` — Docker entrypoint: pairs with Vercel, starts MediaMTX + uvicorn,
   polls config (outputs + crop) every 10s, posts heartbeats, runs control commands.
-- `app.py` — FastAPI control plane (kept for debug; agent wraps it).
+- `app.py` — FastAPI control plane (debug only). Previously ran as a subprocess
+  with its own empty Supervisor — `/api/logs/*` always returned nothing. Fixed
+  2026-06-26: agent.py now runs uvicorn in-process via `threading.Thread`, so
+  `app.py`'s `_sup()` returns the live pipeline Supervisor and `/api/logs/<runner>`
+  shows real FFmpeg stderr. Requires `RELAY_PASSWORD` to be set (fails-closed).
 - `mediamtx.yml` — SRT :8890 (OBS ingest + encoder loopback, same server) + RTMP
   :1935 readiness beacon; runOnReady → hook.sh (fires on the SRT publish).
 - `hook.sh` — triggers supervisor start/stop-with-grace when OBS connects/drops.

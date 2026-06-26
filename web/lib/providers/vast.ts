@@ -81,25 +81,19 @@ interface VastOffer {
 //   78446 — RTX 4090 at 185.61.165.201: same failure — NVDEC returns
 //            CUDA_ERROR_NO_DEVICE and libnvidia-encode.so.1 fails to load mid-
 //            stream even after the self-test passed at boot (2026-06-25).
+//   67876 — RTX 4090 at 45.143.122.55 (United Kingdom): passes H.264 self-test
+//            but HEVC NVDEC fails on real OBS stream — exit 255 crash-loop,
+//            6s per attempt (2026-06-26).
 // Extend via VAST_MACHINE_DENYLIST env (comma-separated machine ids).
 // Remove an id once the host is confirmed fixed.
 const MACHINE_DENYLIST = new Set<number>([
   8914,
   78446,
+  67876,
   ...(process.env.VAST_MACHINE_DENYLIST ?? '')
     .split(',').map(s => parseInt(s.trim(), 10)).filter(Number.isFinite),
 ])
 
-// IP-level denylist. The same physical host re-registers under new machine-ids at
-// one IP, dodging MACHINE_DENYLIST. Known bad IPs:
-//   198.53.64.194 — appeared as machine 8914, 25132, 1569 (all GPU-broken).
-//   185.61.165.201 — machine 78446 (RTX 4090); NVDEC fails mid-stream.
-// Extend via VAST_IP_DENYLIST (comma-separated). Remove once a host is fixed.
-const IP_DENYLIST = new Set<string>([
-  '198.53.64.194',
-  '185.61.165.201',
-  ...(process.env.VAST_IP_DENYLIST ?? '').split(',').map(s => s.trim()).filter(Boolean),
-])
 
 // Country-centroid fallback coords (used only if IP geolocation fails). Keyed by
 // the 2-letter code at the tail of Vast's geolocation string ("California, US").
@@ -190,7 +184,6 @@ export const vastProvider: GpuProvider = {
       (o.internet_up_cost_per_tb ?? 0) <= MAX_EGRESS_COST_PER_TB &&  // reject bandwidth gougers
       allInPricePerHr(o) <= maxPricePerHr &&                          // all-in, not just GPU
       !MACHINE_DENYLIST.has(o.machine_id) &&                          // skip known GPU-blind hosts (by machine)
-      !IP_DENYLIST.has(o.public_ipaddr ?? '') &&                      // skip known-bad hosts (by IP; survives re-registration)
       !!o.public_ipaddr,
     )
     if (usable.length === 0) return []
