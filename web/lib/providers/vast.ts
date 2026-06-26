@@ -85,6 +85,17 @@ const MACHINE_DENYLIST = new Set<number>([
     .split(',').map(s => parseInt(s.trim(), 10)).filter(Number.isFinite),
 ])
 
+// IP-level denylist. The same physical host re-registers under new machine-ids at
+// one IP, dodging MACHINE_DENYLIST (198.53.64.194 has appeared as 8914, 25132, and
+// 1569 — all GPU-broken: the boot NVENC self-test passes, but the real transcode
+// crash-loops with FFmpeg exit 218 / -38 (ENOSYS) because `-hwaccel cuda` NVDEC
+// decode isn't usable on that box). Blocking by IP survives re-registration.
+// Extend via VAST_IP_DENYLIST (comma-separated). Remove once a host is fixed.
+const IP_DENYLIST = new Set<string>([
+  '198.53.64.194',
+  ...(process.env.VAST_IP_DENYLIST ?? '').split(',').map(s => s.trim()).filter(Boolean),
+])
+
 // Country-centroid fallback coords (used only if IP geolocation fails). Keyed by
 // the 2-letter code at the tail of Vast's geolocation string ("California, US").
 const COUNTRY_COORDS: Record<string, [number, number]> = {
@@ -173,7 +184,8 @@ export const vastProvider: GpuProvider = {
       o.direct_port_count >= MIN_DIRECT_PORTS &&
       (o.internet_up_cost_per_tb ?? 0) <= MAX_EGRESS_COST_PER_TB &&  // reject bandwidth gougers
       allInPricePerHr(o) <= maxPricePerHr &&                          // all-in, not just GPU
-      !MACHINE_DENYLIST.has(o.machine_id) &&                          // skip known GPU-blind hosts
+      !MACHINE_DENYLIST.has(o.machine_id) &&                          // skip known GPU-blind hosts (by machine)
+      !IP_DENYLIST.has(o.public_ipaddr ?? '') &&                      // skip known-bad hosts (by IP; survives re-registration)
       !!o.public_ipaddr,
     )
     if (usable.length === 0) return []
