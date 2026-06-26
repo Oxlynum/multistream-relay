@@ -22,6 +22,7 @@
 #include <QGraphicsOpacityEffect>
 #include <QPropertyAnimation>
 #include <QCursor>
+#include <QMouseEvent>
 #include <QUrl>
 #include <QTimer>
 #include <QMainWindow>
@@ -351,7 +352,9 @@ QWidget *RelayDock::buildStreamTab()
 
     m_goLiveBtn = new QPushButton("Go Live");
     m_goLiveBtn->setMinimumHeight(34);
-    ly->addWidget(m_goLiveBtn);
+    // Hidden: the native OBS Start Streaming button is the user-facing control.
+    // Kept as a non-layout object so render() can still track state internally.
+    m_goLiveBtn->setVisible(false);
     connect(m_goLiveBtn, &QPushButton::clicked, this, &RelayDock::onMainBtnClicked);
 
     // ── "Still streaming?" confirmation banner (hidden until the 12h window) ──
@@ -680,18 +683,44 @@ void RelayDock::onDeviceLinkFailed(QString message)
 
 // ── OBS stream lifecycle (the only GPU triggers) ───────────────────────────────
 
+void RelayDock::setObsStreamBtn(QPushButton *btn)
+{
+    m_obsStreamBtn = btn;
+    btn->installEventFilter(this);
+}
+
+bool RelayDock::eventFilter(QObject *obj, QEvent *event)
+{
+    if (obj == m_obsStreamBtn && event->type() == QEvent::MouseButtonPress) {
+        auto *me = static_cast<QMouseEvent *>(event);
+        if (me->button() == Qt::LeftButton && !obs_frontend_streaming_active()) {
+            // Intercept the click before OBS handles it.
+            // onMainBtnClicked() handles: idle → Go Live, provisioning → Cancel.
+            onMainBtnClicked();
+            return true;
+        }
+        // OBS is streaming → user clicked Stop Streaming → let it through.
+        // onObsStreamingStopped() → destroyGpu() handles teardown.
+    }
+    return QWidget::eventFilter(obj, event);
+}
+
 void RelayDock::onObsStreamingStarting()
 {
-    // Our Go Live flow calls obs_frontend_streaming_start() once the pod is ready
-    // — that fires this; just clear the guard and let it proceed. We deliberately
-    // do NOT touch OBS's own Start button, so it coexists with StreamElements and
-    // any other control-panel plugin. (Use the SlimCast Go Live button to stream.)
     if (m_resumingStream) {
+        // We triggered this via obs_frontend_streaming_start() — normal path.
         m_resumingStream = false;
-        // Start the platform-alive watchdog: if no output reaches "running"
-        // within 90s the RTMP path or stream key is wrong — stop cleanly.
         if (m_streamWatchdog) m_streamWatchdog->start();
+        return;
     }
+    // Safety net: event filter didn't intercept (button not found, or another
+    // plugin triggered streaming). Stop OBS immediately and route through our flow.
+    // Queued to avoid calling streaming_stop() re-entrantly inside STARTING.
+    QMetaObject::invokeMethod(this, [this]() {
+        obs_frontend_streaming_stop();
+        if (!m_autoLaunching && !m_shuttingDown)
+            onGoLiveClicked();
+    }, Qt::QueuedConnection);
 }
 
 void RelayDock::onObsStreamingStopped()
@@ -1123,7 +1152,7 @@ void RelayDock::applyObsStreamUrl(const QString &server, const QString &key)
 
 // Returns a warning if, while a pod is live, OBS's output drifted off the
 // SlimCast server/key (e.g. user changed it mid-stream). Idle → nothing to warn
-// (Go Live configures everything itself).
+// (Start Streaming configures everything itself).
 QString RelayDock::obsServiceIssue()
 {
     // SRT is the only ingest path: the expected output is the srt:// URL with an
@@ -1135,14 +1164,14 @@ QString RelayDock::obsServiceIssue()
     obs_service_t *svc = obs_frontend_get_streaming_service();  // borrowed
     const char *type = svc ? obs_service_get_type(svc) : nullptr;
     if (!type || strcmp(type, "rtmp_custom") != 0)
-        return "OBS's stream output isn't on SlimCast. Stop and press Go Live again.";
+        return "OBS's stream output isn't on SlimCast. Stop and click Start Streaming again.";
     obs_data_t *s = obs_service_get_settings(svc);
     const QString curServer = QString::fromUtf8(obs_data_get_string(s, "server"));
     const QString curKey = QString::fromUtf8(obs_data_get_string(s, "key"));
     obs_data_release(s);
     if (curKey != expectKey || curServer != expectServer)
-        return "OBS isn't pointed at your current SlimCast server. Stop and press "
-               "Go Live again.";
+        return "OBS isn't pointed at your current SlimCast server. Stop and click "
+               "Start Streaming again.";
     return "";
 }
 

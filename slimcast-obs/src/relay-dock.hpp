@@ -31,6 +31,7 @@ class RelayDock : public QWidget {
 
 public:
     explicit RelayDock(QWidget *parent = nullptr);
+    void setObsStreamBtn(QPushButton *btn);
 
 public slots:
     // Invoked via QMetaObject::invokeMethod from OBS frontend-event callback.
@@ -74,6 +75,8 @@ private:
     // Write SlimCast's recommended encoder settings into the active OBS profile.
     void applyRecommendedSettings(const QString &encId, int bframeFamily, int bitrate);
 
+    bool eventFilter(QObject *obj, QEvent *event) override;
+
     void render(const GpuInfo &info);
     void renderConfirm(const GpuInfo &info);
     void renderServiceBanner();
@@ -94,7 +97,8 @@ private:
     QLabel         *m_statusLabel  = nullptr;
     QLabel         *m_creditsLabel = nullptr;
     QLabel         *m_ingestLabel  = nullptr;
-    QPushButton    *m_goLiveBtn    = nullptr;   // dock-driven Go Live / Stop
+    QPushButton    *m_goLiveBtn    = nullptr;   // hidden; kept for render() state logic
+    QPushButton    *m_obsStreamBtn = nullptr;   // native OBS "Start Streaming" button
     QMap<QString, ChannelRow> m_channels;
     QCheckBox      *m_lockCheck    = nullptr;
     QSpinBox       *m_landscapeSpin   = nullptr;

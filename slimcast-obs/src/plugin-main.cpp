@@ -1,6 +1,7 @@
 #include <obs-module.h>
 #include <obs-frontend-api.h>
 #include <QMainWindow>
+#include <QPushButton>
 #include <QCoreApplication>
 #include <QDir>
 #include <dlfcn.h>
@@ -60,6 +61,13 @@ bool obs_module_load(void)
 
     auto *win = static_cast<QMainWindow *>(obs_frontend_get_main_window());
     s_dock = new RelayDock(win);
+
+    // Hook OBS's native "Start Streaming" button so clicking it triggers the
+    // SlimCast provisioning flow instead of connecting immediately.
+    // OBS names it "streamButton" in its controls .ui file (stable across versions).
+    // If not found, onObsStreamingStarting() acts as a safety net.
+    if (auto *streamBtn = win->findChild<QPushButton *>("streamButton"))
+        s_dock->setObsStreamBtn(streamBtn);
 
     obs_frontend_add_dock_by_id(
         "slimcast-dock",
