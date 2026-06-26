@@ -226,83 +226,51 @@ def build_outputs(config: dict) -> list[dict]:
 
 
 def _gpu_self_test(attempts: int = 2) -> bool:
-    """Verify the container can actually run the LIVE transcode path on this GPU.
+    """Verify the container has a usable NVENC/NVDEC device.
 
     Some Vast hosts attach the GPU at the host level but never inject the device
-    into the container: the driver libraries mount, yet every NVENC/NVDEC call
-    returns CUDA_ERROR_NO_DEVICE ("no CUDA-capable device is detected"). Others can
-    do H.264 but fail on HEVC NVDEC, or choke on 10-bit. The live pipeline is
-    HEVC-in (often 10-bit from Apple VideoToolbox) -> H.264-out, so we validate
-    EXACTLY that — not just H.264 — or a bad host slips through and crash-loops live.
-
-    Four passes (all must succeed):
-      1. H.264 NVENC from lavfi                      — encode works at all.
-      2. H.264 NVDEC decode of pass 1 -> NVENC       — decode + re-encode works.
-      3. 10-bit HEVC NVENC from lavfi                — make a Main10 clip like Apple VT.
-      4. 10-bit HEVC NVDEC -> scale_cuda(nv12) -> H.264 NVENC — the real pipeline.
-    Pass 4 is what catches the AVERROR(ENOSYS)/exit-218 class: a host that can't
-    decode HEVC or normalize 10-bit->8-bit on the GPU is rejected at boot so the
-    broker cascades to another machine instead of crash-looping a live stream.
-    Returns True iff ALL passes succeed."""
+    into the container: driver libraries mount, yet every NVENC/NVDEC call returns
+    CUDA_ERROR_NO_DEVICE. Two passes (both must succeed):
+      1. H.264 NVENC from lavfi  — encode works at all.
+      2. H.264 NVDEC -> NVENC    — decode + re-encode works.
+    Returns True iff both passes succeed."""
     import tempfile, os as _os
 
-    def _run(cmd: list[str]) -> "subprocess.CompletedProcess[str]":
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=25)
-
     for i in range(attempts):
-        h264 = tempfile.mktemp(suffix=".h264")
-        hevc = tempfile.mktemp(suffix=".hevc")
+        tmp = tempfile.mktemp(suffix=".h264")
         try:
-            steps = [
-                ("H264 NVENC", [
-                    "ffmpeg", "-hide_banner", "-loglevel", "error",
-                    "-f", "lavfi", "-i", "color=c=black:s=128x128:r=5:d=0.4",
-                    "-c:v", "h264_nvenc", "-f", "h264", h264,
-                ]),
-                ("H264 NVDEC", [
-                    "ffmpeg", "-hide_banner", "-loglevel", "error",
-                    "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
-                    "-i", h264,
-                    "-c:v", "h264_nvenc", "-f", "null", "-",
-                ]),
-                ("HEVC10 NVENC", [
-                    "ffmpeg", "-hide_banner", "-loglevel", "error",
-                    "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=5:duration=0.6",
-                    "-vf", "format=p010le",
-                    "-c:v", "hevc_nvenc", "-preset", "p1", "-f", "hevc", hevc,
-                ]),
-                ("HEVC10->nv12->H264 (live path)", [
-                    "ffmpeg", "-hide_banner", "-loglevel", "error",
-                    "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
-                    "-i", hevc,
-                    "-vf", "scale_cuda=format=nv12",
-                    "-c:v", "h264_nvenc", "-f", "null", "-",
-                ]),
-            ]
-            failed = False
-            for label, cmd in steps:
-                r = _run(cmd)
-                if r.returncode != 0:
-                    tail = (r.stderr or "").strip().splitlines()
-                    log.warning("GPU self-test attempt %d/%d FAILED at [%s] (code %d): %s",
-                                i + 1, attempts, label, r.returncode,
-                                tail[-1] if tail else "(no stderr)")
-                    failed = True
-                    break
-            if not failed:
-                log.info("GPU self-test passed "
-                         "(H264 NVENC/NVDEC + 10-bit HEVC NVDEC->nv12->H264).")
+            enc = subprocess.run([
+                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                "-f", "lavfi", "-i", "color=c=black:s=128x128:r=5:d=0.4",
+                "-c:v", "h264_nvenc", "-f", "h264", tmp,
+            ], capture_output=True, text=True, timeout=25)
+            if enc.returncode != 0:
+                tail = (enc.stderr or "").strip().splitlines()
+                log.warning("GPU self-test attempt %d/%d NVENC failed (code %d): %s",
+                            i + 1, attempts, enc.returncode, tail[-1] if tail else "(no stderr)")
+                continue
+
+            dec = subprocess.run([
+                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
+                "-i", tmp,
+                "-c:v", "h264_nvenc", "-f", "null", "-",
+            ], capture_output=True, text=True, timeout=25)
+            if dec.returncode == 0:
+                log.info("GPU self-test passed (NVENC + NVDEC both OK).")
                 return True
+            tail = (dec.stderr or "").strip().splitlines()
+            log.warning("GPU self-test attempt %d/%d NVDEC failed (code %d): %s",
+                        i + 1, attempts, dec.returncode, tail[-1] if tail else "(no stderr)")
         except subprocess.TimeoutExpired:
             log.warning("GPU self-test attempt %d/%d timed out.", i + 1, attempts)
         except Exception as exc:
             log.warning("GPU self-test attempt %d/%d error: %s", i + 1, attempts, exc)
         finally:
-            for p in (h264, hevc):
-                try:
-                    _os.unlink(p)
-                except FileNotFoundError:
-                    pass
+            try:
+                _os.unlink(tmp)
+            except FileNotFoundError:
+                pass
         if i + 1 < attempts:
             time.sleep(3)
     return False

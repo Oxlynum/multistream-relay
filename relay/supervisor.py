@@ -133,16 +133,6 @@ SOURCE_HEIGHT = int(os.environ.get("SOURCE_HEIGHT", "1080"))
 PORTRAIT_WIDTH = 1080
 PORTRAIT_HEIGHT = 1920
 
-# Force the decoded CUDA surface to 8-bit 4:2:0 (nv12) before it reaches
-# h264_nvenc, which is 8-bit ONLY. Apple VideoToolbox commonly emits 10-bit
-# (HEVC Main10); NVDEC decodes that to a p010le CUDA surface, and handing a
-# p010le/4:2:2 surface to h264_nvenc makes it abort with AVERROR(ENOSYS) — exit
-# code 218 — on a restart loop. scale_cuda does the convert entirely on the GPU
-# (zero host copy, near-free passthrough when the source is already nv12), so the
-# landscape path stays NVDEC -> scale_cuda -> NVENC with no PCIe roundtrip.
-GPU_NORMALIZE = "scale_cuda=format=nv12"
-
-
 def _even(n: int) -> int:
     """NVENC requires even dimensions."""
     n = int(n)
@@ -276,17 +266,8 @@ def build_group_cmd(
     """
     One decode -> one NVENC H.264 encode -> tee fan-out to every output in the group.
 
-    Both orientations normalize the decoded surface to 8-bit nv12 first (GPU_NORMALIZE)
-    so a 10-bit Apple-VT HEVC source can never reach the 8-bit-only h264_nvenc
-    unconverted (which would abort with AVERROR(ENOSYS) / exit 218).
-
-    Landscape: stays entirely on the GPU — NVDEC -> scale_cuda(nv12) -> NVENC.
-    Portrait : NVDEC -> scale_cuda(nv12) -> hwdownload -> crop (user framing) ->
-               scale 1080×1920 -> NVENC. The GPU normalize before hwdownload makes
-               the download deterministic regardless of source bit depth (you can't
-               hwdownload a p010le surface as nv12). Crop/scale stay on the CPU
-               (scale_cuda can't crop); it's a single low-cost pass and the portrait
-               group is the lower-bitrate one.
+    Landscape: NVDEC -> NVENC entirely on GPU, no filter.
+    Portrait : NVDEC -> hwdownload -> crop (user framing) -> scale 1080x1920 -> NVENC.
     """
     bv = _group_bitrate(outputs)
     fps = _group_fps(outputs)
@@ -302,19 +283,12 @@ def build_group_cmd(
 
     if orientation == "portrait":
         cw, ch, cx, cy = portrait_crop_rect(crop)
-        # Normalize to nv12 on the GPU FIRST so the hwdownload is deterministic
-        # regardless of source bit depth, then crop+scale on the CPU.
         vf = (
-            f"{GPU_NORMALIZE},"
             f"hwdownload,format=nv12,"
             f"crop={cw}:{ch}:{cx}:{cy},"
             f"scale={PORTRAIT_WIDTH}:{PORTRAIT_HEIGHT}"
         )
         cmd += ["-vf", vf]
-    else:
-        # Landscape stays entirely on the GPU: NVDEC -> scale_cuda(nv12) -> NVENC.
-        # This normalize is the load-bearing fix for the exit-218 crash loop.
-        cmd += ["-vf", GPU_NORMALIZE]
 
     cmd += _encode_flags(bv, fps)
     cmd += ["-f", "tee", _tee_targets(outputs)]
