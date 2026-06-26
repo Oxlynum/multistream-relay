@@ -33,7 +33,15 @@ app = FastAPI(title="Multistream Relay Control")
 # auto_error=False so a missing Authorization header doesn't 401 before we
 # get a chance to check the ?token= query param used by the OBS dock.
 security = HTTPBasic(auto_error=False)
-supervisor = sup_mod.Supervisor()
+
+# Fallback used only when app.py is run standalone (not via agent.py).
+# When agent.py runs uvicorn in-process it calls sup_mod.set_active() first,
+# so get_active() returns the live pipeline supervisor and _fallback is unused.
+_fallback_supervisor = sup_mod.Supervisor()
+
+
+def _sup() -> sup_mod.Supervisor:
+    return sup_mod.get_active() or _fallback_supervisor
 
 
 # ---- auth ----------------------------------------------------------------
@@ -98,14 +106,14 @@ def _startup() -> None:
         return
     try:
         cfg = sup_mod.load_config()
-        supervisor.apply(cfg)
+        _sup().apply(cfg)
     except FileNotFoundError:
         pass  # no config yet; user will create one via the UI
 
 
 @app.on_event("shutdown")
 def _shutdown() -> None:
-    supervisor.stop_all()
+    _sup().stop_all()
 
 
 # ---- routes --------------------------------------------------------------
@@ -126,7 +134,7 @@ def get_config(_: str = Depends(require_auth)):
 def set_config(cfg: Config, _: str = Depends(require_auth)):
     data = cfg.model_dump()
     sup_mod.save_config(data)
-    supervisor.apply(data)
+    _sup().apply(data)
     return {"ok": True}
 
 
@@ -135,21 +143,21 @@ def control(req: ControlAction, _: str = Depends(require_auth)):
     if req.action == "stop":
         if req.grace:
             # OBS dropped: defer the stop so a quick reconnect cancels it.
-            supervisor.schedule_stop()
+            _sup().schedule_stop()
         else:
-            supervisor.cancel_pending_stop()
-            supervisor.stop_all()
+            _sup().cancel_pending_stop()
+            _sup().stop_all()
     elif req.action in ("start", "restart"):
         # OBS (re)connected: cancel any pending grace-period stop first.
-        supervisor.cancel_pending_stop()
+        _sup().cancel_pending_stop()
         try:
             cfg = sup_mod.load_config()
         except FileNotFoundError:
             raise HTTPException(400, "No config saved yet")
         if req.action == "restart":
-            supervisor.restart_all(cfg)
+            _sup().restart_all(cfg)
         else:
-            supervisor.apply(cfg)
+            _sup().apply(cfg)
     else:
         raise HTTPException(400, f"Unknown action: {req.action}")
     return {"ok": True}
@@ -157,9 +165,9 @@ def control(req: ControlAction, _: str = Depends(require_auth)):
 
 @app.get("/api/status")
 def get_status(_: str = Depends(require_auth)):
-    return {"outputs": supervisor.status()}
+    return {"outputs": _sup().status()}
 
 
 @app.get("/api/logs/{name}")
 def get_logs(name: str, _: str = Depends(require_auth)):
-    return JSONResponse({"name": name, "lines": supervisor.logs(name)})
+    return JSONResponse({"name": name, "lines": _sup().logs(name)})

@@ -507,6 +507,23 @@ class Supervisor:
             return r.logs() if r else []
 
 
+# ── Active-supervisor singleton ───────────────────────────────────────────────
+# agent.py calls set_active() after creating its Supervisor so that app.py
+# (running in the same process via an in-process uvicorn thread) can call
+# get_active() and serve the *live* pipeline's logs and status — not a
+# separate, empty Supervisor instance (the old dual-supervisor gap).
+_active: "Supervisor | None" = None
+
+
+def set_active(s: "Supervisor") -> None:
+    global _active
+    _active = s
+
+
+def get_active() -> "Supervisor | None":
+    return _active
+
+
 # Convenience for ad-hoc CLI use: `python supervisor.py` runs from config.json.
 if __name__ == "__main__":
     sup = Supervisor()

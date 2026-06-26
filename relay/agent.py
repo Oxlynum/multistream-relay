@@ -126,13 +126,31 @@ def start_mediamtx() -> subprocess.Popen:
     return proc
 
 
-def start_uvicorn() -> subprocess.Popen:
-    log.info("Starting uvicorn control panel on :8080…")
-    return subprocess.Popen([
-        "uvicorn", "app:app",
-        "--host", "0.0.0.0",
-        "--port", "8080",
-    ])
+def start_uvicorn(sup: "Supervisor") -> None:
+    """Run the debug panel in-process so it shares the live supervisor instance.
+
+    Previously launched as a subprocess, which meant app.py created its own
+    empty Supervisor and /api/logs/* always returned nothing mid-stream (the
+    dual-supervisor gap). Running in a daemon thread lets app.py call
+    sup_mod.get_active() and reach the real pipeline's ring buffers.
+    """
+    import supervisor as sup_mod
+    import uvicorn
+    import app as _app_mod  # noqa: F401 — imported to register routes
+
+    sup_mod.set_active(sup)
+
+    config = uvicorn.Config(
+        "app:app",
+        host="0.0.0.0",
+        port=8080,
+        log_level="warning",
+        access_log=False,
+    )
+    server = uvicorn.Server(config)
+    t = threading.Thread(target=server.run, daemon=True, name="uvicorn-panel")
+    t.start()
+    log.info("Control panel starting on :8080 (in-process)")
 
 
 # Outbound-reachability state for the broker's host probe. None = still testing.
@@ -290,9 +308,8 @@ def main() -> None:
         sys.exit(1)
 
     mediamtx_proc = start_mediamtx()
-    uvicorn_proc = start_uvicorn()
-
     sup = Supervisor()
+    start_uvicorn(sup)  # in-process daemon thread; shares sup with app.py
 
     # Write PID so hook.sh can wake us immediately via SIGUSR1 instead of
     # waiting up to POLL_INTERVAL seconds before the loop checks the flag.
@@ -349,7 +366,7 @@ def main() -> None:
         log.info("Received signal %d — shutting down…", sig)
         sup.stop_all()
         mediamtx_proc.terminate()
-        uvicorn_proc.terminate()
+        # uvicorn panel is a daemon thread — it exits when the process does
         try:
             os.unlink(PID_FILE)
         except FileNotFoundError:
