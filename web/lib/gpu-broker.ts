@@ -168,7 +168,14 @@ async function rankedCandidates(lat: number, lon: number, needsProfessionalGpu: 
   return lists
     .flat()
     .map(c => ({ c, distKm: haversineKm(lat, lon, c.lat, c.lon) }))
-    .sort((a, b) => a.distKm - b.distKm || a.c.pricePerHr - b.c.pricePerHr)
+    // Preference tier first (a provider demotes hosts it distrusts — e.g. Vast's
+    // NVENC-in-container driver regression — without excluding them), THEN distance,
+    // THEN price. So good-driver hosts win when available, but a demoted host is
+    // still tried as a fallback (the pod self-test is the hard gate either way).
+    .sort((a, b) =>
+      (a.c.preferenceTier ?? 0) - (b.c.preferenceTier ?? 0) ||
+      a.distKm - b.distKm ||
+      a.c.pricePerHr - b.c.pricePerHr)
 }
 
 /**
@@ -201,7 +208,8 @@ export async function provisionGpu(args: {
   }
   const providerByName = new Map(ACTIVE_PROVIDERS.map(p => [p.name, p]))
   const nearest = candidates[0]
-  console.log(`[broker] ${candidates.length} candidates across ${ACTIVE_PROVIDERS.length} provider(s); nearest: ${nearest.c.label} (${nearest.distKm.toFixed(0)}km, ${nearest.c.gpuKey} $${nearest.c.pricePerHr})`)
+  const preferred = candidates.filter(x => (x.c.preferenceTier ?? 0) === 0).length
+  console.log(`[broker] ${candidates.length} candidates across ${ACTIVE_PROVIDERS.length} provider(s) (${preferred} good-driver, ${candidates.length - preferred} demoted); nearest: ${nearest.c.label} (${nearest.distKm.toFixed(0)}km, ${nearest.c.gpuKey} $${nearest.c.pricePerHr}, tier${nearest.c.preferenceTier ?? 0})`)
 
   let attempts = 0
   let bootAttempts = 0

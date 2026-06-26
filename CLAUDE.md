@@ -50,18 +50,39 @@ billed in seconds; +0.2 token/hr per extra transcoded platform. No subscription.
   SRT uplink. `lib/runpod.ts` + `lib/providers/runpod.ts` were deleted; the provider
   registry now lives in `lib/providers/index.ts`. **Vultr is the planned next
   provider** (UDP-capable; bigger geographic coverage) — see Arch #8.
-- **GPU denylist: machine 8914** is hard-blocked in `lib/providers/vast.ts`
-  (`MACHINE_DENYLIST` only — the IP denylist was removed 2026-06-26 since IPs
-  change on re-registration and the denylist has no removal mechanism).
-  Machine 8914 passes the boot NVENC self-test but fails real NVDEC decode.
-  The **GPU self-test** in `relay/agent.py` is a two-pass round-trip:
-  encode a tiny H.264 clip via h264_nvenc → decode it with `-hwaccel cuda` +
-  h264_nvenc → null. NOTE: the self-test only validates H.264 NVDEC; it does NOT
-  test HEVC NVDEC, which is what the live pipeline actually uses (OBS sends HEVC).
-  Machines that pass the self-test but fail on real HEVC streams slip through.
-  **Open investigation (2026-06-26):** the landscape FFmpeg group exits code 255
-  after ~6s on every pod tested so far (see relay/app.py debug panel for FFmpeg
-  stderr now that the dual-supervisor gap is fixed).
+- **ROOT-CAUSE FOUND (2026-06-26) — NVENC-in-container driver regression.** The
+  "pod boots but never goes live / FFmpeg exits ~6s" failures were NOT a dead GPU,
+  not 10-bit, not our ffmpeg version, and not the SRT change. On a **multi-GPU host
+  running driver branch 570.x/580.x+**, NVENC `OpenEncodeSessionEx` fails inside the
+  container with **`unsupported device`** for any GPU that isn't the last-enumerated
+  one (the container's CUDA "index 0" GPU has a real `/dev/nvidiaN` minor ≠ 0). This
+  is NVIDIA's own bug: `nvidia-container-toolkit#1249` / `k8s-device-plugin#1282`.
+  **Verified by renting hosts across driver generations:** identical Ada silicon
+  encodes on driver **565** and fails on **610**; Turing/Ampere and any GPU on driver
+  ≤565 are fine. **No fix is possible in our image** — our jellyfin 7.1.4-3, jellyfin
+  8.1.1-4, AND bleeding-edge FFmpeg master all fail identically (NVENC guarantees API
+  backward-compat), and every container-side workaround (`-gpu N`,
+  `CUDA_VISIBLE_DEVICES`, remapping/stripping `/dev/nvidia*` nodes) was tested and
+  fails. The only cure is an older host driver, which we don't control on Vast.
+  (RunPod's 4090s worked because RunPod runs older curated datacenter drivers.)
+- **FIX = verify-and-prefer (NOT a denylist).** The broker now **soft-demotes** the
+  affected combo — `compute_cap ≥ 890` (Ada/Blackwell) on driver major `≥ 570` — to
+  `preferenceTier:1` so good-driver hosts win, but it stays eligible as a fallback
+  (`lib/providers/vast.ts` `nvencPreferenceTier`, sorted in `lib/gpu-broker.ts`
+  before distance/price). The **pod boot self-test** in `relay/agent.py` remains the
+  hard gate: a host that can't open NVENC self-terminates → broker cascades. The
+  self-test now logs the REAL reason (`OpenEncodeSessionEx: unsupported device` +
+  driver version + the #1249 reference) instead of the old misleading
+  `CUDA_ERROR_NO_DEVICE`, which is what derailed earlier debugging.
+- **`MACHINE_DENYLIST`** (`lib/providers/vast.ts`) still exists for genuinely-bad
+  machines but is NOT the mechanism for the driver regression above (that's the
+  tier+self-test). The self-test is a two-pass round-trip: encode a tiny H.264 clip
+  via h264_nvenc → decode with `-hwaccel cuda` → null.
+- **PLANNED BACKUP (raises availability past the good-driver pool): SRT→RTMP split.**
+  A cheap Vast **CPU** instance terminates the SRT uplink (MediaMTX) and forwards
+  RTMP to a separate GPU pod (a good-driver Vast GPU, or RunPod — which is TCP-only
+  so fine for RTMP). Decouples the UDP-capable ingress from the GPU, reopening
+  RunPod/any-provider GPUs at low cost. See `docs/srt-rtmp-split-plan.md`.
 - **Relay Docker image slimmed 1.6GB → 0.23GB** (cuda `-runtime` → `-base`; the
   CUDA toolkit was unused dead weight — see Arch #4/#14). Faster cold starts.
 - Web app (Next.js 16) in `web/` — Supabase + Stripe wired, deploys to Vercel.
@@ -223,9 +244,14 @@ They just aren't the brand. The brand is "stream everywhere, no setup."
    artifacts. Keep SRT. Do not switch to RTSP. (The `read:` loopback is battle-
    tested; OBS publishing `publish:<key>` SRT is the newer leg — see Current status.)
 
-3. **FFmpeg pinned to jellyfin-ffmpeg 7.1.4-3.** Generic BtbN "latest" needs
-   NVIDIA driver 610+. Cloud GPU hosts typically run driver ~550.x (NVENC API 12.2).
-   This version is verified. Do not swap for a bleeding-edge build.
+3. **FFmpeg pinned to jellyfin-ffmpeg 7.1.4-3.** This version is verified on the
+   good-driver host pool. **Do NOT change it to chase the NVENC `unsupported device`
+   failures on driver-570/580+ hosts — it will not help.** That failure is a driver
+   regression, not a build problem: jellyfin 7.1.4-3, jellyfin 8.1.1-4, and FFmpeg
+   master ALL fail identically on those hosts (NVENC guarantees API backward-compat),
+   and they ALL succeed on good-driver hosts. The host-selection fix (Arch #8
+   `preferenceTier` + the boot self-test) handles it, not the ffmpeg version. See the
+   Current-status "NVENC-in-container driver regression" entry.
 
 4. **Hardware codecs only.** NVDEC decode + NVENC H.264 encode. No software
    encode paths. CPU is used only for the portrait crop+scale (low-bitrate,
@@ -251,10 +277,13 @@ They just aren't the brand. The brand is "stream everywhere, no setup."
 8. **GPU is chosen by the availability broker, never by hand.** `lib/gpu-broker.ts`.
    Model: each provider yields **location-stamped candidates** via
    `listCandidates()` (a GPU at a place, with lat/lon + a `placement` payload). The
-   broker merges every provider's candidates into one list, ranks by **distance to
-   the user** (Vercel geo headers, `haversine`) then price, and `create()`s them
-   **nearest-first until one boots**. "Closest server wins" spans providers for
-   free. Hard $1/hr all-in ceiling (candidate filter + runtime cost guard), readiness
+   broker merges every provider's candidates into one list, ranks by
+   **`preferenceTier` (soft) → distance to the user** (Vercel geo headers,
+   `haversine`) → price, and `create()`s them **best-first until one boots**.
+   `preferenceTier` lets a provider DEMOTE (never exclude) hosts it distrusts:
+   Vast tags the NVENC-in-container driver regression combo (Ada/Blackwell on driver
+   ≥570) tier 1 so good-driver hosts win, but it's still a fallback. Within a tier,
+   "closest server wins" spans providers for free. Hard $1/hr all-in ceiling (candidate filter + runtime cost guard), readiness
    gate (abandon pods that never get an IP + mapped SRT/UDP ports), then the
    **RTMP-handshake beacon probe** (TCP — proves MediaMTX is serving; a serverless
    prober can't verify the UDP path) and the SRT/UDP-port + advisory outbound checks.

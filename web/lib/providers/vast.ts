@@ -62,6 +62,36 @@ interface VastOffer {
   direct_port_count: number
   public_ipaddr: string | null
   geolocation: string | null
+  driver_version: string | null
+}
+
+// NVENC-in-container driver regression (verified 2026-06-26 against the live fleet
+// + NVIDIA's own trackers, nvidia-container-toolkit#1249 / k8s-device-plugin#1282):
+// on a MULTI-GPU host running driver branch 570.x/580.x+, NVENC's
+// OpenEncodeSessionEx fails inside the container with "unsupported device" for any
+// GPU that isn't the last-enumerated one — the container's CUDA "index 0" GPU has a
+// real /dev/nvidia minor ≠ 0, and the new driver's encode-device enumeration can't
+// reconcile it. The GPU is fine; NO ffmpeg version fixes it (our 7.1.4-3, jellyfin
+// 8.1.1-4, and FFmpeg master all fail identically — NVENC guarantees API backward
+// compat), and NO container-side workaround works (-gpu N, CUDA_VISIBLE_DEVICES,
+// remapping/stripping /dev/nvidia nodes — all proven to fail). The only real cure is
+// an older host driver, which we don't control. So we DEMOTE the affected combo in
+// ranking (not a denylist — the GPU stays eligible; good-driver hosts just win), and
+// the pod boot self-test remains the hard gate that cascades past any that slip by.
+// Empirically the failure population is exactly: Ada/Blackwell (compute_cap ≥ 890)
+// on driver major ≥ 570. Turing/Ampere and any GPU on driver ≤ ~565 encode fine
+// (incl. an Ada L40S on 565). RunPod's 4090s worked because RunPod runs older,
+// curated datacenter drivers — same silicon, good driver branch.
+const REGRESSED_DRIVER_MAJOR = 570
+const REGRESSION_MIN_COMPUTE_CAP = 890
+function driverMajor(v: string | null): number {
+  const m = (v ?? '').match(/^(\d+)/)
+  return m ? parseInt(m[1], 10) : 0
+}
+// Soft tier: 1 = likely-broken NVENC-in-container (sorted last), 0 = preferred.
+function nvencPreferenceTier(o: VastOffer): number {
+  const major = driverMajor(o.driver_version)
+  return o.compute_cap >= REGRESSION_MIN_COMPUTE_CAP && major >= REGRESSED_DRIVER_MAJOR ? 1 : 0
 }
 
 // Some Vast hosts attach the GPU at the host level (it shows in Vast's own
@@ -202,7 +232,9 @@ export const vastProvider: GpuProvider = {
         pricePerHr: allInPricePerHr(o),   // GPU + bandwidth, so it ranks on true cost
         lat: loc.lat,
         lon: loc.lon,
-        label: `vast:${o.id} m${o.machine_id} ${o.gpu_name} ${o.geolocation ?? ''}`.trim(),
+        label: `vast:${o.id} m${o.machine_id} ${o.gpu_name} drv${o.driver_version ?? '?'} ${o.geolocation ?? ''}`.trim(),
+        preferenceTier: nvencPreferenceTier(o),   // demote the NVENC-regression combo, don't exclude it
+        driverVersion: o.driver_version ?? undefined,
         placement: { offerId: o.id, machineId: o.machine_id },
       })
     })

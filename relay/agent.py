@@ -225,16 +225,48 @@ def build_outputs(config: dict) -> list[dict]:
     return config.get("outputs", [])
 
 
-def _gpu_self_test(attempts: int = 2) -> bool:
-    """Verify the container has a usable NVENC/NVDEC device.
+def _driver_version() -> str:
+    """Host GPU driver version (for accurate self-test failure reporting)."""
+    try:
+        r = subprocess.run(["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+                            capture_output=True, text=True, timeout=10)
+        return (r.stdout or "").strip().splitlines()[0].strip() or "?"
+    except Exception:
+        return "?"
 
-    Some Vast hosts attach the GPU at the host level but never inject the device
-    into the container: driver libraries mount, yet every NVENC/NVDEC call returns
-    CUDA_ERROR_NO_DEVICE. Two passes (both must succeed):
-      1. H.264 NVENC from lavfi  — encode works at all.
+
+def _nvenc_fail_reason(stderr: str) -> str:
+    """Pull the meaningful NVENC error out of ffmpeg stderr.
+
+    Prefer the encoder's own diagnosis (e.g. 'OpenEncodeSessionEx failed:
+    unsupported device', 'No capable devices found', 'Cannot load
+    libnvidia-encode', 'minimum required Nvidia driver') over ffmpeg's generic
+    trailer ('Nothing was written...'), so the boot log states the TRUE cause."""
+    lines = [l.strip() for l in (stderr or "").splitlines() if l.strip()]
+    keys = ("openencodesession", "unsupported device", "no capable devices",
+            "cannot load", "minimum required", "nvenc", "cuda")
+    for l in lines:
+        low = l.lower()
+        if any(k in low for k in keys) and "nothing was written" not in low:
+            return l
+    return lines[-1] if lines else "(no stderr)"
+
+
+def _gpu_self_test(attempts: int = 2) -> tuple[bool, str]:
+    """Verify the container can actually open an NVENC session AND decode (NVDEC).
+
+    This is GPU-only, so a host that can't do it would crash-loop the live
+    transcode — we fail fast at boot instead. Two passes (both must succeed):
+      1. H.264 NVENC from lavfi  — encode/session opens at all.
       2. H.264 NVDEC -> NVENC    — decode + re-encode works.
-    Returns True iff both passes succeed."""
+    Returns (ok, reason). On failure, `reason` is the real NVENC error — most
+    commonly 'OpenEncodeSessionEx failed: unsupported device', the NVIDIA driver
+    570/580+ NVENC-in-container regression (nvidia-container-toolkit#1249): the GPU
+    is fine but this driver branch can't hand NVENC to the container. No ffmpeg
+    version or in-container tweak fixes it; the cure is a good-driver host, so the
+    broker should cascade. (Historically this was mislabeled CUDA_ERROR_NO_DEVICE.)"""
     import tempfile, os as _os
+    reason = "(no stderr)"
 
     for i in range(attempts):
         tmp = tempfile.mktemp(suffix=".h264")
@@ -245,9 +277,9 @@ def _gpu_self_test(attempts: int = 2) -> bool:
                 "-c:v", "h264_nvenc", "-f", "h264", tmp,
             ], capture_output=True, text=True, timeout=25)
             if enc.returncode != 0:
-                tail = (enc.stderr or "").strip().splitlines()
-                log.warning("GPU self-test attempt %d/%d NVENC failed (code %d): %s",
-                            i + 1, attempts, enc.returncode, tail[-1] if tail else "(no stderr)")
+                reason = _nvenc_fail_reason(enc.stderr)
+                log.warning("GPU self-test attempt %d/%d NVENC encode failed (code %d): %s",
+                            i + 1, attempts, enc.returncode, reason)
                 continue
 
             dec = subprocess.run([
@@ -258,14 +290,16 @@ def _gpu_self_test(attempts: int = 2) -> bool:
             ], capture_output=True, text=True, timeout=25)
             if dec.returncode == 0:
                 log.info("GPU self-test passed (NVENC + NVDEC both OK).")
-                return True
-            tail = (dec.stderr or "").strip().splitlines()
+                return True, ""
+            reason = _nvenc_fail_reason(dec.stderr)
             log.warning("GPU self-test attempt %d/%d NVDEC failed (code %d): %s",
-                        i + 1, attempts, dec.returncode, tail[-1] if tail else "(no stderr)")
+                        i + 1, attempts, dec.returncode, reason)
         except subprocess.TimeoutExpired:
             log.warning("GPU self-test attempt %d/%d timed out.", i + 1, attempts)
+            reason = "ffmpeg timed out"
         except Exception as exc:
             log.warning("GPU self-test attempt %d/%d error: %s", i + 1, attempts, exc)
+            reason = str(exc)
         finally:
             try:
                 _os.unlink(tmp)
@@ -273,7 +307,7 @@ def _gpu_self_test(attempts: int = 2) -> bool:
                 pass
         if i + 1 < attempts:
             time.sleep(3)
-    return False
+    return False, reason
 
 
 def main() -> None:
@@ -313,10 +347,20 @@ def main() -> None:
     # it would orphan the next pod (it bills until the daily reaper). The broker's
     # own provider.destroy() on probe failure tears this pod down and leaves the row
     # intact, so a plain exit is both sufficient and safe.
-    if not _gpu_self_test():
-        log.error("GPU UNAVAILABLE — host did not expose a usable NVENC device to the "
-                  "container (CUDA_ERROR_NO_DEVICE). Halting boot so the broker cascades "
-                  "to another machine; not starting MediaMTX.")
+    ok, reason = _gpu_self_test()
+    if not ok:
+        drv = _driver_version()
+        low = reason.lower()
+        if "unsupported device" in low or "no capable devices" in low:
+            log.error("NVENC UNUSABLE on this host (driver %s): %s. This is the NVIDIA "
+                      "driver 570/580+ NVENC-in-container regression "
+                      "(nvidia-container-toolkit#1249) — the GPU is fine, but this driver "
+                      "branch can't hand NVENC to the container, and no ffmpeg version or "
+                      "in-container fix resolves it. Halting boot so the broker cascades to "
+                      "a good-driver host; not starting MediaMTX.", drv, reason)
+        else:
+            log.error("GPU self-test FAILED (driver %s): %s. Halting boot so the broker "
+                      "cascades to another machine; not starting MediaMTX.", drv, reason)
         sys.exit(1)
 
     mediamtx_proc = start_mediamtx()

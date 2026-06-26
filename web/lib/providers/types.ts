@@ -17,6 +17,15 @@ export interface GpuCandidate {
   lat: number             // where this option physically is — for nearest-first ranking
   lon: number
   label: string           // human-readable, e.g. 'vast:12345 Frankfurt'
+  // Soft preference tier — LOWER is tried first, ahead of distance/price. Lets a
+  // provider demote (NOT exclude) hosts it has reason to distrust, while the pod's
+  // own boot self-test stays the hard gate. Default 0 (no preference). Vast uses
+  // tier 1 for GPUs that hit the NVENC-in-container driver regression
+  // (Ada/Blackwell on driver ≥570, nvidia-container-toolkit#1249): still eligible,
+  // just sorted last so good-driver hosts win when available. Extensible to other
+  // backup paths (e.g. an SRT→RTMP-split CPU relay fronting a non-UDP GPU).
+  preferenceTier?: number
+  driverVersion?: string  // host GPU driver, when known — for ranking + broker logs
   // Opaque provider-specific payload handed back to create() to place the pod.
   // Vast: { offerId, machineId }. The broker never inspects it.
   placement: Record<string, unknown>
