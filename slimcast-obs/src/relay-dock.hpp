@@ -74,6 +74,10 @@ private:
     void setSlimcastService(const QString &server, const QString &key);
     // Write SlimCast's recommended encoder settings into the active OBS profile.
     void applyRecommendedSettings(const QString &encId, int bframeFamily, int bitrate);
+    // Budget throttle: lower the LIVE stream encoder's bitrate mid-stream when the
+    // pod signals it's approaching the cost ceiling. Distinct from
+    // applyRecommendedSettings (which writes a JSON profile for pre-stream setup).
+    void applyIngestThrottle(int kbps);
 
     bool eventFilter(QObject *obj, QEvent *event) override;
     void restoreObsStreamBtn();   // snap back to OBS's saved style/text immediately
@@ -130,6 +134,8 @@ private:
     bool m_wasStreaming   = false;  // to auto-engage the channel lock on stream start
     bool m_haveEncode     = false;
     int  m_orphanTicks    = 0;      // consecutive polls of "pod up, OBS not streaming"
+    int  m_appliedThrottleKbps = 0; // last throttle bitrate we pushed (0 = none/unthrottled)
+    int  m_originalBitrateKbps = 0; // user's configured bitrate, captured before first throttle
 
     GpuInfo                   m_lastGpuInfo;
     QMap<QString, PlatformConfig> m_platforms;  // platform -> current config

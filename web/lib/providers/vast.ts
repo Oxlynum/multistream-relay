@@ -241,7 +241,16 @@ export const vastProvider: GpuProvider = {
         label: `vast:${o.id} m${o.machine_id} ${o.gpu_name} drv${o.driver_version ?? '?'} ${o.geolocation ?? ''}`.trim(),
         preferenceTier: nvencPreferenceTier(o),   // demote the NVENC-regression combo, don't exclude it
         driverVersion: o.driver_version ?? undefined,
-        placement: { offerId: o.id, machineId: o.machine_id },
+        // Carry the raw cost components so create() can hand them to the pod as
+        // env vars — the pod's budget-throttle controller needs the actual GPU rate
+        // and per-TB bandwidth prices to compute its live $/hr from /proc/net/dev.
+        placement: {
+          offerId: o.id,
+          machineId: o.machine_id,
+          gpuRateUsd: o.dph_total,
+          egressUsdPerTb: o.internet_up_cost_per_tb ?? 0,
+          ingressUsdPerTb: o.internet_down_cost_per_tb ?? 0,
+        },
       })
     })
     return candidates
@@ -257,8 +266,19 @@ export const vastProvider: GpuProvider = {
     // nginx:alpine + {"-p 8890:8890/udp":"1","-p 8889:8889/udp":"1"} → both UDP
     // ports appeared in the instance ports dict within ~15s.
     // TCP ports (1935, 8080) come free from EXPOSE; no -p flags needed for them.
+    // Cost inputs for the pod's budget-throttle controller. Only known here (the
+    // offer's live prices), so we inject them at create rather than from a static
+    // env. The pod combines these with measured /proc/net/dev bytes to compute its
+    // real $/hr and throttle quality before crossing SLIMCAST_COST_CEILING_USD
+    // (passed through the `env` array from the provision route).
+    const gpuRateUsd = Number(candidate.placement.gpuRateUsd ?? 0)
+    const egressUsdPerTb = Number(candidate.placement.egressUsdPerTb ?? 0)
+    const ingressUsdPerTb = Number(candidate.placement.ingressUsdPerTb ?? 0)
     const envDict: Record<string, string> = {
       ...Object.fromEntries(env.map(e => [e.key, e.value])),
+      SLIMCAST_GPU_RATE_USD: String(gpuRateUsd),
+      SLIMCAST_EGRESS_USD_PER_TB: String(egressUsdPerTb),
+      SLIMCAST_INGRESS_USD_PER_TB: String(ingressUsdPerTb),
       '-p 8890:8890/udp': '1',   // SRT ingest — OBS → pod
       '-p 8889:8889/udp': '1',   // UDP echo probe — broker readiness gate
       // NOTE: the relay Dockerfile already bakes NVIDIA_VISIBLE_DEVICES=all +

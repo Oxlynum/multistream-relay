@@ -125,7 +125,9 @@ Still confirm before destructive/irreversible actions (deleting data, force-push
    - Vultr planned next. **RunPod cannot be re-added** (TCP-only, SRT ingest is mandatory).
    - Broker knobs: `lib/datacenters.ts` (`PRICE_CEILING`, readiness timeouts, `FALLBACK_LAT/LON`).
 
-9. **Billing on heartbeat.** Base 1 token/hr. Adders: +0.2/extra landscape platform; +0.2/portrait on different orientation; +0.1/portrait dual-format; +0.5 for 1440p (`has_2k_addon`); +0.5 if >3 NVENC sessions (consumer GPUs cap at 3 — broker skips them). Only `label='pod'` heartbeat deducts; dashboard/dock never do. See `lib/billing.ts`, `lib/nvenc-utils.ts`.
+9. **Billing on heartbeat.** Base 1 token/hr. Adders: +0.2/extra landscape platform; +0.2/portrait on different orientation; +0.1/portrait dual-format; +0.5 for 1440p (`has_2k_addon`); +0.5 if >3 NVENC sessions (consumer GPUs cap at 3 — broker skips them). Only `label='pod'` heartbeat deducts; dashboard/dock never do. See `lib/billing.ts`, `lib/nvenc-utils.ts`. The 1440p adder is suppressed for any interval the pod has throttled below 1440p (`buildBillingContext(..., resolutionThrottledBelow1440)`) — don't bill 2K the user isn't getting.
+
+9a. **Budget throttle: degrade, don't kill.** The flat user price hides a variable Vast bill (GPU + egress + ingress $/TB). The $1/hr broker ceiling is a provision-time *estimate*; live spend is uncapped (OBS source bitrate and YouTube HEVC passthrough follow whatever OBS sends). The pod closes that loop: `relay/budget.py` `CostMeter` reads `/proc/net/dev` each heartbeat (excludes `lo` — the SRT loopback isn't billed) and computes real $/hr from cost rates injected at provision (`SLIMCAST_GPU_RATE_USD`, `SLIMCAST_EGRESS_USD_PER_TB`, `SLIMCAST_INGRESS_USD_PER_TB`, `SLIMCAST_COST_CEILING_USD`). `BudgetController` maps cost → a quality tier (discrete ladder in `TIERS`) with **down-fast/up-slow hysteresis** (>ceiling → throttle a step; <85% for 3 beats → recover; 85–100% dead-band — prevents FFmpeg-restart flapping). Three levers, applied together per tier: (a) transcode bitrate caps + (b) resolution downscale (`scale_cuda` landscape / portrait scale) via `throttle_config` → `sup.apply()` (pod-local, ~0s); (c) **OBS source bitrate** — the only lever touching ingress + YouTube passthrough — reported as `suggested_ingest_kbps` in the heartbeat → surfaced in `/api/gpu/status` → plugin calls `obs_encoder_update()` on the live encoder (~15s end-to-end). Ceiling is **$1.50/hr for `has_2k_addon`, else $1.00**. Floor tier = the user's entitled resolution (controller never recovers above it). `SOURCE_WIDTH/HEIGHT` are set at provision from the user's max output resolution so the downscale guard knows the true source. This protects SlimCast's **margin**, not the user's bill — the user pays burn_rate regardless. **YouTube stays HEVC passthrough** (best quality/bit); never transcode it to "save" egress — the OBS source lever already caps it. Dock shows a calm "Live · quality auto-adjusted" when throttled.
 
 10. **Pod safety: defense-in-depth.** A rogue pod is the #1 financial risk.
     - Atomic provision claim: row reserved before pod created → 409 on race. Requires saved card + credits.
@@ -149,8 +151,9 @@ Still confirm before destructive/irreversible actions (deleting data, force-push
 ## Key files
 
 ### relay/
-- `supervisor.py` — groups outputs by orientation; `build_group_cmd()` = decode → NVENC → tee fan-out; `build_passthrough_cmd()` = HEVC copy for YouTube. Quality: p6/hq/fullres, CBR, 2x bufsize, bf=3, rc-lookahead=32. Do not degrade.
-- `agent.py` — Docker entrypoint: pairs with Vercel, starts MediaMTX + uvicorn in-process, polls config every 10s, posts heartbeats.
+- `supervisor.py` — groups outputs by orientation; `build_group_cmd()` = decode → (optional `scale_cuda` downscale) → NVENC → tee fan-out; `build_passthrough_cmd()` = HEVC copy for YouTube. `_group_max_height()` drives the budget downscale. Quality: p6/hq/fullres, CBR, 2x bufsize, bf=3, rc-lookahead=32. Do not degrade.
+- `budget.py` — `CostMeter` (live $/hr from `/proc/net/dev`) + `BudgetController` (`TIERS` ladder, hysteresis) + `throttle_config()` (caps bitrate/resolution per tier). See architecture #9a.
+- `agent.py` — Docker entrypoint: pairs with Vercel, starts MediaMTX + uvicorn in-process, polls config every 10s, posts heartbeats. Runs the budget controller each beat: applies transcode throttle via `sup.apply()`, reports cost + `suggested_ingest_kbps` in the heartbeat. Single throttle-aware apply path keyed on `(config_hash, tier)`.
 - `app.py` — FastAPI debug panel on `:8080`. Requires `RELAY_PASSWORD` (fails-closed). Shares live Supervisor with agent.py.
 - `mediamtx.yml` — SRT `:8890` (ingest + loopback) + RTMP `:1935` beacon. `runOnReady` → `hook.sh`.
 - `Dockerfile` — `nvidia/cuda:12.4.1-BASE`, jellyfin-ffmpeg 7.1.4-3, MediaMTX. `NVIDIA_DRIVER_CAPABILITIES=compute,video,utility`. Image ~0.23GB.
@@ -159,7 +162,8 @@ Still confirm before destructive/irreversible actions (deleting data, force-push
 - `lib/gpu-broker.ts` — ranked cascade, readiness gate, RTMP beacon + SRT/UDP checks.
 - `lib/datacenters.ts` — broker knobs only (`PRICE_CEILING`, timeouts, `FALLBACK_LAT/LON`). Tune here.
 - `lib/providers/index.ts` — `ACTIVE_PROVIDERS`, `getProvider()`. `lib/providers/vast.ts` — offer search, all-in pricing, UDP `-p` flags at create.
-- `lib/billing.ts` — burn rate. `lib/nvenc-utils.ts` — `requiredNvencSessions()`.
+- `lib/billing.ts` — burn rate; `buildBillingContext` takes `resolutionThrottledBelow1440` to drop the 2K adder while throttled. `lib/nvenc-utils.ts` — `requiredNvencSessions()`.
+- `lib/providers/vast.ts` `create()` injects per-pod cost env (`SLIMCAST_GPU_RATE_USD`/`_EGRESS_USD_PER_TB`/`_INGRESS_USD_PER_TB`) from the offer; `app/api/gpu/provision/route.ts` injects `SLIMCAST_COST_CEILING_USD` (1.5 if `has_2k_addon` else 1.0) + `SOURCE_WIDTH/HEIGHT`. Budget telemetry persists to `gpu_instances` (`cost_usd_hr`, `egress_gb_hr`, `ingress_gb_hr`, `suggested_ingest_kbps`, `throttle_tier`); `/api/gpu/status` surfaces them to the dock.
 - `lib/agent-config.ts` — shared output builder for config+pair routes.
 - `lib/pod-teardown.ts` — `teardownInstance()`, the only destroy path.
 - `app/api/agent/*` — pair, config, status (billing clock + self-destruct), control, terminate.
@@ -193,11 +197,11 @@ Tables: `profiles`, `agent_api_keys`, `platform_connections`, `gpu_instances`, `
 
 Key columns:
 - `profiles`: `streaming_credits_seconds` (default 7200), `portrait_zoom/pos_x/pos_y`, `landscape_bitrate_kbps` (6000), `portrait_bitrate_kbps` (4000), `has_2k_addon`.
-- `gpu_instances`: `provider` (default `'vast'`), `burn_rate`, `srt_port`, `session_id`, `max_session_at`, `idle_since`, `outputs` (jsonb), `streaming`.
+- `gpu_instances`: `provider` (default `'vast'`), `burn_rate`, `srt_port`, `session_id`, `max_session_at`, `idle_since`, `outputs` (jsonb), `streaming`, `cost_usd_hr`, `egress_gb_hr`, `ingress_gb_hr`, `suggested_ingest_kbps`, `throttle_tier` (budget throttle telemetry).
 - `agent_api_keys`: service-role only (hashes never reach browser). Labels: `user`/`pod`/`device`.
 
 Postgres fns: `credit_payment_once` (idempotent credit), `rate_limit_hit` (fixed-window).
-Latest migration: `20260625000002_srt_only_vast.sql` (drops `srt_enabled`, sets `provider` default to `'vast'`).
+Latest migration: `20260626000003_budget_throttle.sql` (adds budget-throttle telemetry columns to `gpu_instances`).
 
 ## OBS plugin account linking
 - **Connect button (preferred):** PKCE OAuth — plugin opens browser to `/link`, user clicks Authorize → one-time code → plugin redeems at `POST /api/link/token` → per-device key issued. No key ever displayed.

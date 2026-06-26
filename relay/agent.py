@@ -55,6 +55,7 @@ if SRT_PASSPHRASE:
 os.environ.setdefault("RELAY_SOURCE", _loopback)
 
 from supervisor import Supervisor
+from budget import CostMeter, BudgetController, throttle_config, COST_CEILING_USD
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [agent] %(message)s")
 log = logging.getLogger("agent")
@@ -436,6 +437,18 @@ def main() -> None:
     hb_failures = 0
     first_obs_connection = False
     startup_deadline = time.time() + STARTUP_TIMEOUT_S
+    # Live infrastructure-cost meter + budget-throttle controller. The meter samples
+    # /proc/net/dev each heartbeat for the pod's real $/hr; the controller turns that
+    # into a quality tier (down-fast/up-slow) that caps transcode bitrate/resolution
+    # and the suggested OBS source bitrate — degrading quality instead of killing the
+    # stream when bandwidth would cross the ceiling.
+    cost_meter = CostMeter()
+    controller = BudgetController(COST_CEILING_USD)
+    # Signature of the last config we handed to the supervisor: (config_hash, tier).
+    # Re-apply when EITHER the user's config OR the throttle tier changes — reset to
+    # None on OBS disconnect so a reconnect always re-applies.
+    last_applied_sig: tuple[str, int] | None = None
+    log.info("Budget controller active — ceiling $%.2f/hr.", COST_CEILING_USD)
 
     while True:
         # Restart MediaMTX if it died.
@@ -443,7 +456,8 @@ def main() -> None:
             log.warning("MediaMTX exited — restarting…")
             mediamtx_proc = start_mediamtx()
 
-        # ── Config poll ───────────────────────────────────────────────────────
+        # ── Config poll (store only; the throttle-aware apply step below is the
+        #    single place that hands config to the supervisor) ───────────────────
         cfg_resp = _api("GET", "/api/agent/config")
         if cfg_resp:
             outputs = cfg_resp.get("outputs", [])
@@ -451,12 +465,8 @@ def main() -> None:
             new_hash = json.dumps({"outputs": outputs, "crop": crop}, sort_keys=True)
             if new_hash != last_config_hash:
                 last_known_config = {"outputs": outputs, "crop": crop}
-                if prev_obs_connected:
-                    log.info("Config changed — reapplying.")
-                    sup.apply(last_known_config)
-                else:
-                    log.info("Config changed — stored (OBS not connected yet).")
                 last_config_hash = new_hash
+                log.info("Config changed — will (re)apply at the current throttle tier.")
 
             credits_seconds = cfg_resp.get("credits_seconds", 0)
             if credits_seconds <= 0 and streaming:
@@ -475,15 +485,14 @@ def main() -> None:
 
         obs_connected = os.path.exists(OBS_FLAG)
         if obs_connected and not prev_obs_connected:
-            # OBS just connected (SIGUSR1 woke us instantly from hook.sh).
-            # Cancel any pending grace-terminate from a previous disconnect,
-            # then start encoders immediately with the cached config.
+            # OBS just connected (SIGUSR1 woke us instantly from hook.sh). Cancel any
+            # pending grace-terminate from a previous disconnect. The apply step below
+            # starts encoders this same iteration (sig reset → forced re-apply).
             log.info("OBS connected — starting encoders immediately.")
             first_obs_connection = True
             _cancel_terminate()
             sup.cancel_pending_stop()
-            if last_known_config:
-                sup.apply(last_known_config)
+            last_applied_sig = None
         elif not obs_connected and prev_obs_connected:
             # OBS disconnected. Start the grace timer: if OBS reconnects within
             # DISCONNECT_GRACE_S the timer is cancelled and encoders keep running.
@@ -491,16 +500,49 @@ def main() -> None:
             # no need for a separate idle timer to handle this case.
             log.info("OBS disconnected — grace timer started (%ds). Pod terminates if OBS doesn't reconnect.", DISCONNECT_GRACE_S)
             _schedule_terminate()
+            last_applied_sig = None   # force re-apply when OBS comes back
         prev_obs_connected = obs_connected
+
+        # ── Budget controller: measure cost → pick a quality tier ───────────────
+        # None on the first beat (no /proc/net/dev delta yet) → controller holds at
+        # the user's entitled floor until a real measurement arrives.
+        cost = cost_meter.sample()
+        controller.set_floor_from_config(last_known_config or {})
+        tier_spec = controller.update(cost["projected_usd_hr"] if cost else None)
+        if cost:
+            log.info("Cost: $%.3f/hr (egress %.2f, ingress %.2f GB/hr) → tier %d%s (ceiling $%.2f)",
+                     cost["projected_usd_hr"], cost["egress_gb_hr"], cost["ingress_gb_hr"],
+                     controller.tier, " THROTTLED" if controller.throttled else "", COST_CEILING_USD)
+
+        # ── Apply config at the current tier (only with OBS up & something changed) ──
+        if obs_connected and last_known_config:
+            sig = (last_config_hash, controller.tier)
+            if sig != last_applied_sig:
+                if controller.throttled:
+                    log.info("Throttle tier %d: landscape≤%dk portrait≤%dk res≤%dp source≈%sk",
+                             controller.tier, tier_spec["landscape_kbps"], tier_spec["portrait_kbps"],
+                             tier_spec["max_height"], controller.suggested_ingest_kbps())
+                sup.apply(throttle_config(last_known_config, tier_spec))
+                last_applied_sig = sig
 
         # ── Heartbeat ──────────────────────────────────────────────────────────
         statuses = sup.status()
         streaming = obs_connected or any(s["state"] == "running" for s in statuses)
 
-        hb_resp = _api("POST", "/api/agent/status", {
+        hb_body = {
             "outputs": statuses,
             "streaming": streaming,
-        })
+            # Throttle state — the suggested OBS source bitrate is the lever the
+            # plugin applies to cut ingress + YouTube passthrough (consumed in Phase 3).
+            "throttle": {
+                "tier": controller.tier,
+                "active": controller.throttled,
+                "suggested_ingest_kbps": controller.suggested_ingest_kbps(),
+            },
+        }
+        if cost:
+            hb_body["cost"] = cost
+        hb_resp = _api("POST", "/api/agent/status", hb_body)
 
         if hb_resp is None:
             hb_failures += 1
@@ -520,7 +562,11 @@ def main() -> None:
                 log.info("Received start command.")
                 cfg_resp2 = _api("GET", "/api/agent/config") or {}
                 if cfg_resp2:
-                    sup.apply({"outputs": cfg_resp2.get("outputs", [])})
+                    last_known_config = {"outputs": cfg_resp2.get("outputs", []), "crop": cfg_resp2.get("crop", {})}
+                    last_config_hash = json.dumps(last_known_config, sort_keys=True)
+                    controller.set_floor_from_config(last_known_config)
+                    sup.apply(throttle_config(last_known_config, controller.current()))
+                    last_applied_sig = (last_config_hash, controller.tier)
 
         # Interruptible sleep: hook.sh sends SIGUSR1 when OBS connects/disconnects,
         # which sets wake_event and breaks out of the wait immediately instead of

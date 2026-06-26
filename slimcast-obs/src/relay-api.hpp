@@ -23,6 +23,14 @@ struct GpuInfo {
     bool    confirmRequired  = false;
     qint64  confirmDeadlineMs = 0;
     QMap<QString, QString> platformStates;
+    // ── Budget throttle ────────────────────────────────────────────────────────
+    // When the pod's cost controller throttles, it asks the plugin to lower the OBS
+    // encoder bitrate — the only lever that cuts both ingress and YouTube passthrough
+    // egress. suggestedIngestKbps <= 0 means "no throttle, leave the encoder alone".
+    int     suggestedIngestKbps = 0;
+    bool    throttleActive = false;
+    int     throttleTier   = 0;
+    double  costUsdHr      = 0;   // live infra cost shown in the dock banner
 };
 
 // A user's connected channel. Stream keys/URLs never leave the server — the dock

@@ -26,7 +26,7 @@ export async function GET(request: Request) {
 
   const { data: instance } = await supabase
     .from('gpu_instances')
-    .select('status, ip_address, ingest_port, hls_port, srt_port, ingest_key, srt_passphrase, last_seen_at, burn_rate, outputs, streaming, max_session_at, datacenter, gpu_type')
+    .select('status, ip_address, ingest_port, hls_port, srt_port, ingest_key, srt_passphrase, last_seen_at, burn_rate, outputs, streaming, max_session_at, datacenter, gpu_type, cost_usd_hr, throttle_tier, suggested_ingest_kbps')
     .eq('user_id', userId)
     .maybeSingle()
 
@@ -111,5 +111,16 @@ export async function GET(request: Request) {
     gpu_type: instance.gpu_type ?? null,
     // True when the pod has a mapped HLS port — enables the preview player.
     hls_available: effectiveStatus === 'running' && !!instance.hls_port,
+    // ── Budget throttle (Phase 3/5) ────────────────────────────────────────────
+    // suggested_ingest_kbps: the OBS source bitrate the plugin should apply to the
+    //   live encoder when the pod is throttling (null = no throttle, run free).
+    // throttle_tier/throttle_active + cost_usd_hr drive the dock's "quality
+    //   auto-adjusted" banner. All gated on running+live so a stale pod clears them.
+    suggested_ingest_kbps:
+      effectiveStatus === 'running' ? (instance.suggested_ingest_kbps ?? null) : null,
+    throttle_tier: effectiveStatus === 'running' ? (instance.throttle_tier ?? 0) : 0,
+    throttle_active:
+      effectiveStatus === 'running' && (instance.throttle_tier ?? 0) > 0,
+    cost_usd_hr: effectiveStatus === 'running' ? (instance.cost_usd_hr ?? null) : null,
   })
 }

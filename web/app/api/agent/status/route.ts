@@ -27,9 +27,15 @@ export async function POST(request: NextRequest) {
   const isPodAgent = label === 'pod'
 
   const body = await request.json().catch(() => ({}))
-  const { outputs = [], streaming = false } = body as {
+  const { outputs = [], streaming = false, cost, throttle } = body as {
     outputs: OutputStatus[]
     streaming: boolean
+    // Live infrastructure-cost telemetry from the pod (Phase 1). Optional: absent
+    // on the first heartbeat (no bandwidth delta yet) and from dashboard/dock polls.
+    cost?: { egress_gb_hr?: number; ingress_gb_hr?: number; projected_usd_hr?: number }
+    // Budget-throttle state from the pod's controller. suggested_ingest_kbps is the
+    // OBS source bitrate the plugin should apply (null = no throttle, run free).
+    throttle?: { tier?: number; active?: boolean; suggested_ingest_kbps?: number | null }
   }
   const outSummary = outputs.map((o: OutputStatus) => `${o.name}:${o.state}(exit=${o.last_exit ?? '-'},r=${o.restarts ?? 0})`).join(' ')
   console.log(`[agent/status] label=${label} streaming=${streaming} outputs=${outputs.length} ${outSummary}`)
@@ -66,11 +72,17 @@ export async function POST(request: NextRequest) {
     const outputSettings: OutputSettingsMap = (profile?.output_settings as OutputSettingsMap) ?? {}
     const has2kAddon = profile?.has_2k_addon ?? false
 
+    // Budget tiers 0–1 keep 1440p; tier ≥2 has downscaled to ≤1080p, so a 2K user
+    // throttled there shouldn't be charged the 2K adder for this interval.
+    const THROTTLE_BELOW_1440_TIER = 2
+    const resolutionThrottledBelow1440 = (throttle?.tier ?? 0) >= THROTTLE_BELOW_1440_TIER
+
     const ctx = buildBillingContext(
       (platforms ?? []) as Array<{ platform: string; orientation: string; enabled: boolean }>,
       outputSettings,
       has2kAddon,
       streaming,
+      resolutionThrottledBelow1440,
     )
     burnRate = computeBurnRate(ctx, streaming)
 
@@ -153,6 +165,23 @@ export async function POST(request: NextRequest) {
         streaming,
         idle_since: idleSince,
         session_id: sessionId,
+        // Live infrastructure cost (Phase 1 telemetry). Only updated when the pod
+        // reports it — leaves the last value intact on the first/empty beat.
+        ...(cost
+          ? {
+              cost_usd_hr: cost.projected_usd_hr ?? null,
+              egress_gb_hr: cost.egress_gb_hr ?? null,
+              ingress_gb_hr: cost.ingress_gb_hr ?? null,
+            }
+          : {}),
+        // Budget-throttle state — surfaced to the OBS plugin via /api/gpu/status so
+        // it can lower the live encoder bitrate (cuts ingress + YouTube passthrough).
+        ...(throttle
+          ? {
+              throttle_tier: throttle.tier ?? 0,
+              suggested_ingest_kbps: throttle.suggested_ingest_kbps ?? null,
+            }
+          : {}),
       })
       .eq('user_id', userId)
 

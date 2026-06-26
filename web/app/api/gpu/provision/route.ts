@@ -185,7 +185,7 @@ export async function POST(request: Request) {
   const [{ data: profileBitrates }, { data: platformRows }] = await Promise.all([
     supabase
       .from('profiles')
-      .select('landscape_bitrate_kbps, portrait_bitrate_kbps')
+      .select('landscape_bitrate_kbps, portrait_bitrate_kbps, has_2k_addon, output_settings')
       .eq('id', userId)
       .single(),
     supabase
@@ -196,6 +196,29 @@ export async function POST(request: Request) {
 
   const landscapeCap: number = (profileBitrates as { landscape_bitrate_kbps?: number } | null)?.landscape_bitrate_kbps ?? 6000
   const portraitCap: number  = (profileBitrates as { portrait_bitrate_kbps?: number } | null)?.portrait_bitrate_kbps ?? 4000
+
+  // Budget ceiling the pod's throttle controller targets. 2K add-on holders pay
+  // +0.5 token/hr (~+$1 revenue), which funds a higher infra ceiling so they keep
+  // 1440p far longer before throttling kicks in. Standard users: hard $1/hr.
+  const has2kAddon = (profileBitrates as { has_2k_addon?: boolean } | null)?.has_2k_addon ?? false
+  const costCeilingUsd = has2kAddon ? 1.5 : 1.0
+
+  // Source canvas dimensions for the pod (crop math + the throttle controller's
+  // resolution-downscale guard, which must know the true source height to know how
+  // far it can scale down). Derived from the highest landscape resolution the user
+  // has configured; defaults to 1080p. Only a 2K add-on holder reaches 1440p.
+  const outputSettings = ((profileBitrates as { output_settings?: Record<string, { resolution?: string }> } | null)?.output_settings) ?? {}
+  const maxResLabel = Object.values(outputSettings)
+    .map(s => s?.resolution)
+    .reduce<string>((best, r) => {
+      const rank = (x?: string) => (x === '1440p' ? 3 : x === '1080p' ? 2 : x === '720p' ? 1 : 0)
+      return rank(r) > rank(best) ? (r as string) : best
+    }, '1080p')
+  const [srcW, srcH] = has2kAddon && maxResLabel === '1440p'
+    ? [2560, 1440]
+    : maxResLabel === '720p'
+      ? [1280, 720]
+      : [1920, 1080]
 
   const userOutputs: UserOutputConfig[] = (platformRows ?? []).map((p: {
     platform: string; orientation: string | null; enabled: boolean; bitrate_kbps: number | null
@@ -225,6 +248,13 @@ export async function POST(request: Request) {
       { key: 'SLIMCAST_SRT_PASSPHRASE', value: srtPassphrase },
       // Per-pod panel password (not the shared process.env.RELAY_PASSWORD anymore).
       { key: 'RELAY_PASSWORD', value: panelPassword },
+      // Budget-throttle ceiling ($/hr). GPU rate + per-TB bandwidth prices are
+      // injected separately by the provider's create() (only known from the offer).
+      { key: 'SLIMCAST_COST_CEILING_USD', value: String(costCeilingUsd) },
+      // Source canvas dims — crop math + the resolution-downscale guard rely on
+      // knowing the true source height (so a 1440p stream can be capped to 1080p).
+      { key: 'SOURCE_WIDTH', value: String(srcW) },
+      { key: 'SOURCE_HEIGHT', value: String(srcH) },
     ],
     userOutputs,
     // Save provider_id the moment a pod is created — before any readiness probe —

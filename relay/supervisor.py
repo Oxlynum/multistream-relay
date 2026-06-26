@@ -232,6 +232,20 @@ def _group_fps(outputs: list[dict]) -> int:
     return min((int(o.get("fps", 60)) for o in outputs), default=60)
 
 
+_RES_HEIGHT = {"720p": 720, "1080p": 1080, "1440p": 1440}
+
+
+def _group_max_height(outputs: list[dict]) -> int:
+    """Resolution cap for the group, as a pixel height. A tee group shares one
+    encode, so the most-restrictive output wins (smallest height). Used by the
+    budget controller's downscale tiers — the agent rewrites each output's
+    `resolution` before apply(), so this reflects any active throttle. Defaults to
+    the source height when unset (→ no scaling)."""
+    heights = [_RES_HEIGHT.get(o.get("resolution") or "", 0) for o in outputs]
+    heights = [h for h in heights if h > 0]
+    return min(heights) if heights else SOURCE_HEIGHT
+
+
 def build_passthrough_cmd(out: dict, source: str = LOCAL_SOURCE) -> list[str]:
     """HEVC copy -> HLS PUT to YouTube's HLS ingest URL (no re-encode).
 
@@ -266,11 +280,17 @@ def build_group_cmd(
     """
     One decode -> one NVENC H.264 encode -> tee fan-out to every output in the group.
 
-    Landscape: NVDEC -> NVENC entirely on GPU, no filter.
-    Portrait : NVDEC -> hwdownload -> crop (user framing) -> scale 1080x1920 -> NVENC.
+    Landscape: NVDEC -> (optional scale_cuda downscale) -> NVENC, entirely on GPU.
+    Portrait : NVDEC -> hwdownload -> crop (user framing) -> scale -> NVENC.
+
+    Resolution downscaling is the budget controller's deepest throttle lever (the
+    agent caps each output's `resolution` before apply()): a lower target both cuts
+    egress and frees NVENC headroom. We only ever downscale, never upscale past the
+    source — there's no detail to invent above SOURCE_HEIGHT.
     """
     bv = _group_bitrate(outputs)
     fps = _group_fps(outputs)
+    max_h = _group_max_height(outputs)
 
     cmd = [
         "ffmpeg", "-hide_banner", "-loglevel", "warning",
@@ -283,12 +303,23 @@ def build_group_cmd(
 
     if orientation == "portrait":
         cw, ch, cx, cy = portrait_crop_rect(crop)
+        # Portrait canvas is 9:16; a sub-1080 cap shrinks the long edge to match
+        # (e.g. 720p → 720×1280) so the encode + egress drop together.
+        if max_h <= 720:
+            pw, ph = 720, 1280
+        else:
+            pw, ph = PORTRAIT_WIDTH, PORTRAIT_HEIGHT
         vf = (
             f"hwdownload,format=nv12,"
             f"crop={cw}:{ch}:{cx}:{cy},"
-            f"scale={PORTRAIT_WIDTH}:{PORTRAIT_HEIGHT}"
+            f"scale={pw}:{ph}"
         )
         cmd += ["-vf", vf]
+    elif max_h < SOURCE_HEIGHT:
+        # Landscape stays entirely on-GPU: scale_cuda operates on the CUDA surfaces
+        # the NVDEC decoder already produced (hwaccel_output_format=cuda). -2 keeps
+        # the source aspect ratio with an even width NVENC accepts.
+        cmd += ["-vf", f"scale_cuda=-2:{max_h}"]
 
     cmd += _encode_flags(bv, fps)
     cmd += ["-f", "tee", _tee_targets(outputs)]

@@ -83,6 +83,11 @@ export function buildBillingContext(
   outputSettings: OutputSettingsMap,
   has2kAddon: boolean,
   streaming: boolean,
+  // Billing fairness: when the pod's budget controller has throttled the effective
+  // resolution below 1440p, the user isn't getting 2K, so we don't charge the +0.5
+  // 2K adder for that interval — even though their config still says 1440p. The
+  // status route passes true once throttle_tier crosses into the ≤1080p tiers.
+  resolutionThrottledBelow1440 = false,
 ): BillingContext {
   if (!streaming) {
     return { landscapePlatforms: [], portraitPlatforms: [], passthroughPlatforms: [], has1440p: false, needsProfessionalGpu: false }
@@ -107,7 +112,10 @@ export function buildBillingContext(
   }
 
   const allRunning = [...landscapePlatforms, ...portraitPlatforms, ...passthroughPlatforms]
-  const has1440p = has2kAddon && allRunning.some(p => outputSettings[p]?.resolution === '1440p')
+  const has1440p =
+    has2kAddon &&
+    !resolutionThrottledBelow1440 &&
+    allRunning.some(p => outputSettings[p]?.resolution === '1440p')
 
   const userOutputs: UserOutputConfig[] = enabled.map(p => ({
     orientation: p.orientation,

@@ -85,6 +85,11 @@ void RelayApi::fetchGpuStatus()
             info.creditsTokens = obj["credits_seconds"].toInt(0) / 3600.0;
         info.burnRate       = obj["burn_rate"].toDouble(0);
         info.streaming      = obj["streaming"].toBool(false);
+        // Budget throttle: the pod's suggested OBS source bitrate + cost telemetry.
+        info.suggestedIngestKbps = obj["suggested_ingest_kbps"].toInt(0);
+        info.throttleActive = obj["throttle_active"].toBool(false);
+        info.throttleTier   = obj["throttle_tier"].toInt(0);
+        info.costUsdHr      = obj["cost_usd_hr"].toDouble(0);
         info.confirmRequired = obj["confirm_required"].toBool(false);
         const QString deadline = obj["confirm_deadline"].toString();
         info.confirmDeadlineMs = deadline.isEmpty()
