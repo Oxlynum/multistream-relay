@@ -76,23 +76,22 @@ interface VastOffer {
 // RTMP, which makes the broker cascade to the next-nearest candidate. This
 // denylist is the belt-and-suspenders: machines we've already seen fail are
 // skipped at ranking time so we don't keep landing on them. Known bad machines:
-//   (8914 — RTX 5090 at 198.53.64.194 — REMOVED 2026-06-26. Its "exit 218/-38"
-//            is AVERROR(ENOSYS): the 10-bit-HEVC→8-bit-h264_nvenc pixel-format
-//            crash that hit EVERY host, NOT a GPU-blind fault. Fixed by
-//            GPU_NORMALIZE (scale_cuda=format=nv12) in relay/supervisor.py + the
-//            upgraded HEVC self-test in relay/agent.py. The board was never bad;
-//            only re-add if it fails the new 10-bit HEVC self-test for real.)
+//   8914 — RTX 5090 at 198.53.64.194: passes the H.264 NVENC/NVDEC self-test but
+//            crash-loops the real HEVC→H264 transcode (exit 218). The "10-bit
+//            pixfmt" theory was WRONG — the OBS source is confirmed 8-bit (NV12,
+//            Main, bt709), so the original crash predates and is unrelated to any
+//            10-bit filter. This board genuinely fails real HEVC decode while
+//            passing the H.264 self-test, so the self-test can't catch it — RE-ADDED
+//            2026-06-26 after it was mistakenly removed in b10b363.
 //   78446 — RTX 4090 at 185.61.165.201: GENUINE GPU-injection failure — NVDEC
 //            returns CUDA_ERROR_NO_DEVICE and libnvidia-encode.so.1 fails to load
 //            mid-stream even after the self-test passed at boot (2026-06-25).
-//   67876 — RTX 4090 at 45.143.122.55 (UK): passed the old H.264 self-test but
-//            HEVC NVDEC failed on a real OBS stream — exit 255 (distinct from the
-//            218 pixfmt bug). Kept pending a re-test against the fixed image; the
-//            new HEVC self-test would now reject it at boot if still broken.
+//   67876 — RTX 4090 at 45.143.122.55 (UK): passed the H.264 self-test but HEVC
+//            NVDEC failed on a real OBS stream — exit 255. Same class as 8914.
 // Extend via VAST_MACHINE_DENYLIST env (comma-separated machine ids).
 // Remove an id once the host is confirmed fixed.
 const MACHINE_DENYLIST = new Set<number>([
-  // 8914 removed 2026-06-26 — was the 10-bit pixfmt crash (now fixed), not GPU-blind.
+  8914,   // RTX 5090 198.53.64.194 — H.264 self-test passes, real HEVC transcode crash-loops
   78446,
   67876,
   ...(process.env.VAST_MACHINE_DENYLIST ?? '')
