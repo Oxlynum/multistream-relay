@@ -1,5 +1,4 @@
 import net from 'net'
-import dgram from 'dgram'
 
 // GPU availability broker.
 //
@@ -13,8 +12,13 @@ import dgram from 'dgram'
 //
 // SRT (UDP) is the only OBS→pod transport, so every active provider must be
 // UDP-capable. RunPod was removed — its pods are TCP-only and can't carry SRT.
-// Readiness is gated on the RTMP beacon (proves MediaMTX is serving) PLUS the
-// SRT + UDP-probe ports being mapped; the UDP echo itself is advisory only.
+//
+// v1 path: synchronous cascade; returns the winning pod synchronously. Used when
+// SLIMCAST_BROKER_V2 is false.
+//
+// v2 path: startProvisionRace() fans out N pods in parallel and returns immediately;
+// pods self-report readiness via POST /api/agent/ready. Used when SLIMCAST_BROKER_V2
+// is true.
 
 import {
   PRICE_CEILING, READINESS_TIMEOUT_MS, READINESS_POLL_MS, MAX_BOOT_ATTEMPTS,
@@ -26,16 +30,18 @@ export type { UserOutputConfig } from '@/lib/nvenc-utils'
 
 // Stop after this many create attempts even if none succeeded. Capacity misses
 // are fast (one rejected API call each), so this bounds a worst case where the
-// user's whole region is dry: we try the nearest ~this-many options, then tell
-// them to retry rather than booting a pod on another continent.
+// user's whole region is dry.
 const MAX_CREATE_ATTEMPTS = 120
 
-// The RTMP beacon can lag the port mapping by a beat (MediaMTX rebinds after the
-// agent's GPU self-test; Vast may briefly bounce the container while finalising port
-// forwards). Retry the handshake a few times before discarding a pod — a single miss
-// is transient, not a bad host. ~3 tries × 4s covers the rebind window.
-const RTMP_PROBE_RETRIES = 3
-const RTMP_PROBE_RETRY_MS = 4000
+// Phase 0 stopgap: 3→2 retries, 4s→3s delay, 10s→3s per-attempt timeout.
+// A live MediaMTX answers an RTMP handshake in <100ms; 3s is generous.
+// 2 retries × 3s = 6s max cost vs the old 3 × 4s = 12s per failed pod.
+const RTMP_PROBE_RETRIES = 2
+const RTMP_PROBE_RETRY_MS = 3000
+
+// Vast container states that mean the pod exited and will never boot.
+// Fast-failing on these avoids spinning out the full READINESS_TIMEOUT_MS.
+const TERMINAL_STATES = new Set(['exited', 'stopped', 'offline', 'error', 'terminated'])
 
 function haversineKm(aLat: number, aLon: number, bLat: number, bLon: number): number {
   const R = 6371
@@ -50,12 +56,10 @@ function haversineKm(aLat: number, aLon: number, bLat: number, bLon: number): nu
 }
 
 // RTMP readiness probe: confirm the pod is actually SERVING RTMP (MediaMTX bound),
-// not merely that the port forwards TCP. A forwarded/proxied port (esp. on Vast,
-// and during a pod's cold start) accepts a TCP connection BEFORE MediaMTX is ready,
-// so a bare connect can green-light a pod that can't yet ingest — OBS then fails to
-// publish and `streaming` stays false. We do the RTMP handshake (send C0+C1, expect
-// S0+S1): only a live RTMP server answers, so this proves the pod is truly ready.
-function probeRtmp(host: string, port: number, timeoutMs = 10000): Promise<boolean> {
+// not merely that the port forwards TCP. We do the RTMP handshake (send C0+C1,
+// expect S0+S1): only a live RTMP server answers, so this proves the pod is ready.
+// Phase 0: default timeout reduced from 10s to 3s (live MediaMTX answers in <100ms).
+function probeRtmp(host: string, port: number, timeoutMs = 3000): Promise<boolean> {
   return new Promise(resolve => {
     const socket = net.createConnection(port, host)
     let received = 0
@@ -63,15 +67,15 @@ function probeRtmp(host: string, port: number, timeoutMs = 10000): Promise<boole
     const done = (ok: boolean) => { clearTimeout(timer); socket.destroy(); resolve(ok) }
     const timer = setTimeout(() => done(false), timeoutMs)
     socket.once('connect', () => {
-      const c0c1 = Buffer.alloc(1537)   // C0 (1B version) + C1 (1536B)
-      c0c1[0] = 0x03                    // RTMP version 3
-      for (let i = 9; i < 1537; i++) c0c1[i] = (Math.random() * 256) | 0  // C1 random payload
+      const c0c1 = Buffer.alloc(1537)
+      c0c1[0] = 0x03
+      for (let i = 9; i < 1537; i++) c0c1[i] = (Math.random() * 256) | 0
       socket.write(c0c1)
     })
     socket.on('data', d => {
       if (firstByte < 0 && d.length) firstByte = d[0]
       received += d.length
-      if (received >= 1537) done(firstByte === 0x03)   // got S0 (v3) + S1 → MediaMTX is serving
+      if (received >= 1537) done(firstByte === 0x03)
     })
     socket.once('error', () => done(false))
   })
@@ -79,69 +83,22 @@ function probeRtmp(host: string, port: number, timeoutMs = 10000): Promise<boole
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 
-// Vast host probe (SRT mode): the relay runs a UDP echo on 8889/udp that replies
-// "ECHO:<status>:<data>" where status is OK | BAD | PENDING (OK = outbound to the
-// platforms works; BAD = it can ingest but can't deliver to Twitch).
-//
-// ADVISORY, not gating. A Vercel/serverless function cannot reliably complete an
-// outbound UDP round-trip (no stable inbound path back to the ephemeral socket), so
-// a no-reply here tells us nothing about the HOST — it's usually our own egress.
-// Gating on it rejected every datacenter host and made SRT impossible. So we only
-// act on a DEFINITIVE negative: an explicit ECHO:BAD means the host self-reported
-// blocked outbound → reject. Anything else (OK, or — the common case — no reply at
-// all) → proceed. UDP forwarding itself is already assured by the datacenter-host
-// filter (listCandidates), and the agent's own outbound self-test is the backstop.
-// Returns false ONLY on an explicit BAD; true otherwise (including timeout).
-function probeUdp(host: string, port: number, timeoutMs = 8000): Promise<boolean> {
-  return new Promise(resolve => {
-    const socket = dgram.createSocket('udp4')
-    let done = false
-    const finish = (ok: boolean) => {
-      if (done) return
-      done = true
-      clearTimeout(timer); clearInterval(retx)
-      try { socket.close() } catch { /* already closed */ }
-      resolve(ok)
-    }
-    // No reply within the window → proceed (true). Only an explicit BAD rejects.
-    const timer = setTimeout(() => finish(true), timeoutMs)
-    const msg = Buffer.from('slimcast-udp-probe')
-    socket.on('message', m => {
-      const s = m.toString()
-      if (!s.startsWith('ECHO:')) return       // not our responder
-      if (s.startsWith('ECHO:OK:')) finish(true)        // udp forwards + outbound works
-      else if (s.startsWith('ECHO:BAD:')) finish(false) // host self-reported blocked outbound → reject
-      // ECHO:PENDING: → outbound test still running; keep retransmitting until OK/BAD
-    })
-    socket.on('error', () => finish(true))   // our egress hiccup, not the host — proceed
-    socket.send(msg, port, host)
-    let n = 0
-    const retx = setInterval(() => { if (!done && n++ < 12) socket.send(msg, port, host) }, 1000)
-  })
-}
-
 interface PodAddr { ip: string; port: number; hlsPort: number | null; dataCenterId: string | null; srtPort: number | null; udpProbePort: number | null }
 
 /** Poll until the pod reports a public IP + mapped ports (booted), or time out.
- * We wait for BOTH the RTMP beacon port (proves MediaMTX answered, mapped TCP) AND
- * the UDP ports (SRT ingest + probe). Vast maps the UDP ports a few seconds AFTER
- * the TCP ones, so returning on the RTMP port alone would make the SRT readiness
- * check see null ports and wrongly reject the pod.
- *
- * Readiness requires the IP, the RTMP beacon port (proves MediaMTX answered), and
- * the SRT ingest port (8890/udp — the ONLY port OBS actually publishes to). We do
- * NOT require the 8889/udp probe port: it exists solely for the ADVISORY echo, which
- * we never gate on (a no-reply already means "proceed"). Hard-requiring it here was
- * an SRT-era regression — on hosts where 8890 maps but 8889 lags or never maps,
- * waitForIp would spin to the 180s timeout and the broker would throw away a pod the
- * agent had already paired with, cascading until it exhausted boot attempts. The SRT
- * leg only needs 8890; carry 8889 opportunistically for the advisory probe. */
+ * Phase 0: added fast-fail on terminal Vast container states so a self-exited pod
+ * (e.g. GPU self-test failed) is abandoned in ~1 poll instead of at the 110s deadline. */
 async function waitForIp(provider: GpuProvider, podId: string): Promise<PodAddr | null> {
   const deadline = Date.now() + READINESS_TIMEOUT_MS
   while (Date.now() < deadline) {
     try {
       const s = await provider.getStatus(podId)
-      const ready = s.ip && s.port && s.srtPort   // 8889 (probe) is optional — advisory only
+      // Fast-fail on any state that means the container exited and won't recover.
+      if (TERMINAL_STATES.has(s.status)) {
+        console.log(`[broker] pod ${podId} terminal state '${s.status}' — fast-failing`)
+        return null
+      }
+      const ready = s.ip && s.port && s.srtPort   // 8889 (probe) is optional
       if (ready) return { ip: s.ip!, port: s.port!, hlsPort: s.hlsPort ?? null, dataCenterId: s.dataCenterId ?? null, srtPort: s.srtPort ?? null, udpProbePort: s.udpProbePort ?? null }
       if (s.status === 'error' || s.status === 'terminated') return null
     } catch {
@@ -167,10 +124,8 @@ export interface ProvisionResult {
   error?: string
 }
 
-/** Build the distance-then-price ranked candidate list across all providers. Every
- * active provider is UDP-capable (SRT is the only OBS→pod transport), so there's no
- * protocol filter — all candidates compete uniformly on distance then price. */
-async function rankedCandidates(lat: number, lon: number, needsProfessionalGpu: boolean): Promise<Array<{ c: GpuCandidate; distKm: number }>> {
+/** Build the distance-then-price ranked candidate list across all providers. */
+export async function rankedCandidates(lat: number, lon: number, needsProfessionalGpu: boolean): Promise<Array<{ c: GpuCandidate; distKm: number }>> {
   const lists = await Promise.all(
     ACTIVE_PROVIDERS.map(async p => {
       try {
@@ -184,10 +139,6 @@ async function rankedCandidates(lat: number, lon: number, needsProfessionalGpu: 
   return lists
     .flat()
     .map(c => ({ c, distKm: haversineKm(lat, lon, c.lat, c.lon) }))
-    // Preference tier first (a provider demotes hosts it distrusts — e.g. Vast's
-    // NVENC-in-container driver regression — without excluding them), THEN distance,
-    // THEN price. So good-driver hosts win when available, but a demoted host is
-    // still tried as a fallback (the pod self-test is the hard gate either way).
     .sort((a, b) =>
       (a.c.preferenceTier ?? 0) - (b.c.preferenceTier ?? 0) ||
       a.distKm - b.distKm ||
@@ -195,9 +146,16 @@ async function rankedCandidates(lat: number, lon: number, needsProfessionalGpu: 
 }
 
 /**
- * Provision the nearest available GPU ≤ PRICE_CEILING. Ranks every provider's
- * candidates by distance and creates nearest-first until one boots; returns the
- * winning pod, or ok:false if the nearest options are exhausted.
+ * v1 broker: Provision the nearest available GPU ≤ PRICE_CEILING. Ranks every
+ * provider's candidates by distance and creates nearest-first until one boots;
+ * returns the winning pod, or ok:false if the nearest options are exhausted.
+ *
+ * Phase 0 improvements (all backward-compatible):
+ *  - RTMP probe: 3→2 retries, 3s timeout (was 4s delay, 10s timeout) — caps per-pod cost
+ *  - waitForIp: fast-fail on terminal Vast states (exited/stopped/offline)
+ *  - probeUdp removed from winner path (advisory-only and can't reply from serverless)
+ *  - onAddrKnown: saves ip/srtPort to DB right after waitForIp, before probes, so a
+ *    mid-cascade Vercel kill can't strand a healthy pod with no saved URL
  */
 export async function provisionGpu(args: {
   lat: number
@@ -206,12 +164,8 @@ export async function provisionGpu(args: {
   imageTag: string
   env: PodEnv[]
   userOutputs?: UserOutputConfig[]
-  // Called the instant a pod is created, BEFORE the slow readiness probes, so the
-  // caller can persist provider_id onto the claim row and the pod is reapable even
-  // if this function is killed mid-cascade (Vercel maxDuration) — otherwise a pod
-  // created during a failed SRT cascade strands with provider_id='' and bills until
-  // the daily by-label reaper. Best-effort; must never throw into the broker loop.
   onPodCreated?: (podId: string, provider: string) => Promise<void>
+  onAddrKnown?: (addr: { ip: string; rtmpPort: number; srtPort: number | null }) => Promise<void>
 }): Promise<ProvisionResult> {
   const nvencSessions = args.userOutputs ? requiredNvencSessions(args.userOutputs) : 0
   const needsProfessionalGpu = nvencSessions > 3
@@ -246,25 +200,19 @@ export async function provisionGpu(args: {
       const created = await provider.create({ candidate: c, name: args.name, imageTag: args.imageTag, env: args.env })
       podId = created.podId
       actualCost = created.costPerHr
-      // Record it NOW so it can always be torn down — before any probe that might
-      // hang or before this function hits its duration ceiling.
       try { await args.onPodCreated?.(podId, c.provider) } catch { /* best effort */ }
     } catch (err) {
-      // No capacity in this location/GPU — fast miss, try the next candidate.
       lastError = err instanceof Error ? err.message : String(err)
       console.error(`[broker] ${c.provider} ${c.gpuKey} @ ${c.label} (${distKm.toFixed(0)}km) failed:`, lastError)
       continue
     }
 
-    // Hard price guard: refuse a pod whose live cost exceeds the ceiling.
     if (actualCost !== undefined && actualCost > PRICE_CEILING) {
       try { await provider.destroy(podId) } catch { /* best effort */ }
       lastError = `price ${actualCost} exceeds ceiling ${PRICE_CEILING}`
       continue
     }
 
-    // Got inventory — make sure it actually boots (IP + mapped ports; in SRT mode
-    // that includes the UDP ports, which Vast maps a few seconds after the TCP ones).
     bootAttempts++
     const addr = await waitForIp(provider, podId)
     if (!addr) {
@@ -274,13 +222,11 @@ export async function provisionGpu(args: {
       continue
     }
 
-    // MediaMTX must actually answer RTMP (not just accept TCP) — proves the pod is
-    // truly ready to ingest before we hand the address to OBS. The beacon can lag
-    // the port mapping by a beat (MediaMTX rebinds after the agent's GPU self-test,
-    // and Vast's container can briefly bounce while finalising port forwards), so a
-    // SINGLE miss does NOT mean a bad host. Retry a few times before discarding —
-    // throwing away an already-paired pod on one transient miss was a prime cause of
-    // cascades that exhausted boot attempts and left the user with no stream.
+    // Phase 0: save the URL early — right after IP/port are known, before probes.
+    // If this Vercel function is killed mid-probe, the pod's URL is already in the DB
+    // and OBS can connect. Previously this save only happened after the broker returned.
+    try { await args.onAddrKnown?.({ ip: addr.ip, rtmpPort: addr.port, srtPort: addr.srtPort }) } catch { /* best effort */ }
+
     let rtmpOk = false
     for (let r = 0; r < RTMP_PROBE_RETRIES; r++) {
       if (await probeRtmp(addr.ip, addr.port)) { rtmpOk = true; break }
@@ -294,8 +240,6 @@ export async function provisionGpu(args: {
       continue
     }
 
-    // The SRT ingest port (8890/udp) is the ONLY hard requirement — without it there
-    // is no OBS uplink. waitForIp already gated on it; re-check defensively.
     if (!addr.srtPort) {
       console.warn(`[broker] pod ${podId} SRT port not mapped — cascading`)
       try { await provider.destroy(podId) } catch { /* best effort */ }
@@ -303,17 +247,12 @@ export async function provisionGpu(args: {
       if (bootAttempts >= MAX_BOOT_ATTEMPTS) return { ok: false, attempts, error: 'too many failed boots' }
       continue
     }
-    // UDP echo is ADVISORY and only run when the 8889 probe port actually mapped
-    // (it's optional now — see waitForIp). We reject solely on an explicit ECHO:BAD;
-    // a no-reply or an unmapped probe port never blocks a pod whose SRT leg is good.
-    if (addr.udpProbePort && !(await probeUdp(addr.ip, addr.udpProbePort))) {
-      console.warn(`[broker] pod ${podId} host self-reported blocked outbound (${addr.ip}:${addr.udpProbePort}) — cascading`)
-      try { await provider.destroy(podId) } catch { /* best effort */ }
-      lastError = 'host reported blocked outbound-to-platform'
-      if (bootAttempts >= MAX_BOOT_ATTEMPTS) return { ok: false, attempts, error: 'too many failed boots' }
-      continue
-    }
-    console.log(`[broker] pod ${podId} SRT ready: srt port ${addr.srtPort} mapped (probe=${addr.udpProbePort ?? 'unmapped/advisory-skipped'})`)
+
+    // Phase 0: probeUdp removed from the winner path.
+    // Rationale: a serverless function can't receive UDP replies (no stable inbound
+    // socket), so a no-reply told us nothing about the host. The advisory UDP echo
+    // on the pod side still runs; it just never gates readiness here.
+    console.log(`[broker] pod ${podId} SRT ready: srt port ${addr.srtPort} mapped`)
 
     return {
       ok: true,
@@ -331,4 +270,100 @@ export async function provisionGpu(args: {
   }
 
   return { ok: false, attempts, error: lastError ?? 'no capacity available' }
+}
+
+// ── v2 broker: parallel race ─────────────────────────────────────────────────
+
+export interface RacerEntry {
+  provider: string
+  provider_id: string
+  state: 'booting' | 'ready' | 'failed' | 'loser'
+  machine_id?: number
+}
+
+export interface RaceArgs {
+  lat: number
+  lon: number
+  name: string
+  imageTag: string
+  env: PodEnv[]
+  userOutputs?: UserOutputConfig[]
+  /** Number of pods to create per race round (default: 2). */
+  racersN?: number
+  /** Skip the first `skipN` candidates (used for next-round kicks). */
+  skipN?: number
+  /**
+   * Called immediately after each pod is created (before any further await in
+   * this promise chain), so the pod is reapable even if the fan-out is killed
+   * mid-flight by Vercel's maxDuration.
+   */
+  onRacerCreated: (racer: RacerEntry) => Promise<void>
+}
+
+export interface RaceResult {
+  started: boolean
+  racerCount: number
+  error?: string
+}
+
+/**
+ * v2 broker: Fan out N pods in parallel from the ranked candidate list and
+ * return immediately. Readiness arrives later via POST /api/agent/ready
+ * (pod push-readiness); the caller never waits for probes.
+ *
+ * The wall-clock cost drops from "sum of serial failures" to "slowest of N
+ * boots" — one bad host is harmless instead of a 60–180s tax on every stream.
+ */
+export async function startProvisionRace(args: RaceArgs): Promise<RaceResult> {
+  const { racersN = 2, skipN = 0, userOutputs } = args
+  const nvencSessions = userOutputs ? requiredNvencSessions(userOutputs) : 0
+  const needsProfessionalGpu = nvencSessions > 3
+
+  const candidates = await rankedCandidates(args.lat, args.lon, needsProfessionalGpu)
+  if (candidates.length === 0) {
+    return { started: false, racerCount: 0, error: 'no SRT-capable host available' }
+  }
+
+  const providerByName = new Map(ACTIVE_PROVIDERS.map(p => [p.name, p]))
+  // Slice out candidates already tried in prior rounds.
+  const eligible = candidates.slice(skipN, skipN + racersN)
+  if (eligible.length === 0) {
+    return { started: false, racerCount: 0, error: 'no untried candidates remaining' }
+  }
+
+  const preferred = eligible.filter(x => (x.c.preferenceTier ?? 0) === 0).length
+  console.log(`[broker/race] fanning out ${eligible.length} racer(s) (skip=${skipN}, preferred=${preferred}): ${eligible.map(e => e.c.label).join(', ')}`)
+
+  let racerCount = 0
+
+  await Promise.allSettled(
+    eligible.map(async ({ c, distKm }) => {
+      const provider = providerByName.get(c.provider)
+      if (!provider) return
+      try {
+        const created = await provider.create({
+          candidate: c,
+          name: args.name,
+          imageTag: args.imageTag,
+          env: args.env,
+        })
+        racerCount++
+        const racer: RacerEntry = {
+          provider: c.provider,
+          provider_id: created.podId,
+          state: 'booting',
+          machine_id: typeof c.placement.machineId === 'number' ? c.placement.machineId : undefined,
+        }
+        // Called immediately after this pod is created — before any other await in
+        // this promise chain — so the pod is reapable from the DB even if the
+        // fan-out is killed right after this resolves.
+        try { await args.onRacerCreated(racer) } catch { /* best effort */ }
+        console.log(`[broker/race] created ${c.provider} pod ${created.podId} (${c.gpuKey} @ ${c.label} ${distKm.toFixed(0)}km)`)
+      } catch (err) {
+        console.error(`[broker/race] ${c.provider} ${c.gpuKey} @ ${c.label} failed to create:`, err instanceof Error ? err.message : err)
+      }
+    })
+  )
+
+  return { started: racerCount > 0, racerCount }
 }

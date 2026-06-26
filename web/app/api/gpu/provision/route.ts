@@ -1,21 +1,19 @@
 import { createServerClient } from '@/lib/supabase'
 import { generateApiKey, hashApiKey, authenticateUserOrAgent } from '@/lib/agent-auth'
-import { provisionGpu, type UserOutputConfig } from '@/lib/gpu-broker'
+import { provisionGpu, startProvisionRace, type UserOutputConfig, type RacerEntry } from '@/lib/gpu-broker'
 import { teardownInstance, sweepStalePods } from '@/lib/pod-teardown'
 import { checkRateLimit } from '@/lib/rate-limit'
 import { FALLBACK_LAT, FALLBACK_LON } from '@/lib/datacenters'
 
-// Vercel function timeout: the broker can cascade through several Vast candidates
-// (each up to READINESS_TIMEOUT_MS = 3 min) before returning. Explicit 300s cap
-// matches what the OBS plugin expects (setTransferTimeout(300000)).
+// Vercel function timeout. v1 path: may cascade through several Vast candidates.
+// v2 path: returns in ~5s (just creates N pods and returns); 300s is defensive.
 export const maxDuration = 300
 
 // A running pod is considered live (not reclaimable) only if it has heartbeat
 // within this window. Past it the agent is presumed dead and the slot is free.
 const FRESH_HEARTBEAT_MS = 150_000
 // A provisioning row younger than this means another request is mid-boot; don't
-// reclaim it (it would strand the in-flight pod). The boot/readiness gate is
-// well under this, so a genuinely stuck claim is reclaimable after it.
+// reclaim it (it would strand the in-flight pod).
 const PROVISION_LOCK_MS = 3 * 60 * 1000
 // Force-confirm window: a session is hard-killed at created_at + this.
 const MAX_SESSION_MS = 12 * 60 * 60 * 1000
@@ -28,24 +26,17 @@ export async function POST(request: Request) {
     return Response.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
-  // Audit log: surfaces random/unexpected provision calls in Vercel logs.
   console.log(`[provision] user=${userId} ua=${request.headers.get('user-agent') ?? 'unknown'}`)
 
-  // Opportunistic sweep: destroy any stale pods across all users before we
-  // create a new one. Covers the daily-cron gap without paid cron calls.
-  await sweepStalePods()
+  // Phase 0: fire-and-forget sweep (was awaited, costing the first few seconds of
+  // every provision on the critical path). The heartbeat already sweeps on each beat.
+  sweepStalePods().catch(e => console.error('[sweep] provision-time error:', e))
 
-  // Rate limit: a handful of provisions per minute per user is plenty for a
-  // human; this caps any scripted spam that would create orphan pods.
   if (!(await checkRateLimit(`provision:${userId}`, 5, 60))) {
     return Response.json({ error: 'Too many requests. Slow down.' }, { status: 429 })
   }
 
-  // ── Payment gate: no pod may ever run without a card on file AND a way to
-  // pay for it. This is the hard stop against "run pods without paying" and
-  // against multi-account free-GPU abuse (a card is the anti-sybil signal). ──
-  // DEV bypass: same UUID guard as the billing bypass — must be a well-formed
-  // UUID, exact match only, never affects any other account.
+  // ── Payment gate ──────────────────────────────────────────────────────────
   const UUID_RE_GATE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
   const gateBypassId = process.env.SLIMCAST_DEV_NO_BILLING_USER_ID ?? ''
   const skipPaymentGate = !!userId && UUID_RE_GATE.test(gateBypassId) && gateBypassId === userId
@@ -73,13 +64,9 @@ export async function POST(request: Request) {
   }
 
   // ── Atomic provisioning claim ──────────────────────────────────────────
-  // The orphan-pod bug: if we created the pod before reserving the row, two
-  // concurrent calls would each boot a pod but only one would be recorded —
-  // the other bills forever, unseen by every teardown path. So we reserve the
-  // row FIRST. The unique(user_id) constraint makes the insert the lock.
   const { data: existing } = await supabase
     .from('gpu_instances')
-    .select('status, last_seen_at, created_at')
+    .select('status, phase, last_seen_at, created_at')
     .eq('user_id', userId)
     .maybeSingle()
 
@@ -90,23 +77,16 @@ export async function POST(request: Request) {
     if (existing.status === 'running' && fresh) {
       return Response.json({ error: 'Streaming server is already running' }, { status: 409 })
     }
-    // A recently-created provisioning row = another request is mid-boot. Don't
-    // reclaim it (that could strand its in-flight pod) — tell the caller to wait.
     const provisioningRecently =
-      existing.status === 'provisioning' &&
+      (existing.status === 'provisioning' || existing.phase === 'racing' || existing.phase === 'requested') &&
       existing.created_at &&
       Date.now() - new Date(existing.created_at).getTime() < PROVISION_LOCK_MS
     if (provisioningRecently) {
       return Response.json({ error: 'Streaming server is already starting' }, { status: 409 })
     }
-    // Stale / stopped / errored row: destroy any old pod and free the slot so
-    // the claim insert below can take it (never overwrite a row that still
-    // points at a live pod — that's how orphans are born).
     await teardownInstance(userId, 'provision_reclaim')
   }
 
-  // Insert-as-lock. If a concurrent request already claimed, this conflicts on
-  // unique(user_id) and we bail WITHOUT creating a pod.
   const { data: claim, error: claimErr } = await supabase
     .from('gpu_instances')
     .insert({
@@ -122,66 +102,28 @@ export async function POST(request: Request) {
     return Response.json({ error: 'Streaming server is already starting' }, { status: 409 })
   }
 
-  // From here on, the claim row exists. Any early return MUST release it.
   const releaseClaim = async () => {
     await supabase.from('gpu_instances').delete().eq('user_id', userId)
   }
 
-  // Generate a fresh ephemeral key for the pod — separate from the user's
-  // dashboard API key so provisioning doesn't invalidate the OBS plugin setup.
+  // Generate ephemeral pod key (separate from the user's dashboard API key).
   const podRawKey = generateApiKey()
   const podKeyHash = hashApiKey(podRawKey)
 
-  // Remove any stale pod key for this user before inserting the new one.
-  await supabase
-    .from('agent_api_keys')
-    .delete()
-    .eq('user_id', userId)
-    .eq('label', 'pod')
+  await supabase.from('agent_api_keys').delete().eq('user_id', userId).eq('label', 'pod')
+  await supabase.from('agent_api_keys').insert({ user_id: userId, key_hash: podKeyHash, label: 'pod' })
 
-  await supabase.from('agent_api_keys').insert({
-    user_id: userId,
-    key_hash: podKeyHash,
-    label: 'pod',
-  })
-
-  // `||` not `??`: an empty-string env var should still fall back to the default.
   const imageTag = process.env.SLIMCAST_RELAY_IMAGE || 'ghcr.io/oxlynum/multistream-relay:latest'
+  const callbackUrl = process.env.SLIMCAST_AGENT_CALLBACK_URL ?? 'https://slimcast-oxlynum.vercel.app'
 
-  // Where the pod's agent phones home. slimcast.com isn't owned yet, so this
-  // deployment's vercel.app URL is passed explicitly.
-  const callbackUrl =
-    process.env.SLIMCAST_AGENT_CALLBACK_URL ?? 'https://slimcast-oxlynum.vercel.app'
-
-  // User location from Vercel's geolocation headers → provision the nearest
-  // available GPU. Falls back to central US when headers are absent (local dev).
   const lat = Number(request.headers.get('x-vercel-ip-latitude')) || FALLBACK_LAT
   const lon = Number(request.headers.get('x-vercel-ip-longitude')) || FALLBACK_LON
 
-  // Per-pod secret used as the RTMP ingest path, so only OBS holding this key
-  // can publish to the pod (no more open "live" ingest on a public port).
   const ingestKey = generateApiKey().slice(0, 24)
-
-  // Per-pod SRT AES passphrase (32 chars — within SRT's 10–79 requirement).
-  // Encrypts the OBS→pod HEVC uplink in flight; MediaMTX requires it to publish
-  // AND read the path, so the secret streamid is no longer the only protection.
-  // Stored on the row so /api/gpu/status can hand it to the OBS plugin (it rides
-  // in srt_url) and the agent can substitute it into MediaMTX.
   const srtPassphrase = generateApiKey().slice(0, 32)
-
-  // Per-pod debug-panel password, replacing the shared weak RELAY_PASSWORD.
-  // app.py fails closed without it so it's always set; per-pod means leaking one
-  // pod's panel can never reach another's. Stored so we can reach the panel to debug.
   const panelPassword = generateApiKey().slice(0, 24)
 
-  // Fetch the user's platform connections to determine how many simultaneous
-  // NVENC sessions their config requires. Consumer GPUs (GeForce RTX 3090/4090/5090)
-  // are capped at 3 concurrent sessions in hardware; if the user needs more the
-  // broker skips them automatically.
-  //
-  // NOTE: per-output resolution overrides (from the output-settings feature) are
-  // not yet wired here — when that lands, pull from the output_settings table and
-  // replace the hardcoded '1080p' default below with the per-platform value.
+  // Fetch platform config for NVENC session counting and budget ceiling.
   const [{ data: profileBitrates }, { data: platformRows }] = await Promise.all([
     supabase
       .from('profiles')
@@ -196,17 +138,9 @@ export async function POST(request: Request) {
 
   const landscapeCap: number = (profileBitrates as { landscape_bitrate_kbps?: number } | null)?.landscape_bitrate_kbps ?? 6000
   const portraitCap: number  = (profileBitrates as { portrait_bitrate_kbps?: number } | null)?.portrait_bitrate_kbps ?? 4000
-
-  // Budget ceiling the pod's throttle controller targets. 2K add-on holders pay
-  // +0.5 token/hr (~+$1 revenue), which funds a higher infra ceiling so they keep
-  // 1440p far longer before throttling kicks in. Standard users: hard $1/hr.
   const has2kAddon = (profileBitrates as { has_2k_addon?: boolean } | null)?.has_2k_addon ?? false
   const costCeilingUsd = has2kAddon ? 1.5 : 1.0
 
-  // Source canvas dimensions for the pod (crop math + the throttle controller's
-  // resolution-downscale guard, which must know the true source height to know how
-  // far it can scale down). Derived from the highest landscape resolution the user
-  // has configured; defaults to 1080p. Only a 2K add-on holder reaches 1440p.
   const outputSettings = ((profileBitrates as { output_settings?: Record<string, { resolution?: string }> } | null)?.output_settings) ?? {}
   const maxResLabel = Object.values(outputSettings)
     .map(s => s?.resolution)
@@ -224,99 +158,158 @@ export async function POST(request: Request) {
     platform: string; orientation: string | null; enabled: boolean; bitrate_kbps: number | null
   }) => {
     const orientation = p.orientation ?? 'landscape'
-    // YouTube landscape is HEVC passthrough — no NVENC session needed.
     const isPassthrough = p.platform === 'youtube' && orientation === 'landscape'
     const bitrate = p.bitrate_kbps ?? (orientation === 'portrait' ? portraitCap : landscapeCap)
-    return {
-      orientation,
-      resolution: '1080p',
-      bitrate_kbps: bitrate,
-      mode: isPassthrough ? 'passthrough' : 'transcode',
-      enabled: p.enabled,
-    }
+    return { orientation, resolution: '1080p', bitrate_kbps: bitrate, mode: isPassthrough ? 'passthrough' : 'transcode', enabled: p.enabled }
   })
 
-  const result = await provisionGpu({
-    lat,
-    lon,
-    name: `slimcast-${userId.slice(0, 8)}`,
+  const podEnv = [
+    { key: 'SLIMCAST_API_KEY',        value: podRawKey },
+    { key: 'SLIMCAST_VERCEL_URL',     value: callbackUrl },
+    { key: 'SLIMCAST_INGEST_KEY',     value: ingestKey },
+    { key: 'SLIMCAST_SRT_PASSPHRASE', value: srtPassphrase },
+    { key: 'RELAY_PASSWORD',          value: panelPassword },
+    { key: 'SLIMCAST_COST_CEILING_USD', value: String(costCeilingUsd) },
+    { key: 'SOURCE_WIDTH',            value: String(srcW) },
+    { key: 'SOURCE_HEIGHT',           value: String(srcH) },
+  ]
+
+  // Save secrets + geo on the claim row immediately, so the /api/agent/ready
+  // handler can build the srt_url and the /api/agent/failed handler can re-create
+  // pods with the same secrets when kicking the next round.
+  await supabase.from('gpu_instances').update({
+    pod_key_hash: podKeyHash,
+    ingest_key: ingestKey,
+    srt_passphrase: srtPassphrase,
+    panel_password: panelPassword,
+    provision_lat: lat,
+    provision_lon: lon,
+  }).eq('user_id', userId)
+
+  // ── Broker path selection ──────────────────────────────────────────────────
+  const useV2 = process.env.SLIMCAST_BROKER_V2 !== 'false'  // default ON
+
+  if (useV2) {
+    return runV2Race({ userId, lat, lon, imageTag, podEnv, userOutputs, claim, supabase, releaseClaim })
+  } else {
+    return runV1Cascade({ userId, lat, lon, imageTag, podEnv, userOutputs, ingestKey, srtPassphrase, panelPassword, podKeyHash, claim, supabase, releaseClaim })
+  }
+}
+
+// ── v2: async parallel race ───────────────────────────────────────────────────
+
+async function runV2Race({ userId, lat, lon, imageTag, podEnv, userOutputs, supabase, releaseClaim }: {
+  userId: string; lat: number; lon: number; imageTag: string
+  podEnv: { key: string; value: string }[]; userOutputs: UserOutputConfig[]
+  claim: { id: string }; supabase: ReturnType<typeof createServerClient>
+  releaseClaim: () => Promise<void>
+}) {
+  // Update phase to 'requested' before kicking the race.
+  await supabase.from('gpu_instances').update({ phase: 'requested' }).eq('user_id', userId)
+
+  const podName = `slimcast-${userId.slice(0, 8)}`
+
+  const raceResult = await startProvisionRace({
+    lat, lon,
+    name: podName,
     imageTag,
-    env: [
-      { key: 'SLIMCAST_API_KEY', value: podRawKey },
-      { key: 'SLIMCAST_VERCEL_URL', value: callbackUrl },
-      { key: 'SLIMCAST_INGEST_KEY', value: ingestKey },
-      { key: 'SLIMCAST_SRT_PASSPHRASE', value: srtPassphrase },
-      // Per-pod panel password (not the shared process.env.RELAY_PASSWORD anymore).
-      { key: 'RELAY_PASSWORD', value: panelPassword },
-      // Budget-throttle ceiling ($/hr). GPU rate + per-TB bandwidth prices are
-      // injected separately by the provider's create() (only known from the offer).
-      { key: 'SLIMCAST_COST_CEILING_USD', value: String(costCeilingUsd) },
-      // Source canvas dims — crop math + the resolution-downscale guard rely on
-      // knowing the true source height (so a 1440p stream can be capped to 1080p).
-      { key: 'SOURCE_WIDTH', value: String(srcW) },
-      { key: 'SOURCE_HEIGHT', value: String(srcH) },
-    ],
+    env: podEnv,
     userOutputs,
-    // Save provider_id the moment a pod is created — before any readiness probe —
-    // so teardownInstance can destroy the pod even if this function is killed
-    // mid-cascade by Vercel's maxDuration (otherwise provider_id stays '' and
-    // teardown skips the provider destroy, letting the pod run and bill forever).
-    onPodCreated: async (podId, provider) => {
-      await supabase
+    racersN: 2,
+    onRacerCreated: async (racer: RacerEntry) => {
+      // Read current racers, append this one, write back.
+      // Since UNIQUE(user_id) guarantees only one provision at a time per user,
+      // these calls are effectively serialized — no cross-user conflict.
+      const { data: row } = await supabase
         .from('gpu_instances')
-        .update({ provider_id: podId, provider })
+        .select('racers')
+        .eq('user_id', userId)
+        .maybeSingle()
+      const current = (row?.racers ?? []) as RacerEntry[]
+      current.push(racer)
+      await supabase.from('gpu_instances')
+        .update({ racers: current, phase: 'racing', status: 'provisioning' })
         .eq('user_id', userId)
     },
   })
 
-  if (!result.ok) {
-    console.error(`[provision] broker exhausted after ${result.attempts} attempts:`, result.error)
-    // Clean up the unused pod key AND release the claim so the user can retry.
-    await supabase.from('agent_api_keys').delete().eq('key_hash', podKeyHash)
+  if (!raceResult.started) {
+    console.error(`[provision/v2] no candidates for user ${userId}: ${raceResult.error}`)
+    await supabase.from('agent_api_keys').delete().eq('user_id', userId).eq('label', 'pod')
     await releaseClaim()
     return Response.json(
-      {
-        error: 'No GPU capacity available right now.',
-        message: 'No GPU capacity available right now. Please retry in a moment.',
-        detail: result.error ?? `tried ${result.attempts} option(s)`,
-      },
+      { error: 'No GPU capacity available right now.', detail: raceResult.error },
       { status: 503 },
     )
   }
 
-  // Pod is up — fill in the claim row with the real provider details. Do NOT
-  // touch status or last_seen_at here: if the agent already paired (it can race
-  // waitForIp by a few seconds when the image is cached), overwriting status back
-  // to 'provisioning' or clearing last_seen_at would permanently hide it from the
-  // dock's stale check and keep the dock stuck on "Booting server..." forever.
-  // The claim INSERT set status='provisioning'; the pair route flips it to 'running'.
-  // Log the exact ingest coordinates the dock will receive — if a stream ever fails
-  // to start, this line confirms whether srt_url was deliverable (ip + srt_port +
-  // ingest_key all present) and when, vs. the pod being torn down before this save.
-  console.log(`[provision] pod ready, saving ingest: ip=${result.ip} srt_port=${result.srtPort} rtmp_port=${result.port} key=${ingestKey.slice(0, 8)}… (srt_url ${result.ip && result.srtPort ? 'DELIVERABLE' : 'INCOMPLETE'})`)
-  const { error: saveErr } = await supabase
-    .from('gpu_instances')
-    .update({
-      provider_id: result.podId!,
-      pod_key_hash: podKeyHash,
-      ip_address: result.ip ?? null,
-      ingest_port: result.port ?? null,
-      hls_port: result.hlsPort ?? null,
-      srt_port: result.srtPort ?? null,
-      ingest_key: ingestKey,
-      srt_passphrase: srtPassphrase,
-      panel_password: panelPassword,
-      provider: result.provider,
-      gpu_type: result.gpuKey,
-      datacenter: result.datacenter,
-    })
-    .eq('user_id', userId)
-  if (saveErr) console.error(`[provision] FAILED to save ingest coords (row gone?): ${saveErr.message}`)
+  console.log(`[provision/v2] race started for user ${userId}: ${raceResult.racerCount} racer(s)`)
+  return Response.json({ ok: true, racing: true, racers: raceResult.racerCount })
+}
 
-  return Response.json({
-    ok: true,
-    gpu: result.gpuKey,
-    datacenter: result.datacenter,
-    attempts: result.attempts,
+// ── v1: synchronous cascade (Phase 0 improvements applied) ───────────────────
+
+async function runV1Cascade({ userId, lat, lon, imageTag, podEnv, userOutputs, ingestKey, srtPassphrase, panelPassword, podKeyHash, supabase, releaseClaim }: {
+  userId: string; lat: number; lon: number; imageTag: string
+  podEnv: { key: string; value: string }[]; userOutputs: UserOutputConfig[]
+  ingestKey: string; srtPassphrase: string; panelPassword: string; podKeyHash: string
+  claim: { id: string }; supabase: ReturnType<typeof createServerClient>
+  releaseClaim: () => Promise<void>
+}) {
+  const result = await provisionGpu({
+    lat, lon,
+    name: `slimcast-${userId.slice(0, 8)}`,
+    imageTag,
+    env: podEnv,
+    userOutputs,
+    // Record provider_id immediately after creation (before probes) so teardown
+    // can destroy the pod even if this function is killed mid-cascade.
+    onPodCreated: async (podId, provider) => {
+      await supabase.from('gpu_instances').update({ provider_id: podId, provider }).eq('user_id', userId)
+    },
+    // Phase 0: save the SRT URL right after IP/ports are known — before RTMP probes.
+    // A kill during probing can no longer strand a healthy pod with no saved URL.
+    onAddrKnown: async ({ ip, rtmpPort, srtPort }) => {
+      console.log(`[provision/v1] saving addr early: ip=${ip} srt_port=${srtPort} rtmp_port=${rtmpPort}`)
+      await supabase.from('gpu_instances').update({
+        ip_address: ip,
+        ingest_port: rtmpPort,
+        srt_port: srtPort,
+        // Secrets are already on the row from the early save above; this is
+        // a belt-and-suspenders re-save in case the earlier update lost a race.
+        ingest_key: ingestKey,
+        srt_passphrase: srtPassphrase,
+        panel_password: panelPassword,
+      }).eq('user_id', userId)
+    },
   })
+
+  if (!result.ok) {
+    console.error(`[provision/v1] broker exhausted after ${result.attempts} attempts:`, result.error)
+    await supabase.from('agent_api_keys').delete().eq('key_hash', podKeyHash)
+    await releaseClaim()
+    return Response.json(
+      { error: 'No GPU capacity available right now.', detail: result.error ?? `tried ${result.attempts} option(s)` },
+      { status: 503 },
+    )
+  }
+
+  console.log(`[provision/v1] pod ready: ip=${result.ip} srt_port=${result.srtPort} rtmp_port=${result.port} key=${ingestKey.slice(0, 8)}… (srt_url ${result.ip && result.srtPort ? 'DELIVERABLE' : 'INCOMPLETE'})`)
+  const { error: saveErr } = await supabase.from('gpu_instances').update({
+    provider_id: result.podId!,
+    pod_key_hash: podKeyHash,
+    ip_address: result.ip ?? null,
+    ingest_port: result.port ?? null,
+    hls_port: result.hlsPort ?? null,
+    srt_port: result.srtPort ?? null,
+    ingest_key: ingestKey,
+    srt_passphrase: srtPassphrase,
+    panel_password: panelPassword,
+    provider: result.provider,
+    gpu_type: result.gpuKey,
+    datacenter: result.datacenter,
+  }).eq('user_id', userId)
+  if (saveErr) console.error(`[provision/v1] FAILED to save ingest coords: ${saveErr.message}`)
+
+  return Response.json({ ok: true, gpu: result.gpuKey, datacenter: result.datacenter, attempts: result.attempts })
 }

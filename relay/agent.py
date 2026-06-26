@@ -65,6 +65,17 @@ VERCEL_URL = os.environ.get("SLIMCAST_VERCEL_URL", "https://slimcast-oxlynum.ver
 POLL_INTERVAL = int(os.environ.get("AGENT_POLL_INTERVAL", "10"))
 MEDIAMTX_CONFIG = os.environ.get("MEDIAMTX_CONFIG", "mediamtx.yml")
 
+# Vast-injected env vars (confirmed available at container start — 2026-06-26).
+# The pod uses these to self-report its own public URL without waiting for the
+# cloud to probe it (push-readiness model, v2 broker).
+PUBLIC_IPADDR     = os.environ.get("PUBLIC_IPADDR", "")
+SRT_HOST_PORT     = os.environ.get("VAST_UDP_PORT_8890", "")   # SRT ingest (OBS → pod)
+RTMP_HOST_PORT    = os.environ.get("VAST_TCP_PORT_1935", "")   # RTMP beacon
+VAST_CONTAINER_LABEL = os.environ.get("VAST_CONTAINERLABEL", "")
+# VAST_CONTAINERLABEL format is "C.<contract_id>" — the numeric part is the
+# provider_id stored in gpu_instances.racers so the cloud can match this pod.
+VAST_INSTANCE_ID = VAST_CONTAINER_LABEL[2:] if VAST_CONTAINER_LABEL.startswith("C.") else ""
+
 # Flag file written by hook.sh when OBS publishes to MediaMTX (runOnReady).
 # Cleared when OBS drops (runOnNotReady). Agent uses this to start/stop the
 # supervisor in sync with OBS instead of starting at pod boot.
@@ -104,6 +115,52 @@ def _get_external_ip() -> str:
             return r.read().decode().strip()
     except Exception:
         return ""
+
+
+def _post_ready() -> "dict | None":
+    """v2 broker push-readiness: tell the cloud we are healthy and serving.
+
+    Sends PUBLIC_IPADDR + mapped UDP/TCP ports (from Vast-injected env) so the
+    cloud can save the SRT URL and hand it to OBS without probing us externally.
+
+    In the parallel race model, the cloud CAS-selects the first pod to call
+    this; the response says whether we WON (continue) or LOST (self-destruct).
+    In the v1 broker path this is a belt-and-suspenders early save that the
+    cloud ignores gracefully (it still does its own probe).
+    """
+    ip = PUBLIC_IPADDR or _get_external_ip()
+    body = {
+        "ip": ip,
+        "srt_port": int(SRT_HOST_PORT) if SRT_HOST_PORT else None,
+        "rtmp_port": int(RTMP_HOST_PORT) if RTMP_HOST_PORT else None,
+        "container_label": VAST_CONTAINER_LABEL,
+        "provider_id": VAST_INSTANCE_ID,
+    }
+    log.info("Reporting ready: ip=%s srt_port=%s rtmp_port=%s instance=%s",
+             body["ip"], body["srt_port"], body["rtmp_port"], VAST_INSTANCE_ID or "?")
+    for attempt in range(5):
+        resp = _api("POST", "/api/agent/ready", body)
+        if resp is not None:
+            return resp
+        log.warning("POST /api/agent/ready attempt %d failed, retrying in 3s…", attempt + 1)
+        time.sleep(3)
+    log.warning("POST /api/agent/ready all retries exhausted — assuming winner and continuing")
+    return None
+
+
+def _post_failed(reason: str) -> None:
+    """v2 broker push-readiness: tell the cloud this pod cannot serve.
+
+    Called on GPU self-test failure so the broker abandons this host in ~1s
+    instead of waiting out the probe timeout (60–180s). Safe to call in v1
+    path — the endpoint exists but the broker ignores the body.
+    """
+    body = {
+        "reason": reason,
+        "provider_id": VAST_INSTANCE_ID,
+    }
+    log.info("Reporting failed: reason=%s instance=%s", reason, VAST_INSTANCE_ID or "?")
+    _api("POST", "/api/agent/failed", body)
 
 
 def _api(method: str, path: str, body: dict | None = None, timeout: int = 10) -> dict | None:
@@ -366,11 +423,29 @@ def main() -> None:
         else:
             log.error("GPU self-test FAILED (driver %s): %s. Halting boot so the broker "
                       "cascades to another machine; not starting MediaMTX.", drv, reason)
+        # v2 broker: report failure immediately so the cloud abandons this host in
+        # ~1s (instead of waiting out the 60–180s probe timeout). The cloud will
+        # kick the next race round if all racers fail. v1 broker: the endpoint
+        # exists and returns {ack:true}; the v1 broker still relies on probeRtmp
+        # failing — this POST is harmless belt-and-suspenders.
+        _post_failed(f"{reason} (driver {drv})")
         sys.exit(1)
 
     mediamtx_proc = start_mediamtx()
     sup = Supervisor()
     start_uvicorn(sup)  # in-process daemon thread; shares sup with app.py
+
+    # v2 broker push-readiness: now that MediaMTX is up and ports are mapped,
+    # tell the cloud we are healthy and serving. The cloud CAS-selects the first
+    # pod to report ready; if we LOST the race, exit cleanly (the winner handles
+    # the session). If the POST fails, assume we're the winner and continue.
+    ready_resp = _post_ready()
+    if ready_resp is not None and not ready_resp.get("winner", True):
+        action = ready_resp.get("action", "")
+        log.info("Lost race (another pod won this session) — action=%s, exiting.", action)
+        sup.stop_all()
+        mediamtx_proc.terminate()
+        sys.exit(0)
 
     # Write PID so hook.sh can wake us immediately via SIGUSR1 instead of
     # waiting up to POLL_INTERVAL seconds before the loop checks the flag.

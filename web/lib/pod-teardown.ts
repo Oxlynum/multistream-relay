@@ -1,5 +1,6 @@
 import { createServerClient } from '@/lib/supabase'
 import { getProvider } from '@/lib/providers'
+import type { RacerEntry } from '@/lib/gpu-broker'
 
 // The single, idempotent way to destroy a user's pod. Used by manual stop
 // (DELETE /api/gpu), the heartbeat self-destruct, the agent terminate request,
@@ -10,14 +11,13 @@ export async function teardownInstance(userId: string, reason: string): Promise<
 
   const { data: instance } = await supabase
     .from('gpu_instances')
-    .select('provider_id, pod_key_hash, provider, session_id')
+    .select('provider_id, pod_key_hash, provider, session_id, racers')
     .eq('user_id', userId)
     .maybeSingle()
 
   if (!instance) return false
 
-  // Close any session still open on this pod (crash, credits-out, reaper kill).
-  // Keep the duration the heartbeat already accumulated; just stamp ended_at.
+  // Close any session still open on this pod.
   if (instance.session_id) {
     await supabase
       .from('stream_sessions')
@@ -26,16 +26,27 @@ export async function teardownInstance(userId: string, reason: string): Promise<
       .is('ended_at', null)
   }
 
-  // Kill the actual cloud pod first — this is the part that stops the bleeding.
+  // Kill the main pod first.
   try {
     if (instance.provider_id) {
       await getProvider(instance.provider).destroy(instance.provider_id)
     }
   } catch (e) {
-    // Log loudly but keep going: a provider hiccup must not leave the row behind
-    // (the reaper would otherwise keep trying forever). RunPod also returns an
-    // error when the pod is already gone, which is fine.
     console.error(`[teardown] provider destroy failed for ${userId} (${reason}):`, e)
+  }
+
+  // Kill any racer pods that are still alive (v2 race path).
+  // The winner's provider_id was promoted to the top-level column and destroyed
+  // above; here we destroy any losers/booting racers still tracked in the array.
+  const racers = (instance.racers ?? []) as RacerEntry[]
+  for (const racer of racers) {
+    if (racer.provider_id && racer.provider_id !== instance.provider_id && racer.state !== 'failed') {
+      try {
+        await getProvider(racer.provider).destroy(racer.provider_id)
+      } catch {
+        // Best-effort; the reaper backstops any that survive.
+      }
+    }
   }
 
   // Revoke the pod's ephemeral key so a zombie container can't re-authenticate.

@@ -14,6 +14,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Debug flow for a crashing pod:** `vastai show instances-v1 --raw` → `vastai logs <id> --tail 100`. The debug panel on `:8080` shows live FFmpeg stderr (uvicorn runs in-process with agent.py since 2026-06-26).
 
+**Diagnosing on a live Vast pod (hard-won, 2026-06-26):**
+- **SSH in:** `vastai attach ssh <id> "$(cat ~/.ssh/id_ed25519.pub)"` (key takes ~30s to propagate), then `ssh -p <ssh_port> root@<ssh_host>` using `ssh_host`/`ssh_port` from `vastai show instance <id> --raw`. The host is `ssh<N>.vast.ai` (N varies — NOT always `ssh1`). `vastai execute` only runs on **stopped** instances; use SSH for running ones.
+- **Vast injects the mapped public ports into the container as env:** `PUBLIC_IPADDR`, `VAST_TCP_PORT_1935`, `VAST_UDP_PORT_8890` (SRT), `VAST_UDP_PORT_8889` — a pod can build its own public SRT URL with zero cloud round-trips. Also drops `/root/.vast_api_key` (pod can self-destruct via Vast API).
+- **`vercel logs` does NOT capture a long-running provision function's output** — it's buffered and lost when the function overruns `maxDuration`. Debug provisioning via `vastai logs <id>` / pod SSH, not Vercel logs.
+- **Test SRT ingest externally** (Homebrew ffmpeg lacks libsrt): `brew install srt`, then `srt-live-transmit "udp://:8899?mode=listener" "srt://<ip>:<hostport>?passphrase=<pp>&streamid=publish:<key>&pbkeylen=16&latency=5000"` fed by `ffmpeg … -c:v hevc_videotoolbox -f mpegts udp://127.0.0.1:8899`. Confirmed reaching MediaMTX through Vast UDP forwarding.
+
 ---
 
 ## What it is
@@ -30,8 +36,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Relay image: ~0.23GB** (`cuda -base`, not `-runtime` — CUDA toolkit is unused).
 - Web app (Next.js 16) in `web/`; auth gate is `web/proxy.ts` (renamed from `middleware.ts` per Next 16).
 - OBS plugin v2.1.0 in `slimcast-obs/` — OBS-driven lifecycle, no manual GPU controls.
-- **Remaining gap:** OBS publishing `publish:<key>` SRT not yet verified live end-to-end.
-  Plan: `/Users/danielaltom/.claude/plans/alright-lets-plan-this-eventual-clover.md`
+- **SRT ingest path PROVEN (2026-06-26):** external SRT push from a laptop, through Vast's UDP forwarding, into MediaMTX connects + authenticates (passphrase) + routes by streamid + fires the `runOnReady` hook. Loopback also verified. **The SRT/transcode layer is healthy — not the source of stream-start failures.**
+- **Broker v2 shipped (2026-06-27):** replaced the RunPod-shaped synchronous cascade with a Vast-native design: (1) pods **push** readiness via `POST /api/agent/ready` / `/failed` instead of being probed from serverless; (2) provision fans out **N=2 pods in parallel** (first-ready-wins CAS); (3) provision route returns **202 in ~5s** instead of holding the cascade in a 300s request. Phase 0 stopgap also in: `MAX_BOOT_ATTEMPTS` 5→2, `READINESS_TIMEOUT_MS` 180s→110s, RTMP probe 3×10s→2×3s, fast-fail on terminal Vast states, `sweepStalePods` fire-and-forget. Enable: `SLIMCAST_BROKER_V2=true` (default ON). Roll back: `SLIMCAST_BROKER_V2=false`. Full design: `vastbroker-v2.md` (repo root).
 
 ## Layout
 - `relay/` — GPU Docker image: `supervisor.py`, `agent.py`, `app.py`, MediaMTX, `hook.sh`
@@ -86,6 +92,7 @@ cd web && STRIPE_SECRET_KEY=sk_... node scripts/setup-stripe.mjs
 - `CRON_SECRET` (optional; protects `/api/cron/reap`)
 - `TWITCH_CLIENT_ID/SECRET`, `GOOGLE_CLIENT_ID/SECRET`, `FACEBOOK_APP_ID/SECRET`
 - `SLIMCAST_DEV_NO_BILLING_USER_ID` — dev billing bypass (blank in prod)
+- `SLIMCAST_BROKER_V2` — `true` (default, v2 push-readiness+race) / `false` (v1 cascade fallback)
 
 ## Working conventions (standing authorization — do these on wrap-up)
 - **Update CLAUDE.md** when architecture, provider, schema, or load-bearing assumptions change.
@@ -119,7 +126,7 @@ Still confirm before destructive/irreversible actions (deleting data, force-push
 
 7. **Grouped transcode + tee fan-out.** At most 3 processes per pod: (a) one landscape NVENC encode → tee all landscape platforms, (b) one portrait encode → tee all portrait, (c) HEVC passthrough for YouTube. `onfail=ignore` — one platform drop doesn't affect others. Platforms in the same group share one bitrate. Do not revert to per-platform transcodes.
 
-8. **GPU chosen by broker, never by hand.** `lib/gpu-broker.ts`. Ranks: `preferenceTier` → haversine distance → price; creates best-first until one boots. Hard $1/hr ceiling. Readiness gate: mapped **SRT port (8890/udp — the only hard UDP requirement; OBS's sole uplink) + RTMP beacon handshake (retried 3×, not single-shot — MediaMTX rebinds after the GPU self-test)**. The 8889/udp probe port is NOT required to map — it's advisory-only; `waitForIp` gates on 8890 alone. UDP echo (8889) advisory — reject only on explicit `ECHO:BAD`, never no-reply or unmapped. (Hard-requiring 8889 + single-shot RTMP probe was an SRT-era regression: it threw away already-paired pods on transient misses, cascading until boot attempts exhausted → "OBS never connects". Fixed 2026-06-26 after proving the SRT ingest path itself is sound — external SRT push reaches MediaMTX through Vast UDP forwarding.)
+8. **GPU chosen by broker, never by hand.** `lib/gpu-broker.ts`. Ranks: `preferenceTier` → haversine distance → price. Hard $1/hr ceiling. **Broker v2 (default, `SLIMCAST_BROKER_V2=true`):** provision fans out N=2 pods in parallel (`startProvisionRace()`), returns 200 in ~5s, and waits for pods to self-report via `POST /api/agent/ready` (CAS winner) / `POST /api/agent/failed` (kick next round). Wall-clock = fastest of N boots, not sum of serial failures. Bad hosts known in ~1s (agent exits immediately on GPU failure + POSTs /failed) instead of ~60–180s probe timeout. **v1 path (`SLIMCAST_BROKER_V2=false`):** synchronous cascade with Phase 0 improvements: 2 attempts × 110s timeout, 2×3s RTMP probe, early URL save via `onAddrKnown`, fast-fail on terminal Vast states.
    - Registry: `lib/providers/index.ts` (`ACTIVE_PROVIDERS`, `getProvider()`).
    - Vast (`lib/providers/vast.ts`): Turing+ (`compute_cap >= 750`), ≤$8/TB egress, ≥300 Mbps, ≥3 direct ports. UDP ports need explicit `-p HOST:CONTAINER/udp` at create.
    - Vultr planned next. **RunPod cannot be re-added** (TCP-only, SRT ingest is mandatory).
@@ -159,15 +166,15 @@ Still confirm before destructive/irreversible actions (deleting data, force-push
 - `Dockerfile` — `nvidia/cuda:12.4.1-BASE`, jellyfin-ffmpeg 7.1.4-3, MediaMTX. `NVIDIA_DRIVER_CAPABILITIES=compute,video,utility`. Image ~0.23GB.
 
 ### web/
-- `lib/gpu-broker.ts` — ranked cascade, readiness gate, RTMP beacon + SRT/UDP checks.
-- `lib/datacenters.ts` — broker knobs only (`PRICE_CEILING`, timeouts, `FALLBACK_LAT/LON`). Tune here.
+- `lib/gpu-broker.ts` — **v2:** `rankedCandidates()` (exported), `startProvisionRace()` (N-parallel fan-out, push-readiness), and v1 `provisionGpu()` (Phase 0 improved: 2×3s RTMP probe, fast-fail on terminal states, `onAddrKnown` early-save).
+- `lib/datacenters.ts` — broker knobs only (`PRICE_CEILING`, `READINESS_TIMEOUT_MS`=110s, `MAX_BOOT_ATTEMPTS`=2, `FALLBACK_LAT/LON`). Tune here.
 - `lib/providers/index.ts` — `ACTIVE_PROVIDERS`, `getProvider()`. `lib/providers/vast.ts` — offer search, all-in pricing, UDP `-p` flags at create.
 - `lib/billing.ts` — burn rate; `buildBillingContext` takes `resolutionThrottledBelow1440` to drop the 2K adder while throttled. `lib/nvenc-utils.ts` — `requiredNvencSessions()`.
 - `lib/providers/vast.ts` `create()` injects per-pod cost env (`SLIMCAST_GPU_RATE_USD`/`_EGRESS_USD_PER_TB`/`_INGRESS_USD_PER_TB`) from the offer; `app/api/gpu/provision/route.ts` injects `SLIMCAST_COST_CEILING_USD` (1.5 if `has_2k_addon` else 1.0) + `SOURCE_WIDTH/HEIGHT`. Budget telemetry persists to `gpu_instances` (`cost_usd_hr`, `egress_gb_hr`, `ingress_gb_hr`, `suggested_ingest_kbps`, `throttle_tier`); `/api/gpu/status` surfaces them to the dock.
 - `lib/agent-config.ts` — shared output builder for config+pair routes.
-- `lib/pod-teardown.ts` — `teardownInstance()`, the only destroy path.
-- `app/api/agent/*` — pair, config, status (billing clock + self-destruct), control, terminate.
-- `app/api/gpu/*` — provision, stop, destroy. All accept `authenticateUserOrAgent`.
+- `lib/pod-teardown.ts` — `teardownInstance()`, the only destroy path. **v2:** also destroys all pods in `racers` jsonb (losers/booting racers from the parallel race).
+- `app/api/agent/*` — pair, config, status (billing clock + self-destruct), control, terminate. **v2 new:** `ready` (pod self-reports healthy; CAS winner-selection), `failed` (pod self-reports GPU failure; kicks next race round).
+- `app/api/gpu/*` — provision, stop, destroy. All accept `authenticateUserOrAgent`. **v2:** provision route returns 200 in ~5s and starts N=2 racers in parallel (vs old synchronous cascade).
 - `app/api/cron/reap/` — daily reaper. Schedule in `web/vercel.json`.
 - `app/api/platforms/` — GET+PATCH accept agent keys; POST/DELETE session-only.
 - `app/api/output-settings/` — per-platform resolution (720p/1080p/1440p) + bitrate. 1440p needs `has_2k_addon`.
@@ -197,11 +204,11 @@ Tables: `profiles`, `agent_api_keys`, `platform_connections`, `gpu_instances`, `
 
 Key columns:
 - `profiles`: `streaming_credits_seconds` (default 7200), `portrait_zoom/pos_x/pos_y`, `landscape_bitrate_kbps` (6000), `portrait_bitrate_kbps` (4000), `has_2k_addon`.
-- `gpu_instances`: `provider` (default `'vast'`), `burn_rate`, `srt_port`, `session_id`, `max_session_at`, `idle_since`, `outputs` (jsonb), `streaming`, `cost_usd_hr`, `egress_gb_hr`, `ingress_gb_hr`, `suggested_ingest_kbps`, `throttle_tier` (budget throttle telemetry).
+- `gpu_instances`: `provider` (default `'vast'`), `burn_rate`, `srt_port`, `session_id`, `max_session_at`, `idle_since`, `outputs` (jsonb), `streaming`, `cost_usd_hr`, `egress_gb_hr`, `ingress_gb_hr`, `suggested_ingest_kbps`, `throttle_tier` (budget throttle telemetry). **Broker v2 columns:** `phase` (text — `requested|racing|ready|streaming|ended`; maps to `status` for backward compat), `racers` (jsonb — array of `{provider, provider_id, state, machine_id?}` for all in-flight racer pods), `race_round` (int — guards next-round kick against duplicate /failed POSTs), `provision_lat/lon` (numeric — stored at provision so /api/agent/failed can rank next-round candidates).
 - `agent_api_keys`: service-role only (hashes never reach browser). Labels: `user`/`pod`/`device`.
 
 Postgres fns: `credit_payment_once` (idempotent credit), `rate_limit_hit` (fixed-window).
-Latest migration: `20260626000003_budget_throttle.sql` (adds budget-throttle telemetry columns to `gpu_instances`).
+Latest migration: `20260627000001_broker_v2.sql` (adds broker v2 phase/racers/race_round/provision_lat/provision_lon columns to `gpu_instances`).
 
 ## OBS plugin account linking
 - **Connect button (preferred):** PKCE OAuth — plugin opens browser to `/link`, user clicks Authorize → one-time code → plugin redeems at `POST /api/link/token` → per-device key issued. No key ever displayed.

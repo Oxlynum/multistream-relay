@@ -1,6 +1,7 @@
 import { createServerClient } from '@/lib/supabase'
 import { teardownInstance } from '@/lib/pod-teardown'
-import { ACTIVE_PROVIDERS } from '@/lib/providers'
+import { ACTIVE_PROVIDERS, getProvider } from '@/lib/providers'
+import type { RacerEntry } from '@/lib/gpu-broker'
 
 // The independent backstop. Runs daily (Vercel Hobby caps crons at once/day) and
 // destroys any pod that the in-pod safeties can't catch — chiefly a pod that has
@@ -63,6 +64,33 @@ export async function GET(request: Request) {
     }
   }
 
+  // ── Racer cleanup: destroy loser/failed racers from v2 races ──────────────
+  // teardownInstance handles this on user-initiated stops; here we clean up
+  // any that survived (e.g. the /ready handler's fire-and-forget failed).
+  try {
+    const { data: racerRows } = await supabase
+      .from('gpu_instances')
+      .select('user_id, racers')
+      .neq('status', 'stopped')
+    for (const row of racerRows ?? []) {
+      const racers = (row.racers ?? []) as RacerEntry[]
+      for (const racer of racers) {
+        if ((racer.state === 'loser' || racer.state === 'failed') && racer.provider_id) {
+          try {
+            await getProvider(racer.provider).destroy(racer.provider_id)
+            // Clear from the array so we don't re-attempt next run.
+            const updatedRacers = racers.map(r =>
+              r.provider_id === racer.provider_id ? { ...r, provider_id: '' } : r
+            )
+            await supabase.from('gpu_instances').update({ racers: updatedRacers }).eq('user_id', row.user_id)
+          } catch { /* best effort */ }
+        }
+      }
+    }
+  } catch (e) {
+    console.error('[reaper] racer cleanup failed:', e)
+  }
+
   // ── Orphan reconcile: destroy any provider instance with no gpu_instances row ──
   // The only path that can see a pod the DB doesn't know about (the classic
   // "created but the row write lost a race / the function died"). Runs across
@@ -74,9 +102,17 @@ export async function GET(request: Request) {
   try {
     const { data: allRows } = await supabase
       .from('gpu_instances')
-      .select('user_id, provider_id')
-    const knownPodIds = new Set((allRows ?? []).map(r => r.provider_id).filter(Boolean))
-    const knownUserPrefixes = new Set((allRows ?? []).map(r => r.user_id.slice(0, 8)))
+      .select('user_id, provider_id, racers')
+    // Include racer pod IDs (v2 race path) so active racers aren't orphan-destroyed.
+    const knownPodIds = new Set([
+      ...(allRows ?? []).map(r => r.provider_id).filter(Boolean),
+      ...(allRows ?? []).flatMap(r =>
+        ((r.racers ?? []) as RacerEntry[])
+          .map(racer => racer.provider_id)
+          .filter(Boolean)
+      ),
+    ])
+    const knownUserPrefixes = new Set((allRows ?? []).map(r => r.user_id?.slice(0, 8)).filter(Boolean))
 
     for (const provider of ACTIVE_PROVIDERS) {
       let live: Array<{ id: string; name: string }>
