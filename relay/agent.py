@@ -2,7 +2,7 @@
 agent.py — on-boot entrypoint for the SlimCast relay Docker container.
 
 Replaces run.sh / start.sh. Responsibilities:
-  1. Read SLIMCAST_API_KEY from environment (injected by RunPod at pod creation).
+  1. Read SLIMCAST_API_KEY from environment (injected by the provider at pod creation).
   2. POST /api/agent/pair → register IP, receive initial config.
   3. Start MediaMTX subprocess (ingest + SRT loopback).
   4. Start uvicorn (FastAPI control panel, debug only).
@@ -164,8 +164,8 @@ def start_udp_echo(port: int = 8889) -> None:
       1. the reply existing proves the host FORWARDS UDP (required for SRT ingest);
       2. the reply prefix reports OUTBOUND reachability ('OK'/'BAD'/'PENDING') so the
          broker can reject a host that ingests but can't deliver to the platforms.
-    Started early (before pairing) + in daemon threads; a no-op off UDP-capable hosts
-    (Vast maps the EXPOSE'd 8889/udp; RunPod doesn't open it)."""
+    Started early (before pairing) + in daemon threads; only active where the host
+    maps the EXPOSE'd 8889/udp (Vast does via explicit -p flags)."""
     threading.Thread(target=_test_outbound, daemon=True).start()
 
     def _serve() -> None:

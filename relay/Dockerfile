@@ -50,15 +50,17 @@ RUN pip3 install --no-cache-dir -r requirements.txt
 COPY . .
 RUN chmod +x start.sh hook.sh 2>/dev/null || true
 
-# 1935 = RTMP ingest (TCP) ; 8080 = control panel (debug)
-# 8890/udp = SRT ingest ; 8889/udp = UDP echo (broker's per-host UDP-forwarding probe).
-# SRT/UDP is for the optional "SRT uplink" mode on UDP-capable hosts (Vast
-# datacenter). On RunPod only the ports in runpod.ts createPod are opened (1935),
-# so EXPOSE'ing the UDP ports here is a no-op there and only takes effect on Vast,
-# which maps the image's EXPOSE'd ports. MediaMTX already accepts SRT publish on
-# 8890; OBS publishes srt://<pod>:<mapped>?streamid=publish:<ingest-key>. Access is
-# still gated by the per-pod ingest-key path, same as RTMP. The 8889 echo lets the
-# broker verify the host actually forwards UDP before committing to SRT.
+# 1935/tcp = RTMP readiness beacon (broker's MediaMTX-liveness probe; OBS does NOT
+#   publish here) ; 8080 = control panel (debug)
+# 8890/udp = SRT ingest — the ONLY OBS→pod transport ; 8889/udp = UDP echo
+#   (broker's per-host UDP-forwarding + outbound-to-platforms check).
+# SRT/UDP is mandatory now: every provider must be UDP-capable (Vast today; RunPod
+# was dropped — its pods are TCP-only). The host maps these EXPOSE'd ports — Vast
+# needs explicit `-p HOST:CONTAINER/udp` flags for the UDP ones (see
+# providers/vast.ts); TCP comes free from EXPOSE. OBS publishes
+# srt://<pod>:<mapped>?streamid=publish:<ingest-key>, gated by the per-pod ingest
+# key. The 8889 echo lets the broker verify the host forwards UDP + can reach the
+# platforms before committing.
 EXPOSE 1935 8080 8890/udp 8889/udp
 
 # agent.py is the production entrypoint.

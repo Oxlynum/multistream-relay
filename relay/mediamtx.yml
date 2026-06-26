@@ -1,26 +1,34 @@
 # MediaMTX ingest config for the multistream relay.
-# Receives enhanced-RTMP HEVC from OBS over TCP and republishes it on a
-# loopback RTSP URL that the encoder processes pull from.
+# Receives HEVC from OBS over SRT (UDP) on :8890 and serves the same feed back over
+# an SRT loopback that the encoder processes pull from. RTMP :1935 is kept ONLY as a
+# readiness beacon for the broker's probe — OBS no longer publishes to it.
 
 logLevel: info
 logDestinations: [stdout]
 
-# --- RTMP ingest (OBS -> pod, over RunPod's exposed TCP port) --------------
+# --- RTMP readiness beacon (:1935/tcp) ------------------------------------
+# NOT the OBS ingest anymore — OBS publishes over SRT (below). MediaMTX still binds
+# RTMP so the broker's TCP RTMP-handshake probe can confirm MediaMTX is serving
+# (a UDP round-trip can't be confirmed reliably from a serverless prober). The port
+# is host-mapped; nothing publishes to it under normal operation.
 rtmp: yes
 rtmpAddress: :1935
-# enhanced-RTMP (H.265/HEVC, AV1) is accepted automatically by current builds.
 
-# --- SRT republish (loopback, consumed by FFmpeg) -------------------------
-# The encoders pull the feed over SRT (MPEG-TS), NOT RTSP: RTSP/RTP mangles
-# Apple's temporal-layered HEVC and causes dropped frames / artifacts. SRT
-# carries HEVC cleanly. Loopback SRT is lossless. Keep 8890 OUT of RunPod's
-# exposed ports so it stays internal.
+# --- SRT ingest + loopback (:8890/udp) ------------------------------------
+# One SRT server, double duty: OBS PUBLISHES here from outside
+# (streamid=publish:<key>, via the host-mapped UDP port) AND the encoders READ the
+# same path back over the loopback (streamid=read:<key>). SRT, NOT RTSP: RTSP/RTP
+# mangles Apple's temporal-layered HEVC → dropped frames / artifacts; SRT carries
+# HEVC cleanly. 8890/udp MUST be host-exposed now — it is the OBS ingest, not just
+# an internal loopback.
 srt: yes
 srtAddress: :8890
 
-# Still expose RTSP locally as a fallback source if ever needed.
-rtsp: yes
-rtspAddress: :8554
+# RTSP server is disabled — nothing uses it. The OBS ingest and the encoder loopback
+# are both SRT (above), HLS preview is served from the publisher directly, and the
+# RTMP beacon is TCP. (RTSP/RTP also mangles Apple's temporal-layered HEVC, so it was
+# never a viable path here anyway.)
+rtsp: no
 
 # HLS preview on :8888. Used by the dashboard to verify OBS→pod ingest.
 # Only the ingest-key path is published, so the URL is effectively secret.
@@ -36,9 +44,13 @@ hlsVariant: fmp4
 webrtc: no
 
 paths:
-  # OBS publishes to rtmp://<pod>:<mapped-port>/<ingest-key>. The path is a
-  # per-pod secret (the agent substitutes __INGEST_PATH__ from SLIMCAST_INGEST_KEY
-  # at boot), so only OBS holding the key can publish. Defaults to "live" locally.
+  # OBS publishes to srt://<pod>:<mapped-udp-port>?streamid=publish:<ingest-key>.
+  # The path is a per-pod secret (the agent substitutes __INGEST_PATH__ from
+  # SLIMCAST_INGEST_KEY at boot), so only OBS holding the key can publish. The
+  # runOnReady hook below fires on this publish regardless of protocol — it's a
+  # path-ready event — which is what drives the whole start-streaming chain
+  # (hook.sh → /tmp/obs_connected → agent starts encoders → heartbeat streaming=true).
+  # Defaults to "live" locally.
   __INGEST_PATH__:
     source: publisher
 
