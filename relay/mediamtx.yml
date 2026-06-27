@@ -51,6 +51,12 @@ paths:
   # path-ready event — which is what drives the whole start-streaming chain
   # (hook.sh → /tmp/obs_connected → agent starts encoders → heartbeat streaming=true).
   # Defaults to "live" locally.
+  __INGEST_PATH___preview:
+    # supervisor.py's "preview" runner reads the SRT loopback, transcodes HEVC→H.264
+    # (browsers cannot decode HEVC in HLS.js), and pushes the result here via RTMP.
+    # MediaMTX then serves it as HLS on :8888 so the dashboard preview player works.
+    source: publisher
+
   __INGEST_PATH__:
     source: publisher
 

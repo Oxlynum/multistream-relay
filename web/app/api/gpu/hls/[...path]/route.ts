@@ -179,7 +179,10 @@ export async function GET(
     podParams.delete('hlstoken')
     podParams.delete('token')
     const podSearch = podParams.toString()
-    const podUrl = `http://${instance.ip_address}:${instance.hls_port}/${instance.ingest_key}/${segment}${podSearch ? `?${podSearch}` : ''}`
+    // Fetch from the H.264 preview path — supervisor.py transcodes HEVC→H.264 and
+    // pushes to MediaMTX as <key>_preview via RTMP, because browsers cannot decode
+    // the raw HEVC that OBS sends.
+    const podUrl = `http://${instance.ip_address}:${instance.hls_port}/${instance.ingest_key}_preview/${segment}${podSearch ? `?${podSearch}` : ''}`
 
     console.log(`[hls-proxy] ${segment} uid=${userId.slice(0, 8)} → ${podUrl}`)
 

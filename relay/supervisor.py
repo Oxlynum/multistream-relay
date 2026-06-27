@@ -246,6 +246,35 @@ def _group_max_height(outputs: list[dict]) -> int:
     return min(heights) if heights else SOURCE_HEIGHT
 
 
+def build_preview_cmd(source: str = LOCAL_SOURCE) -> list[str]:
+    """H.264 preview transcode for the dashboard HLS player.
+
+    Browsers cannot decode HEVC in HLS.js (or most non-Safari browsers), so we
+    transcode the incoming HEVC SRT feed to H.264 and push it to MediaMTX via
+    RTMP. MediaMTX then serves it as HLS on :8888 under <key>_preview, which is
+    what the Vercel HLS proxy fetches for the dashboard preview player.
+
+    Uses scale_cuda to 720p — the dashboard preview doesn't need full resolution
+    and the lower bitrate reduces NVENC load on the shared GPU.
+    """
+    ingest_key = os.environ.get("SLIMCAST_INGEST_KEY", "live").strip() or "live"
+    return [
+        "ffmpeg", "-hide_banner", "-loglevel", "warning",
+        "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
+        *_input_args(source),
+        "-i", source,
+        "-map", "0:v", "-map", "0:a",
+        "-vf", "scale_cuda=-2:720",
+        "-c:v", "h264_nvenc",
+        "-preset", "p4", "-tune", "hq",
+        "-rc", "cbr", "-b:v", "1500k", "-maxrate", "1500k", "-bufsize", "3000k",
+        "-profile:v", "high", "-g", "60",
+        "-c:a", "aac", "-b:a", "64k", "-ar", "48000", "-ac", "2",
+        "-f", "flv",
+        f"rtmp://127.0.0.1:1935/{ingest_key}_preview",
+    ]
+
+
 def build_passthrough_cmd(out: dict, source: str = LOCAL_SOURCE) -> list[str]:
     """HEVC copy -> HLS PUT to YouTube's HLS ingest URL (no re-encode).
 
@@ -490,6 +519,14 @@ def plan_runners(cfg: dict) -> dict[str, dict]:
             "platforms": [o["name"] for o in portrait],
             "mode": "portrait",
         }
+
+    # Always run a preview transcode so the dashboard HLS player gets H.264
+    # (HEVC is what OBS sends, but browsers can't decode it in HLS.js).
+    plan["preview"] = {
+        "cmd": build_preview_cmd(),
+        "platforms": [],
+        "mode": "preview",
+    }
 
     return plan
 
