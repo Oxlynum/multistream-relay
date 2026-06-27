@@ -349,7 +349,7 @@ def build_group_cmd(
             f"scale={pw}:{ph}"
         )
         cmd += ["-vf", vf]
-    elif max_h <= SOURCE_HEIGHT:
+    elif max_h < SOURCE_HEIGHT:
         # Landscape stays entirely on-GPU: scale_cuda operates on the CUDA surfaces
         # the NVDEC decoder already produced (hwaccel_output_format=cuda). -2 keeps
         # the source aspect ratio with an even width NVENC accepts.
