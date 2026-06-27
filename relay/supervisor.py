@@ -173,18 +173,16 @@ def portrait_crop_rect(crop: dict | None) -> tuple[int, int, int, int]:
 
 def _encode_flags(bv: int, fps: int) -> list[str]:
     """Shared NVENC H.264 quality ladder + AAC audio. Do not degrade these."""
-    bufsize = bv  # 1x bitrate: tight CBR to prevent I-frame bursts saturating TCP
-    gop = fps * 2     # 2-second keyframe interval
+    bufsize = bv * 2  # 2x target: gives NVENC room to allocate bits across scenes
+    gop = fps * 2     # 2-second keyframe interval (platform requirement)
     return [
         "-c:v", "h264_nvenc",
-        # p6 (not p7): near-identical quality at 8 Mbps but ~1.5-2x the encode
-        # throughput, so the two NVENC engines have headroom for both the
-        # landscape and portrait encodes (and multi-user packing later).
-        "-preset", "p6", "-tune", "hq", "-multipass", "fullres",
+        "-preset", "p7", "-tune", "hq", "-multipass", "fullres",
         "-rc", "cbr", "-b:v", f"{bv}k", "-maxrate", f"{bv}k", "-bufsize", f"{bufsize}k",
-        "-profile:v", "high", "-g", str(gop),
-        "-bf", "1", "-b_ref_mode", "middle", "-rc-lookahead", "32",
-        "-spatial-aq", "1", "-temporal-aq", "1", "-aq-strength", "6",
+        "-profile:v", "high", "-g", str(gop), "-forced-idr", "1",
+        "-bf", "2", "-b_ref_mode", "middle", "-rc-lookahead", "32",
+        "-spatial-aq", "1", "-temporal-aq", "1", "-aq-strength", "8",
+        "-weighted_pred", "1",
         "-r", str(fps),
         "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
     ]
