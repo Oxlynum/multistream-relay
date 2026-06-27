@@ -494,7 +494,13 @@ def build_ertmp_cmd(out: dict, source: str = LOCAL_SOURCE) -> list[str]:
         "-c copy -f mpegts pipe:1 "
         "| python3 /app/bpm_inject.py "
         "| ffmpeg -hide_banner -loglevel verbose -i pipe:0 "
-        f"-c copy -f flv -flvflags no_duration_filesize '{ingest_url}'"
+        "-c copy -f flv -flvflags no_duration_filesize "
+        # Declare HEVC in the enhanced-RTMP connect handshake (writes the
+        # `fourCcList` AMF field). Without this ffmpeg connects as LEGACY rtmp and
+        # Twitch drops the HEVC stream ~2s in with no error — the client never
+        # announced enhanced-codec capability at connect time.
+        "-rtmp_enhanced_codecs hvc1 "
+        f"'{ingest_url}'"
     )
     return ["bash", "-c", pipeline]
 
