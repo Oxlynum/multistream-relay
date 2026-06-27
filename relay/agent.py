@@ -315,47 +315,74 @@ def _nvenc_fail_reason(stderr: str) -> str:
 
 
 def _gpu_self_test(attempts: int = 2) -> tuple[bool, str]:
-    """Verify the container can actually open an NVENC session AND decode (NVDEC).
+    """Verify the container can open NVENC and NVDEC for both H.264 and HEVC.
 
-    This is GPU-only, so a host that can't do it would crash-loop the live
-    transcode — we fail fast at boot instead. Two passes (both must succeed):
-      1. H.264 NVENC from lavfi  — encode/session opens at all.
-      2. H.264 NVDEC -> NVENC    — decode + re-encode works.
-    Returns (ok, reason). On failure, `reason` is the real NVENC error — most
-    commonly 'OpenEncodeSessionEx failed: unsupported device', the NVIDIA driver
-    570/580+ NVENC-in-container regression (nvidia-container-toolkit#1249): the GPU
-    is fine but this driver branch can't hand NVENC to the container. No ffmpeg
-    version or in-container tweak fixes it; the cure is a good-driver host, so the
-    broker should cascade. (Historically this was mislabeled CUDA_ERROR_NO_DEVICE.)"""
+    Three passes — all must succeed:
+      1. H.264 NVENC from lavfi        — NVENC session opens at all.
+      2. H.264 NVDEC -> H.264 NVENC    — CUDA decode pipeline works.
+      3. HEVC NVENC from lavfi -> HEVC NVDEC — HEVC decode works (the actual
+         OBS ingest codec). This is the pass that machine 67876 would have
+         failed had we tested it at boot (passed H.264 but died on HEVC NVDEC).
+    Returns (ok, reason). On failure, `reason` is the real error."""
     import tempfile, os as _os
     reason = "(no stderr)"
 
     for i in range(attempts):
-        tmp = tempfile.mktemp(suffix=".h264")
+        h264_tmp = tempfile.mktemp(suffix=".h264")
+        hevc_tmp = tempfile.mktemp(suffix=".hevc")
         try:
+            # Pass 1: H.264 NVENC encode
             enc = subprocess.run([
                 "ffmpeg", "-hide_banner", "-loglevel", "error",
                 "-f", "lavfi", "-i", "color=c=black:s=128x128:r=5:d=0.4",
-                "-c:v", "h264_nvenc", "-f", "h264", tmp,
+                "-c:v", "h264_nvenc", "-f", "h264", h264_tmp,
             ], capture_output=True, text=True, timeout=25)
             if enc.returncode != 0:
                 reason = _nvenc_fail_reason(enc.stderr)
-                log.warning("GPU self-test attempt %d/%d NVENC encode failed (code %d): %s",
+                log.warning("GPU self-test attempt %d/%d H.264 NVENC failed (code %d): %s",
                             i + 1, attempts, enc.returncode, reason)
                 continue
 
+            # Pass 2: H.264 NVDEC -> NVENC (decode pipeline)
             dec = subprocess.run([
                 "ffmpeg", "-hide_banner", "-loglevel", "error",
                 "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
-                "-i", tmp,
+                "-i", h264_tmp,
                 "-c:v", "h264_nvenc", "-f", "null", "-",
             ], capture_output=True, text=True, timeout=25)
-            if dec.returncode == 0:
-                log.info("GPU self-test passed (NVENC + NVDEC both OK).")
+            if dec.returncode != 0:
+                reason = _nvenc_fail_reason(dec.stderr)
+                log.warning("GPU self-test attempt %d/%d H.264 NVDEC failed (code %d): %s",
+                            i + 1, attempts, dec.returncode, reason)
+                continue
+
+            # Pass 3: HEVC NVENC encode then HEVC NVDEC decode.
+            # OBS sends HEVC; this is the codec that can pass NVENC but fail NVDEC
+            # on certain hosts (e.g. machine 67876 — passed H.264 but died on HEVC).
+            hevc_enc = subprocess.run([
+                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                "-f", "lavfi", "-i", "color=c=black:s=128x128:r=5:d=0.4",
+                "-c:v", "hevc_nvenc", "-f", "hevc", hevc_tmp,
+            ], capture_output=True, text=True, timeout=25)
+            if hevc_enc.returncode != 0:
+                reason = _nvenc_fail_reason(hevc_enc.stderr)
+                log.warning("GPU self-test attempt %d/%d HEVC NVENC failed (code %d): %s",
+                            i + 1, attempts, hevc_enc.returncode, reason)
+                continue
+
+            hevc_dec = subprocess.run([
+                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
+                "-c:v", "hevc_cuvid",
+                "-i", hevc_tmp,
+                "-f", "null", "-",
+            ], capture_output=True, text=True, timeout=25)
+            if hevc_dec.returncode == 0:
+                log.info("GPU self-test passed (H.264 NVENC + NVDEC + HEVC NVENC + NVDEC all OK).")
                 return True, ""
-            reason = _nvenc_fail_reason(dec.stderr)
-            log.warning("GPU self-test attempt %d/%d NVDEC failed (code %d): %s",
-                        i + 1, attempts, dec.returncode, reason)
+            reason = _nvenc_fail_reason(hevc_dec.stderr)
+            log.warning("GPU self-test attempt %d/%d HEVC NVDEC failed (code %d): %s",
+                        i + 1, attempts, hevc_dec.returncode, reason)
         except subprocess.TimeoutExpired:
             log.warning("GPU self-test attempt %d/%d timed out.", i + 1, attempts)
             reason = "ffmpeg timed out"
@@ -363,10 +390,11 @@ def _gpu_self_test(attempts: int = 2) -> tuple[bool, str]:
             log.warning("GPU self-test attempt %d/%d error: %s", i + 1, attempts, exc)
             reason = str(exc)
         finally:
-            try:
-                _os.unlink(tmp)
-            except FileNotFoundError:
-                pass
+            for f in (h264_tmp, hevc_tmp):
+                try:
+                    _os.unlink(f)
+                except FileNotFoundError:
+                    pass
         if i + 1 < attempts:
             time.sleep(3)
     return False, reason
@@ -413,16 +441,8 @@ def main() -> None:
     if not ok:
         drv = _driver_version()
         low = reason.lower()
-        if "unsupported device" in low or "no capable devices" in low:
-            log.error("NVENC UNUSABLE on this host (driver %s): %s. This is the NVIDIA "
-                      "driver 570/580+ NVENC-in-container regression "
-                      "(nvidia-container-toolkit#1249) — the GPU is fine, but this driver "
-                      "branch can't hand NVENC to the container, and no ffmpeg version or "
-                      "in-container fix resolves it. Halting boot so the broker cascades to "
-                      "a good-driver host; not starting MediaMTX.", drv, reason)
-        else:
-            log.error("GPU self-test FAILED (driver %s): %s. Halting boot so the broker "
-                      "cascades to another machine; not starting MediaMTX.", drv, reason)
+        log.error("GPU self-test FAILED (driver %s): %s. Halting boot so the broker "
+                  "cascades to another machine; not starting MediaMTX.", drv, reason)
         # v2 broker: report failure immediately so the cloud abandons this host in
         # ~1s (instead of waiting out the 60–180s probe timeout). The cloud will
         # kick the next race round if all racers fail. v1 broker: the endpoint
