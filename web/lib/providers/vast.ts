@@ -73,25 +73,32 @@ interface VastOffer {
   gpu_frac: number
 }
 
-// Two independent NVENC failure modes, both hard-rejected:
+// Fractional GPU sharing rules (2026-06-27):
 //
-// 1. Fractional GPU (gpu_frac < 1.0): Vast's container runtime doesn't reliably inject
-//    the GPU device node into containers sharing a GPU. Fails with CUDA_ERROR_NO_DEVICE
-//    regardless of driver version or GPU architecture. Fixed by requiring gpu_frac >= 1.0.
+// Consumer GPUs (RTX/GTX) use CUDA MPS time-slicing for fractional sharing. On Vast,
+// this fails to properly inject the GPU device into the container (CUDA_ERROR_NO_DEVICE)
+// regardless of driver version. Empirically confirmed on Turing+Ampere across drivers
+// 550/570/580. Require gpu_frac >= 1.0 for consumer cards.
 //
-// 2. Ada/Blackwell (compute_cap >= 890) on driver >= 570: NVENC OpenEncodeSessionEx fails
-//    with "unsupported device" inside the container even on a whole dedicated GPU.
-//    Confirmed on RTX 5090 (Blackwell, drv 595, frac=1.0) 2026-06-27. The GPU is fine;
-//    it's a driver/container-toolkit interaction issue specific to these newer architectures.
-//    Turing/Ampere (compute_cap 750-860) on any driver are unaffected.
-const REGRESSED_DRIVER_MAJOR = 570
-const REGRESSED_MIN_COMPUTE_CAP = 890   // Ada Lovelace and newer
-function driverMajor(v: string | null): number {
-  const m = (v ?? '').match(/^(\d+)/)
-  return m ? parseInt(m[1], 10) : 0
-}
-function isNvencRegressed(o: VastOffer): boolean {
-  return o.compute_cap >= REGRESSED_MIN_COMPUTE_CAP && driverMajor(o.driver_version) >= REGRESSED_DRIVER_MAJOR
+// Data center GPUs (A100, H100, L40, A10, etc.) use hardware MIG partitioning —
+// a true hardware partition that injects the device correctly into each container
+// AND carries no NVENC session cap. Fractional MIG instances are reliable.
+//
+// Driver ≥570 NVENC regression (confirmed real but dropped as a hard filter):
+// On multi-GPU hosts, driver ≥570 breaks NVENC for all-but-the-last-enumerated GPU.
+// This is a container-toolkit bug NOT specific to Ada/Blackwell (our earlier assumption
+// was too narrow). However, the boot self-test in agent.py catches it in ~30s and
+// calls /api/agent/failed, so the broker cascades quickly. Hard-filtering would
+// shrink the pool without meaningfully speeding up provision; the self-test is the gate.
+function isDataCenterGpu(name: string): boolean {
+  const n = name.toLowerCase()
+  return (
+    /\ba100\b/.test(n) || /\bh100\b/.test(n) || /\bh200\b/.test(n) ||
+    /\bv100\b/.test(n) || /\bl40s?\b/.test(n) || /\bl4\b/.test(n)  ||
+    /\ba10\b/.test(n)  || /\ba40\b/.test(n)  || /\ba30\b/.test(n)  ||
+    n.includes('a6000') || n.includes('a5000') || n.includes('a4000') ||
+    n.includes('tesla') || n.includes('quadro')
+  )
 }
 
 // Some Vast hosts attach the GPU at the host level (it shows in Vast's own
@@ -219,9 +226,11 @@ export const vastProvider: GpuProvider = {
       o.direct_port_count >= MIN_DIRECT_PORTS &&
       (o.internet_up_cost_per_tb ?? 0) <= MAX_EGRESS_COST_PER_TB &&  // reject bandwidth gougers
       allInPricePerHr(o) <= maxPricePerHr &&                          // all-in, not just GPU
-      !MACHINE_DENYLIST.has(o.machine_id) &&                          // skip known GPU-blind hosts (by machine)
-      (o.gpu_frac ?? 1) >= 1.0 &&                                    // whole GPU only — fractional shares fail CUDA_ERROR_NO_DEVICE
-      !isNvencRegressed(o) &&                                        // Ada/Blackwell + driver ≥570 fails NVENC in container
+      !MACHINE_DENYLIST.has(o.machine_id) &&
+      // Data center GPUs (A100/H100/L40/etc.) support hardware MIG — fractional OK.
+      // Consumer GPUs (RTX/GTX) use MPS time-slicing which fails CUDA device injection
+      // on Vast at gpu_frac < 1.0. Driver ≥570 NVENC regression is caught by self-test.
+      (isDataCenterGpu(o.gpu_name) || (o.gpu_frac ?? 1) >= 1.0) &&
       !!o.public_ipaddr,
     )
     if (usable.length === 0) return []
