@@ -167,7 +167,9 @@ export async function GET(request: Request) {
         reason = 'scale_to_zero'        // empty past grace (heartbeat path should've caught it)
       }
       if (reason) {
-        await teardownHub(hub.id, `reaper:${reason}`)
+        // scale_to_zero uses the drain-barrier CAS (abort if a tenant raced in);
+        // spawn_timeout/stale_hub destroy unconditionally (the box is dead).
+        await teardownHub(hub.id, `reaper:${reason}`, { onlyIfEmpty: reason === 'scale_to_zero' })
         reapedHubs.push({ hub_id: hub.id, reason })
       }
     }
@@ -180,14 +182,21 @@ export async function GET(request: Request) {
   // now for Hetzner. listInstances is label-filtered (managed-by=slimcast).
   const orphanHubs: string[] = []
   try {
-    const { data: hubRows } = await supabase.from('vps_hubs').select('provider_id')
+    const { data: hubRows } = await supabase.from('vps_hubs').select('id, provider_id')
     const knownHubIds = new Set((hubRows ?? []).map(h => h.provider_id).filter(Boolean))
+    // Also guard the spawn→persist window: a freshly-created box is named
+    // slimcast-hub-<region>-<hubId8> and its vps_hubs row exists with provider_id
+    // still NULL for a moment. Match the hubId8 in the name so we don't kill it
+    // (mirrors the GPU knownUserPrefixes guard) (review #14).
+    const knownHubPrefixes = new Set((hubRows ?? []).map(h => (h.id as string | null)?.slice(0, 8)).filter(Boolean))
     for (const provider of ACTIVE_VPS_PROVIDERS) {
       let live: Array<{ id: string; name: string }>
       try { live = await provider.listInstances() } catch (e) { console.error(`[reaper] ${provider.name} listInstances failed:`, e); continue }
       for (const box of live) {
         if (!box.name?.startsWith('slimcast-hub-')) continue
         if (knownHubIds.has(box.id)) continue
+        const namePrefix = box.name.split('-').pop()   // hubId8 tail of slimcast-hub-<region>-<hubId8>
+        if (namePrefix && knownHubPrefixes.has(namePrefix)) continue   // mid-spawn, row exists
         try {
           // destroy(id) without primaryIpId → hetzner.destroy() looks it up and
           // releases the IP only if already unassigned (auto_delete handles the rest).

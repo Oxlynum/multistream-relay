@@ -15,13 +15,19 @@ import type { RacerEntry } from '@/lib/gpu-broker'
 export async function teardownInstance(userId: string, reason: string): Promise<boolean> {
   const supabase = createServerClient()
 
+  // Atomically CLAIM the teardown by DELETING the session row and reading it back.
+  // The delete is the gate: only the caller that actually removed the row proceeds,
+  // so the hub refcount decrement below runs EXACTLY ONCE even under concurrent
+  // teardown triggers (Clock A / manual stop / agent terminate / reaper). A losing
+  // concurrent caller's delete returns no row → bail (idempotent). (review #1/#6/#8)
   const { data: instance } = await supabase
     .from('gpu_instances')
-    .select('provider_id, pod_key_hash, provider, session_id, racers, vps_hub_id')
+    .delete()
     .eq('user_id', userId)
+    .select('provider_id, pod_key_hash, provider, session_id, racers, vps_hub_id')
     .maybeSingle()
 
-  if (!instance) return false
+  if (!instance) return false   // already torn down by a concurrent caller
 
   // Close any session still open on this pod.
   if (instance.session_id) {
@@ -33,8 +39,8 @@ export async function teardownInstance(userId: string, reason: string): Promise<
   }
 
   if (instance.vps_hub_id) {
-    // Clock A: shared-hub tenant — logical detach only. Decrement the refcount so
-    // scale-to-zero can eventually fire; do NOT destroy the box.
+    // Clock A: shared-hub tenant — logical detach only. We won the delete above, so
+    // this decrement is exactly-once. NEVER destroys the box (reaper Clock B does).
     await supabase.rpc('detach_from_hub', { p_hub_id: instance.vps_hub_id })
   } else {
     // Legacy GPU pod path: destroy the pod + any racers.
@@ -67,8 +73,6 @@ export async function teardownInstance(userId: string, reason: string): Promise<
     await supabase.from('agent_api_keys').delete().eq('key_hash', instance.pod_key_hash)
   }
 
-  await supabase.from('gpu_instances').delete().eq('user_id', userId)
-
   console.log(`[teardown] destroyed ${instance.vps_hub_id ? 'hub-session' : 'pod'} for ${userId}: ${reason}`)
   return true
 }
@@ -77,15 +81,21 @@ export async function teardownInstance(userId: string, reason: string): Promise<
 // revoke its key, and error-out any tenants still pointed at it. Called by the
 // reaper (scale-to-zero / stale / never-paired) and by /api/agent/failed when a hub
 // reports a fatal startup error. Idempotent + best-effort.
-export async function teardownHub(hubId: string, reason: string): Promise<void> {
+export async function teardownHub(hubId: string, reason: string, opts?: { onlyIfEmpty?: boolean }): Promise<void> {
   const supabase = createServerClient()
 
-  const { data: hub } = await supabase
-    .from('vps_hubs')
+  // Atomic CLAIM (drain barrier): flip status→'ended' so no new attach can select
+  // this hub (attach considers only live|spawning) and concurrent teardowns don't
+  // double-run. For scale-to-zero callers (onlyIfEmpty), ALSO require
+  // session_count=0 — if a tenant raced in (incrementing to 1) the claim matches 0
+  // rows and we abort, so we never destroy a box a tenant just joined. attach's
+  // FOR UPDATE SKIP LOCKED + this UPDATE serialize on the row (review #4/#10/#15/#16).
+  let claim = supabase.from('vps_hubs').update({ status: 'ended' }).eq('id', hubId).neq('status', 'ended')
+  if (opts?.onlyIfEmpty) claim = claim.eq('session_count', 0)
+  const { data: hub } = await claim
     .select('provider, provider_id, primary_ip_id, hub_key_hash')
-    .eq('id', hubId)
     .maybeSingle()
-  if (!hub) return
+  if (!hub) return   // already ended, or (onlyIfEmpty) a tenant raced in — leave it live
 
   // Any tenants still attached lose their stream with the box → error them + unlink
   // (a restart re-provisions onto a fresh hub).
@@ -126,11 +136,15 @@ export async function sweepStalePods(): Promise<void> {
   const supabase = createServerClient()
   const { data } = await supabase
     .from('gpu_instances')
-    .select('user_id, last_seen_at, created_at, idle_since, streaming')
+    .select('user_id, last_seen_at, created_at, idle_since, streaming, vps_hub_id')
     .neq('status', 'stopped')
 
   const now = Date.now()
   for (const inst of data ?? []) {
+    // VPS hub tenants are governed by the hub clocks (Clock A heartbeat / Clock B
+    // teardownHub), NOT these per-pod staleness rules — a still-booting hub session
+    // is legitimately unpaired. Mirror the cron reaper's guard (review #2/#7).
+    if (inst.vps_hub_id) continue
     const lastSeen  = inst.last_seen_at ? new Date(inst.last_seen_at).getTime() : null
     const createdAt = inst.created_at   ? new Date(inst.created_at).getTime()   : now
     const idleSince = inst.idle_since   ? new Date(inst.idle_since).getTime()   : null

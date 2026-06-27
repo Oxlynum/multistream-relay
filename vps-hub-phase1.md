@@ -13,6 +13,23 @@
 - **Billing deactivated** globally via `SLIMCAST_BILLING_ACTIVE` (default off). Before launch: the billing
   overhaul re-enables it (see vps-hub-plan.md §7).
 
+## Known Phase-1 limitations (deferred, documented)
+- **Mid-session transcode add on a hub tenant is silently dropped** (review #12). If a tenant who
+  provisioned passthrough-only later enables a transcode platform (Kick/TikTok) or flips YouTube/Twitch
+  to portrait, `hub-config` (buildVpsConfig filters to passthrough/ertmp) drops that output — the hub has
+  no GPU to encode it, and there's no error surfaced. Can't occur in the YouTube-only live test, and the
+  flag gates everyone else. **Proper fix = Phase 2** (the GPU bridge brings a "tenant gained a transcode
+  output → migrate to a GPU pod" path). Until then, treat hub tenants as passthrough-fixed for their session.
+
+## Adversarial review (2026-06-28) — FIXED
+A find→verify review pass confirmed 19 issues (9 high). Fixed before the relay/live test:
+non-atomic detach double-decrement (delete-is-the-gate), `sweepStalePods` missing the hub guard,
+`empty_since` not set at spawn, scale-to-zero TOCTOU (teardownHub drain-barrier CAS + `onlyIfEmpty`),
+stuck-'spawning' region poisoning (attach age guard + inline reclaim) + dead-but-live attach (attach
+liveness guard), `PROVISION_LOCK` < boot window (hub-aware reclaim guard), `/status` self-heal promotion,
+orphan-reconcile spawn-window guard, `vps_hub_id` client-write lockdown, `/api/gpu/stop` hub-aware.
+Migration `20260628000005`. #12 deferred (above).
+
 ## Resolved decisions (Phase 1)
 - **Data model:** NEW shared `vps_hubs` table + `gpu_instances.vps_hub_id` FK. `relay_nodes`
   (Phase 0) is per-session → reserved for the Phase-2 GPU backend, NOT used for the shared hub.

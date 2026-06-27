@@ -16,7 +16,8 @@ import { generateApiKey, hashApiKey } from '@/lib/agent-auth'
 import { getVpsProvider, ACTIVE_VPS_PROVIDERS } from '@/lib/providers'
 import { buildCloudInit } from '@/lib/cloud-init'
 import { haversineKm } from '@/lib/gpu-broker'
-import { VPS_PRICE_CEILING, HUB_MAX_SESSIONS } from '@/lib/datacenters'
+import { teardownHub } from '@/lib/pod-teardown'
+import { VPS_PRICE_CEILING, HUB_MAX_SESSIONS, VPS_READINESS_TIMEOUT_MS } from '@/lib/datacenters'
 import type { VpsCandidate } from '@/lib/providers/types'
 
 type Supa = ReturnType<typeof createServerClient>
@@ -109,7 +110,7 @@ async function attach(supabase: Supa, userId: string, region: string): Promise<A
 async function spawnHub(args: {
   supabase: Supa; userId: string; region: string; candidate: VpsCandidate
   imageTag: string; callbackUrl: string; lat: number; lon: number
-}): Promise<{ ok: true } | { ok: false; contended: boolean; error?: string }> {
+}): Promise<{ ok: true; hubId: string } | { ok: false; contended: boolean; error?: string }> {
   const { supabase, userId, region, candidate, imageTag, callbackUrl, lat, lon } = args
 
   const hubKeyRaw = generateApiKey()
@@ -129,6 +130,10 @@ async function spawnHub(args: {
       status: 'spawning',
       max_sessions: HUB_MAX_SESSIONS,
       session_count: 0,
+      // Start the scale-to-zero clock at spawn so a hub that boots but never gets a
+      // tenant (e.g. a failed post-spawn attach) is still reaped — attach clears it
+      // on the first tenant (review #3/#11).
+      empty_since: new Date().toISOString(),
       hub_key_hash: hubKeyHash,
       srt_passphrase: srtPassphrase,
       panel_password: panelPassword,
@@ -191,7 +196,24 @@ async function spawnHub(args: {
   }).eq('id', hubId)
 
   console.log(`[vps-broker] spawned hub ${hubId} (${candidate.label}) server=${created.vpsId} ip=${created.ip}`)
-  return { ok: true }
+  return { ok: true, hubId }
+}
+
+// Reclaim hubs stuck in 'spawning' past the boot window (inserted the spawn-lock row
+// but never POSTed /ready or /failed — e.g. a cloud-init image-pull failure). They'd
+// otherwise hold the per-region spawn lock AND be excluded from attach (age guard),
+// wedging the region until the daily cron. teardownHub destroys the box + frees the
+// lock. Runs on every provision so the region self-heals promptly (review #5).
+async function reclaimStuckSpawningHubs(supabase: Supa): Promise<void> {
+  const cutoff = new Date(Date.now() - VPS_READINESS_TIMEOUT_MS).toISOString()
+  const { data: stuck } = await supabase
+    .from('vps_hubs')
+    .select('id')
+    .eq('status', 'spawning')
+    .lt('created_at', cutoff)
+  for (const s of stuck ?? []) {
+    await teardownHub(s.id as string, 'stuck_spawning')
+  }
 }
 
 /**
@@ -201,6 +223,9 @@ async function spawnHub(args: {
  */
 export async function acquireHubOrSpawn(args: AcquireHubArgs): Promise<AcquireHubResult> {
   const { userId, lat, lon, imageTag, callbackUrl, supabase } = args
+
+  // Clear any wedged 'spawning' hubs first so a stuck box can't block this region.
+  await reclaimStuckSpawningHubs(supabase)
 
   const candidates = await rankCandidates(lat, lon)
   if (candidates.length === 0) return { ok: false, error: 'no VPS capacity available' }
@@ -227,5 +252,11 @@ export async function acquireHubOrSpawn(args: AcquireHubArgs): Promise<AcquireHu
   // now exists in the nearest region → attach this session to it.
   const joined = await attach(supabase, userId, nearestRegion)
   if (joined) return { ...joined, attached: spawn.ok ? false : true }
+
+  // Attach failed right after WE spawned the box → tear it down now so it doesn't
+  // leak (scale-to-zero would also catch it via empty_since, but this is prompt).
+  if (spawn.ok) {
+    await teardownHub(spawn.hubId, 'attach_failed_after_spawn')
+  }
   return { ok: false, error: 'no hub available after spawn' }
 }

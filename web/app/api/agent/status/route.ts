@@ -50,6 +50,13 @@ async function handleVpsStatus(request: NextRequest, hubId: string): Promise<Res
   }
   await supabase.from('vps_hubs').update(hubUpdate).eq('id', hubId)
 
+  // The hub is heartbeating → it's live. Promote any tenant still 'provisioning'
+  // (attached while the hub was spawning). This self-heals a lost/partial /ready,
+  // which is otherwise the ONLY promoter (review #13).
+  await supabase.from('gpu_instances')
+    .update({ status: 'running', phase: 'ready' })
+    .eq('vps_hub_id', hubId).eq('status', 'provisioning')
+
   const reported = body.streams ?? []
   const { data: sessions } = await supabase
     .from('gpu_instances')
@@ -89,7 +96,8 @@ async function handleVpsStatus(request: NextRequest, hubId: string): Promise<Res
     (now - new Date(hubNow.empty_since).getTime()) > HUB_IDLE_GRACE_MS
   ) {
     console.log(`[agent/status] hub ${hubId} empty past grace — scale-to-zero`)
-    await teardownHub(hubId, 'scale_to_zero')
+    // onlyIfEmpty: atomic drain barrier — aborts if a tenant raced in (review #4/#15).
+    await teardownHub(hubId, 'scale_to_zero', { onlyIfEmpty: true })
     return Response.json({ command: 'stop', reason: 'scale_to_zero' })
   }
 

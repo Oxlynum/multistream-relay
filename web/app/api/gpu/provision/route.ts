@@ -5,7 +5,7 @@ import { acquireHubOrSpawn } from '@/lib/vps-broker'
 import { classifyMode, needsTranscode } from '@/lib/agent-config'
 import { teardownInstance, sweepStalePods } from '@/lib/pod-teardown'
 import { checkRateLimit } from '@/lib/rate-limit'
-import { FALLBACK_LAT, FALLBACK_LON } from '@/lib/datacenters'
+import { FALLBACK_LAT, FALLBACK_LON, VPS_READINESS_TIMEOUT_MS } from '@/lib/datacenters'
 
 // Vercel function timeout. v1 path: may cascade through several Vast candidates.
 // v2 path: returns in ~5s (just creates N pods and returns); 300s is defensive.
@@ -91,7 +91,7 @@ export async function POST(request: Request) {
   // ── Atomic provisioning claim ──────────────────────────────────────────
   const { data: existing } = await supabase
     .from('gpu_instances')
-    .select('status, phase, last_seen_at, created_at')
+    .select('status, phase, last_seen_at, created_at, vps_hub_id')
     .eq('user_id', userId)
     .maybeSingle()
 
@@ -102,10 +102,15 @@ export async function POST(request: Request) {
     if (existing.status === 'running' && fresh) {
       return Response.json({ error: 'Streaming server is already running' }, { status: 409 })
     }
+    // A VPS-hub tenant stays 'provisioning' until its hub POSTs /ready — up to the
+    // hub boot window (5m), longer than a GPU pod's 3m lock. Use the wider window so
+    // a re-provision during a normal slow first boot doesn't reclaim the in-flight
+    // tenant (which would rotate its streamid mid-boot) (review #9).
+    const lockWindow = existing.vps_hub_id ? VPS_READINESS_TIMEOUT_MS : PROVISION_LOCK_MS
     const provisioningRecently =
       (existing.status === 'provisioning' || existing.phase === 'racing' || existing.phase === 'requested') &&
       existing.created_at &&
-      Date.now() - new Date(existing.created_at).getTime() < PROVISION_LOCK_MS
+      Date.now() - new Date(existing.created_at).getTime() < lockWindow
     if (provisioningRecently) {
       return Response.json({ error: 'Streaming server is already starting' }, { status: 409 })
     }
