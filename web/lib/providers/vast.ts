@@ -73,11 +73,26 @@ interface VastOffer {
   gpu_frac: number
 }
 
-// Driver version filtering was removed (2026-06-27): empirically the NVENC-in-container
-// failure correlates with fractional GPU sharing (gpu_frac < 1.0), not driver version.
-// Whole-GPU (gpu_frac=1.0) hosts work correctly regardless of driver branch. The pod
-// boot self-test (NVENC + HEVC NVDEC) is the hard gate — bad hosts self-report via
-// /api/agent/failed and the broker cascades immediately.
+// Two independent NVENC failure modes, both hard-rejected:
+//
+// 1. Fractional GPU (gpu_frac < 1.0): Vast's container runtime doesn't reliably inject
+//    the GPU device node into containers sharing a GPU. Fails with CUDA_ERROR_NO_DEVICE
+//    regardless of driver version or GPU architecture. Fixed by requiring gpu_frac >= 1.0.
+//
+// 2. Ada/Blackwell (compute_cap >= 890) on driver >= 570: NVENC OpenEncodeSessionEx fails
+//    with "unsupported device" inside the container even on a whole dedicated GPU.
+//    Confirmed on RTX 5090 (Blackwell, drv 595, frac=1.0) 2026-06-27. The GPU is fine;
+//    it's a driver/container-toolkit interaction issue specific to these newer architectures.
+//    Turing/Ampere (compute_cap 750-860) on any driver are unaffected.
+const REGRESSED_DRIVER_MAJOR = 570
+const REGRESSED_MIN_COMPUTE_CAP = 890   // Ada Lovelace and newer
+function driverMajor(v: string | null): number {
+  const m = (v ?? '').match(/^(\d+)/)
+  return m ? parseInt(m[1], 10) : 0
+}
+function isNvencRegressed(o: VastOffer): boolean {
+  return o.compute_cap >= REGRESSED_MIN_COMPUTE_CAP && driverMajor(o.driver_version) >= REGRESSED_DRIVER_MAJOR
+}
 
 // Some Vast hosts attach the GPU at the host level (it shows in Vast's own
 // monitoring) but never inject the device into the container: the driver
@@ -203,7 +218,8 @@ export const vastProvider: GpuProvider = {
       (o.internet_up_cost_per_tb ?? 0) <= MAX_EGRESS_COST_PER_TB &&  // reject bandwidth gougers
       allInPricePerHr(o) <= maxPricePerHr &&                          // all-in, not just GPU
       !MACHINE_DENYLIST.has(o.machine_id) &&                          // skip known GPU-blind hosts (by machine)
-      (o.gpu_frac ?? 1) >= 1.0 &&                                    // whole GPU only — fractional shares fail CUDA_ERROR_NO_DEVICE regardless of driver
+      (o.gpu_frac ?? 1) >= 1.0 &&                                    // whole GPU only — fractional shares fail CUDA_ERROR_NO_DEVICE
+      !isNvencRegressed(o) &&                                        // Ada/Blackwell + driver ≥570 fails NVENC in container
       !!o.public_ipaddr,
     )
     if (usable.length === 0) return []
