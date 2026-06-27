@@ -324,9 +324,20 @@ export async function startProvisionRace(args: RaceArgs): Promise<RaceResult> {
     return { started: false, racerCount: 0, error: 'no SRT-capable host available' }
   }
 
+  // Deduplicate by physical host so two racers never share the same machine.
+  // One broken host shouldn't consume both race slots.
+  const seenHostIds = new Set<number>()
+  const dedupedCandidates = candidates.filter(({ c }) => {
+    const hostId = typeof c.placement.hostId === 'number' ? c.placement.hostId : null
+    if (hostId === null) return true
+    if (seenHostIds.has(hostId)) return false
+    seenHostIds.add(hostId)
+    return true
+  })
+
   const providerByName = new Map(ACTIVE_PROVIDERS.map(p => [p.name, p]))
   // Slice out candidates already tried in prior rounds.
-  const eligible = candidates.slice(skipN, skipN + racersN)
+  const eligible = dedupedCandidates.slice(skipN, skipN + racersN)
   if (eligible.length === 0) {
     return { started: false, racerCount: 0, error: 'no untried candidates remaining' }
   }

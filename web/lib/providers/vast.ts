@@ -57,6 +57,7 @@ function allInPricePerHr(o: VastOffer): number {
 interface VastOffer {
   id: number
   machine_id: number
+  host_id: number
   gpu_name: string
   compute_cap: number
   dph_total: number
@@ -69,6 +70,7 @@ interface VastOffer {
   public_ipaddr: string | null
   geolocation: string | null
   driver_version: string | null
+  gpu_frac: number
 }
 
 // NVENC-in-container driver regression (verified 2026-06-26 against the live fleet
@@ -84,12 +86,11 @@ interface VastOffer {
 // an older host driver, which we don't control. So we DEMOTE the affected combo in
 // ranking (not a denylist — the GPU stays eligible; good-driver hosts just win), and
 // the pod boot self-test remains the hard gate that cascades past any that slip by.
-// Empirically the failure population is exactly: Ada/Blackwell (compute_cap ≥ 890)
-// on driver major ≥ 570. Turing/Ampere and any GPU on driver ≤ ~565 encode fine
-// (incl. an Ada L40S on 565). RunPod's 4090s worked because RunPod runs older,
+// Empirically the failure population is exactly: any multi-GPU host (gpu_frac < 1.0)
+// running driver major >= 570. Turing/Ampere/Ada/Blackwell and any GPU on driver <= ~565
+// encode fine (incl. an Ada L40S on 565). RunPod's 4090s worked because RunPod runs older,
 // curated datacenter drivers — same silicon, good driver branch.
 const REGRESSED_DRIVER_MAJOR = 570
-const REGRESSION_MIN_COMPUTE_CAP = 890
 function driverMajor(v: string | null): number {
   const m = (v ?? '').match(/^(\d+)/)
   return m ? parseInt(m[1], 10) : 0
@@ -97,7 +98,11 @@ function driverMajor(v: string | null): number {
 // Soft tier: 1 = likely-broken NVENC-in-container (sorted last), 0 = preferred.
 function nvencPreferenceTier(o: VastOffer): number {
   const major = driverMajor(o.driver_version)
-  return o.compute_cap >= REGRESSION_MIN_COMPUTE_CAP && major >= REGRESSED_DRIVER_MAJOR ? 1 : 0
+  // The NVENC-in-container regression affects multi-GPU hosts (gpu_frac < 1.0)
+  // running driver branch 570.x/580.x+. This applies to all NVENC GPUs (Turing,
+  // Ampere, Ada, Blackwell, etc.) since the driver/container interaction is broken.
+  const isMultiGpu = (o.gpu_frac ?? 1) < 1.0
+  return isMultiGpu && major >= REGRESSED_DRIVER_MAJOR ? 1 : 0
 }
 
 // Some Vast hosts attach the GPU at the host level (it shows in Vast's own
@@ -128,6 +133,8 @@ function nvencPreferenceTier(o: VastOffer): number {
 const MACHINE_DENYLIST = new Set<number>([
   78446,
   67876,
+  46001, // RTX 2080 Ti (2026-06-26 NVENC failed)
+  11424, // RTX 3090 (2026-06-26 NVENC regression 570+)
   ...(process.env.VAST_MACHINE_DENYLIST ?? '')
     .split(',').map(s => parseInt(s.trim(), 10)).filter(Number.isFinite),
 ])
@@ -222,6 +229,7 @@ export const vastProvider: GpuProvider = {
       (o.internet_up_cost_per_tb ?? 0) <= MAX_EGRESS_COST_PER_TB &&  // reject bandwidth gougers
       allInPricePerHr(o) <= maxPricePerHr &&                          // all-in, not just GPU
       !MACHINE_DENYLIST.has(o.machine_id) &&                          // skip known GPU-blind hosts (by machine)
+      nvencPreferenceTier(o) === 0 &&                                 // Hard-reject driver 570+ regression
       !!o.public_ipaddr,
     )
     if (usable.length === 0) return []
@@ -247,6 +255,7 @@ export const vastProvider: GpuProvider = {
         placement: {
           offerId: o.id,
           machineId: o.machine_id,
+          hostId: o.host_id,
           gpuRateUsd: o.dph_total,
           egressUsdPerTb: o.internet_up_cost_per_tb ?? 0,
           ingressUsdPerTb: o.internet_down_cost_per_tb ?? 0,

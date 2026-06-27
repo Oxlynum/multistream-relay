@@ -40,7 +40,7 @@ export async function teardownInstance(userId: string, reason: string): Promise<
   // above; here we destroy any losers/booting racers still tracked in the array.
   const racers = (instance.racers ?? []) as RacerEntry[]
   for (const racer of racers) {
-    if (racer.provider_id && racer.provider_id !== instance.provider_id && racer.state !== 'failed') {
+    if (racer.provider_id && racer.provider_id !== instance.provider_id) {
       try {
         await getProvider(racer.provider).destroy(racer.provider_id)
       } catch {

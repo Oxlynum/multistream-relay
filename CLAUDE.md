@@ -12,6 +12,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | `supabase` | DB migrations, inspect tables, run SQL (`supabase db diff`, `supabase migration new`, `supabase db push`) |
 | `vercel` | Deploy, logs, env vars (`vercel logs --environment=production --since=10m -x`, `vercel env pull`, `vercel --prod`) |
 
+**Per-directory credential isolation (direnv):** CLI credentials auto-load when you `cd` into this directory — no `vercel logout/login`, `gh auth switch`, or `supabase login` needed. Tokens live in `.envrc` (gitignored). Linked accounts: GitHub `Oxlynum`, Vercel `oxlynum-5723`, Supabase `Oxlynum's Org`. To set this up in another project directory, tell the model: *"set up per-directory credential isolation with direnv"*.
+
 **Debug flow for a crashing pod:** `vastai show instances-v1 --raw` → `vastai logs <id> --tail 100`. The debug panel on `:8080` shows live FFmpeg stderr (uvicorn runs in-process with agent.py since 2026-06-26).
 
 **Diagnosing on a live Vast pod (hard-won, 2026-06-26):**

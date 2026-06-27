@@ -2,6 +2,7 @@ import type { NextRequest } from 'next/server'
 import { authenticateAgent, generateApiKey, hashApiKey } from '@/lib/agent-auth'
 import { createServerClient } from '@/lib/supabase'
 import { startProvisionRace, type RacerEntry } from '@/lib/gpu-broker'
+import { getProvider } from '@/lib/providers'
 
 // Pod self-reports that it cannot serve (GPU self-test failed or fatal boot error).
 //
@@ -56,6 +57,19 @@ export async function POST(request: NextRequest) {
   await supabase.from('gpu_instances')
     .update({ racers: updated })
     .eq('user_id', userId)
+
+  // Explicitly destroy the failing pod so it doesn't get caught in a Vast auto-restart loop
+  if (callerProviderId) {
+    const callerProvider = racers.find(r => r.provider_id === callerProviderId)?.provider
+    if (callerProvider) {
+      try {
+        await getProvider(callerProvider).destroy(callerProviderId)
+        console.log(`[agent/failed] destroyed failed pod ${callerProviderId}`)
+      } catch (e) {
+        console.error(`[agent/failed] failed to destroy ${callerProviderId}:`, e)
+      }
+    }
+  }
 
   // Optionally add to the machine denylist via env for future provisions.
   // (No DB write for this yet — log is enough for now; operator can add to
