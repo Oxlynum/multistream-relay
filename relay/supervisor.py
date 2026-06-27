@@ -173,7 +173,7 @@ def portrait_crop_rect(crop: dict | None) -> tuple[int, int, int, int]:
 
 def _encode_flags(bv: int, fps: int) -> list[str]:
     """Shared NVENC H.264 quality ladder + AAC audio. Do not degrade these."""
-    bufsize = bv * 2  # 2x bitrate: headroom for complexity/explosion spikes
+    bufsize = bv  # 1x bitrate: tight CBR to prevent I-frame bursts saturating TCP
     gop = fps * 2     # 2-second keyframe interval
     return [
         "-c:v", "h264_nvenc",
