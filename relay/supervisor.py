@@ -179,7 +179,7 @@ def _encode_flags(bv: int, fps: int) -> list[str]:
         "-c:v", "h264_nvenc",
         "-preset", "p7", "-tune", "hq", "-multipass", "fullres",
         "-rc", "cbr", "-b:v", f"{bv}k", "-maxrate", f"{bv}k", "-bufsize", f"{bufsize}k",
-        "-profile:v", "high", "-g", str(gop),
+        "-profile:v", "high", "-g", str(gop), "-forced-idr", "1",
         "-bf", "2", "-b_ref_mode", "middle", "-rc-lookahead", "32",
         "-spatial-aq", "1", "-temporal-aq", "1", "-aq-strength", "8",
         "-r", str(fps),
