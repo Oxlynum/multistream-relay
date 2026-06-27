@@ -1,5 +1,7 @@
 import { createServerClient } from '@/lib/supabase'
 import { authenticateUserOrAgent } from '@/lib/agent-auth'
+import { decryptSecret } from '@/lib/crypto'
+import { checkTwitchHevcEligibility } from '@/lib/twitch-eligibility'
 
 export async function DELETE(
   request: Request,
@@ -41,6 +43,32 @@ export async function PATCH(
   const { platform } = await params
   const body = await request.json().catch(() => ({}))
 
+  // Twitch-only: re-probe HEVC/Enhanced-Broadcasting eligibility without re-entering
+  // the key (e.g. after the user becomes an Affiliate). Decrypts the stored key,
+  // asks Twitch, and updates the eligibility columns.
+  if (platform === 'twitch' && body.recheck_eligibility === true) {
+    const { data: row } = await supabase
+      .from('platform_connections')
+      .select('stream_key_encrypted')
+      .eq('user_id', userId)
+      .eq('platform', 'twitch')
+      .single()
+    if (!row?.stream_key_encrypted) {
+      return Response.json({ error: 'No Twitch connection to check' }, { status: 404 })
+    }
+    const elig = await checkTwitchHevcEligibility(decryptSecret(row.stream_key_encrypted))
+    await supabase
+      .from('platform_connections')
+      .update({
+        twitch_hevc_eligible: elig.hevcEligible,
+        twitch_max_height: elig.maxHeight,
+        twitch_eligibility_checked_at: elig.checkedAt,
+      })
+      .eq('user_id', userId)
+      .eq('platform', 'twitch')
+    return Response.json({ ok: true, ...elig })
+  }
+
   const updates: Record<string, unknown> = {}
   if ('enabled' in body) updates.enabled = !!body.enabled
   if ('bitrate_kbps' in body) {
@@ -52,6 +80,11 @@ export async function PATCH(
   }
   if ('orientation' in body && (body.orientation === 'landscape' || body.orientation === 'portrait')) {
     updates.orientation = body.orientation
+  }
+  // The user's choice to use HEVC passthrough — only honored for Twitch (the
+  // agent ignores it unless twitch_hevc_eligible is also true).
+  if (platform === 'twitch' && 'twitch_use_passthrough' in body) {
+    updates.twitch_use_passthrough = !!body.twitch_use_passthrough
   }
 
   if (Object.keys(updates).length === 0) {

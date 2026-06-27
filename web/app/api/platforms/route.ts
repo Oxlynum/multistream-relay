@@ -1,6 +1,7 @@
 import { createServerClient } from '@/lib/supabase'
 import { authenticateUserOrAgent } from '@/lib/agent-auth'
 import { encryptSecret } from '@/lib/crypto'
+import { checkTwitchHevcEligibility } from '@/lib/twitch-eligibility'
 
 // Twitch + TikTok use RTMPS (port 443) instead of plain RTMP (port 1935).
 // RunPod community cloud nodes are on ISP networks that frequently block
@@ -69,7 +70,26 @@ export async function POST(request: Request) {
     return Response.json({ error: error.message }, { status: 500 })
   }
 
-  return Response.json({ ok: true, platform })
+  // For Twitch, detect HEVC / Enhanced-Broadcasting eligibility from the freshly
+  // saved key (we have the plaintext here). Drives the eRTMP-vs-transcode routing
+  // and whether the dashboard/dock expose passthrough + 2K. Best-effort: a failed
+  // probe leaves the safe default (not eligible → H.264 transcode).
+  let twitch_hevc_eligible = false
+  if (platform === 'twitch') {
+    const elig = await checkTwitchHevcEligibility(stream_key.trim())
+    twitch_hevc_eligible = elig.hevcEligible
+    await supabase
+      .from('platform_connections')
+      .update({
+        twitch_hevc_eligible: elig.hevcEligible,
+        twitch_max_height: elig.maxHeight,
+        twitch_eligibility_checked_at: elig.checkedAt,
+      })
+      .eq('user_id', user.id)
+      .eq('platform', 'twitch')
+  }
+
+  return Response.json({ ok: true, platform, twitch_hevc_eligible })
 }
 
 export async function GET(request: Request) {
@@ -82,7 +102,7 @@ export async function GET(request: Request) {
 
   const { data, error } = await supabase
     .from('platform_connections')
-    .select('platform, rtmp_url, bitrate_kbps, fps, orientation, enabled, created_at')
+    .select('platform, rtmp_url, bitrate_kbps, fps, orientation, enabled, created_at, twitch_hevc_eligible, twitch_use_passthrough, twitch_max_height, twitch_eligibility_checked_at')
     .eq('user_id', userId)
     .order('platform')
 

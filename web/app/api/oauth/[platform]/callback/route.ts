@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createServerClient } from '@/lib/supabase'
 import { encryptSecret } from '@/lib/crypto'
+import { checkTwitchHevcEligibility } from '@/lib/twitch-eligibility'
 import {
   verifyOAuthState,
   exchangeCode,
@@ -102,6 +103,22 @@ export async function GET(
       }, { onConflict: 'user_id,platform' })
 
     if (upsertError) throw upsertError
+
+    // For Twitch, detect HEVC/Enhanced-Broadcasting eligibility from the fetched
+    // key so the dashboard/dock can expose passthrough + 2K and the agent can
+    // route eRTMP vs transcode. Best-effort.
+    if (platform === 'twitch') {
+      const elig = await checkTwitchHevcEligibility(streamKey)
+      await supabase
+        .from('platform_connections')
+        .update({
+          twitch_hevc_eligible: elig.hevcEligible,
+          twitch_max_height: elig.maxHeight,
+          twitch_eligibility_checked_at: elig.checkedAt,
+        })
+        .eq('user_id', userId)
+        .eq('platform', 'twitch')
+    }
   } catch (err) {
     console.error(`[oauth/callback] platform setup failed for ${platform}:`, err)
     return dashboardRedirect(platform, 'setup_failed')

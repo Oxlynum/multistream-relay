@@ -28,7 +28,7 @@ export async function POST(request: NextRequest) {
   const [{ data: platforms }, { data: profile }] = await Promise.all([
     supabase
       .from('platform_connections')
-      .select('platform, rtmp_url, stream_key_encrypted, bitrate_kbps, fps, orientation, enabled')
+      .select('platform, rtmp_url, stream_key_encrypted, bitrate_kbps, fps, orientation, enabled, twitch_hevc_eligible, twitch_use_passthrough')
       .eq('user_id', userId),
     supabase
       .from('profiles')

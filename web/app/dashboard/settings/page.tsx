@@ -13,6 +13,10 @@ interface PlatformConfig {
   platform: string
   orientation: string
   enabled: boolean
+  // Twitch-only HEVC/Enhanced-Broadcasting eligibility (null/false for others).
+  twitch_hevc_eligible?: boolean | null
+  twitch_use_passthrough?: boolean | null
+  twitch_max_height?: number | null
 }
 
 interface PricingBreakdown {
@@ -235,21 +239,29 @@ interface OutputCardProps {
   onOrientationChange: (orientation: string) => void
   onResolutionChange: (resolution: '720p' | '1080p' | '1440p') => void
   onBitrateChange: (bitrate: number) => void
+  onPassthroughChange: (use: boolean) => void
+  onRecheckEligibility: () => void
   saving: boolean
 }
 
 function OutputCard({
   platform, config, settings, has2kAddon,
   onToggle, onOrientationChange, onResolutionChange, onBitrateChange,
+  onPassthroughChange, onRecheckEligibility,
   saving,
 }: OutputCardProps) {
   const meta = PLATFORM_META[platform]
   if (!meta) return null
 
+  // Twitch HEVC passthrough is available only to eligible (Partner/select-Affiliate)
+  // channels and only when the user opts in; otherwise Twitch is an H.264 transcode.
+  const twitchEligible = platform === 'twitch' && !!config.twitch_hevc_eligible
+  const twitchPassthrough = twitchEligible && (config.twitch_use_passthrough ?? true)
+
   const resolution = settings.resolution ?? '1080p'
   const bitrate = settings.bitrate_kbps ?? meta.defaultBitrate
   const orientation = config.orientation ?? meta.defaultOrientation
-  const isPassthrough = meta.encodeType === 'passthrough' && orientation === 'landscape'
+  const isPassthrough = orientation === 'landscape' && (meta.encodeType === 'passthrough' || twitchPassthrough)
 
   const encodeLabel = isPassthrough ? 'HEVC passthrough' : orientation === 'portrait' ? 'Portrait' : 'Landscape'
   const encodeColor = isPassthrough
@@ -282,6 +294,42 @@ function OutputCard({
             </button>
           </div>
 
+          {/* Twitch HEVC eligibility / passthrough control */}
+          {platform === 'twitch' && (
+            twitchEligible ? (
+              <div className="mb-3 flex items-center justify-between gap-3 rounded-xl bg-blue-500/10 border border-blue-500/20 px-3 py-2">
+                <div className="text-xs">
+                  <div className="font-semibold text-blue-300">HEVC passthrough available · up to 2K</div>
+                  <div className="text-ink-faint">
+                    {twitchPassthrough
+                      ? 'Sending your source HEVC untouched — best quality, no transcode.'
+                      : 'Currently transcoding to H.264 (≤1080p). Turn on for original-quality 2K.'}
+                  </div>
+                </div>
+                <button
+                  onClick={() => onPassthroughChange(!twitchPassthrough)}
+                  title="HEVC passthrough"
+                  className={`relative w-9 h-5 rounded-full transition-colors flex-shrink-0 ${twitchPassthrough ? 'bg-blue-500' : 'bg-line-strong'}`}
+                >
+                  <span className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${twitchPassthrough ? 'translate-x-4' : ''}`} />
+                </button>
+              </div>
+            ) : (
+              <div className="mb-3 flex items-center justify-between gap-3 rounded-xl bg-base border border-line/60 px-3 py-2">
+                <div className="text-xs text-ink-faint">
+                  <span className="text-ink-muted">H.264 transcode.</span> HEVC / 2K passthrough needs Twitch Affiliate status.
+                </div>
+                <button
+                  onClick={onRecheckEligibility}
+                  disabled={saving}
+                  className="text-xs font-semibold px-2.5 py-1 rounded-lg bg-surface border border-line text-ink-muted hover:border-accent/50 hover:text-ink disabled:opacity-50 flex-shrink-0"
+                >
+                  {saving ? 'Checking…' : 'Re-check'}
+                </button>
+              </div>
+            )
+          )}
+
           {/* Settings row */}
           <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
             {/* Resolution selector */}
@@ -290,13 +338,18 @@ function OutputCard({
                 <div className="text-xs text-ink-faint mb-1.5">Resolution</div>
                 <div className="flex gap-1">
                   {RESOLUTIONS.map(res => {
-                    const isLocked = res === '1440p' && !has2kAddon
+                    // Twitch only accepts 2K via HEVC passthrough — never as an H.264
+                    // transcode — so 1440p is unavailable in Twitch's transcode mode.
+                    const isLocked = res === '1440p' && (platform === 'twitch' || !has2kAddon)
+                    const lockTitle = platform === 'twitch'
+                      ? 'Twitch 2K requires HEVC passthrough (Affiliate)'
+                      : 'Requires 2K add-on'
                     return (
                       <button
                         key={res}
                         disabled={isLocked}
                         onClick={() => !isLocked && onResolutionChange(res)}
-                        title={isLocked ? 'Requires 2K add-on' : undefined}
+                        title={isLocked ? lockTitle : undefined}
                         className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors ${
                           resolution === res
                             ? 'bg-accent text-base'
@@ -413,7 +466,7 @@ export default function SettingsPage() {
       const [{ data: platformData }, settingsRes, pricingRes] = await Promise.all([
         supabase
           .from('platform_connections')
-          .select('platform, orientation, enabled')
+          .select('platform, orientation, enabled, twitch_hevc_eligible, twitch_use_passthrough, twitch_max_height')
           .eq('user_id', user.id)
           .order('platform'),
         fetch('/api/output-settings', { headers }),
@@ -495,6 +548,36 @@ export default function SettingsPage() {
     // Bitrate doesn't affect pricing; no need to reload.
   }
 
+  // Twitch-only: toggle HEVC passthrough vs H.264 transcode (eligible channels).
+  async function setTwitchPassthrough(use: boolean) {
+    setPlatforms(prev => prev.map(p => p.platform === 'twitch' ? { ...p, twitch_use_passthrough: use } : p))
+    const headers = await authHeader()
+    if (!headers) return
+    setSaving('twitch')
+    await fetch('/api/platforms/twitch', {
+      method: 'PATCH', headers, body: JSON.stringify({ twitch_use_passthrough: use }),
+    })
+    setSaving(null)
+    await loadPricing(headers)
+  }
+
+  // Twitch-only: re-probe HEVC eligibility (e.g. after becoming an Affiliate).
+  async function recheckTwitchEligibility() {
+    const headers = await authHeader()
+    if (!headers) return
+    setSaving('twitch')
+    const res = await fetch('/api/platforms/twitch', {
+      method: 'PATCH', headers, body: JSON.stringify({ recheck_eligibility: true }),
+    })
+    if (res.ok) {
+      const body = await res.json() as { hevcEligible?: boolean; maxHeight?: number }
+      setPlatforms(prev => prev.map(p => p.platform === 'twitch'
+        ? { ...p, twitch_hevc_eligible: !!body.hevcEligible, twitch_max_height: body.maxHeight ?? 1080 }
+        : p))
+    }
+    setSaving(null)
+  }
+
   if (!loaded) {
     return (
       <div className="min-h-screen">
@@ -549,6 +632,8 @@ export default function SettingsPage() {
                 onOrientationChange={orientation => setOrientation(platformId, orientation)}
                 onResolutionChange={resolution => setResolution(platformId, resolution)}
                 onBitrateChange={bitrate => setBitrate(platformId, bitrate)}
+                onPassthroughChange={setTwitchPassthrough}
+                onRecheckEligibility={recheckTwitchEligibility}
                 saving={saving === platformId}
               />
             )

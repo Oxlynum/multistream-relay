@@ -201,12 +201,14 @@ Still confirm before destructive/irreversible actions (deleting data, force-push
 ## Platforms supported
 | Platform | Protocol | Max kbps | Orientation | Encode |
 |---|---|---|---|---|
-| Twitch | RTMP | 8000 | Landscape | landscape tee group |
+| Twitch | RTMP / eRTMP† | 8000 | Landscape | landscape tee group **or** HEVC passthrough† |
 | Kick | RTMPS | 8000 | Landscape | landscape tee group |
 | YouTube | HLS (fMP4) | source | Landscape* | HEVC passthrough |
 | TikTok | RTMP | 4500 | Portrait | portrait tee group (9:16 crop) |
 
 \* YouTube/TikTok can be set to portrait in settings. Facebook dropped (4000 cap dragged shared encode down).
+
+† **Twitch HEVC eRTMP passthrough is gated on account eligibility, detected, not assumed.** Twitch only authorizes HEVC for the 2K tier (Partner/select-Affiliate); 1080p and non-eligible accounts get H.264. `lib/twitch-eligibility.ts` calls `GetClientConfiguration` (with a spoofed RTX 4090 — GPU is unverifiable client data) and reads `encoder_configurations[0].type`: `hevc` → eligible, `h264` → not (Twitch also downgrades a 1440p request to 1080p H.264 for non-eligible accounts — confirms it's account- not resolution-gated; both unlock together, server-authoritative, bound to the stream key, unspoofable). Eligibility is probed on Twitch key save / OAuth connect / manual re-check and stored on `platform_connections` (`twitch_hevc_eligible`, `twitch_use_passthrough`, `twitch_max_height`, `twitch_eligibility_checked_at`). `agent-config.ts` routes Twitch to `mode:'ertmp'` ONLY when `twitch_hevc_eligible && twitch_use_passthrough`; otherwise it falls through to the H.264 landscape tee group. Dashboard surfaces the passthrough toggle + 2K only when eligible. The full eRTMP relay stack (GPU spoof, BPM SEI `relay/bpm_inject.py`, `-rtmp_enhanced_codecs hvc1`) is correct and lights up automatically for any eligible channel — see `memory/ertmp_cpu_passthrough_plan.md`.
 
 ## Supabase schema
 Tables: `profiles`, `agent_api_keys`, `platform_connections`, `gpu_instances`, `stream_sessions`, `achievements`, `agent_commands`, `credited_payments`, `rate_limits`, `connection_metrics`, `device_link_codes`.
@@ -217,7 +219,7 @@ Key columns:
 - `agent_api_keys`: service-role only (hashes never reach browser). Labels: `user`/`pod`/`device`.
 
 Postgres fns: `credit_payment_once` (idempotent credit), `rate_limit_hit` (fixed-window).
-Latest migration: `20260627000001_broker_v2.sql` (adds broker v2 phase/racers/race_round/provision_lat/provision_lon columns to `gpu_instances`).
+Latest migration: `20260627000002_twitch_hevc_eligibility.sql` (adds `twitch_hevc_eligible`, `twitch_use_passthrough`, `twitch_max_height`, `twitch_eligibility_checked_at` to `platform_connections` — Twitch HEVC eRTMP eligibility gating, see Platforms supported †).
 
 ## OBS plugin account linking
 - **Connect button (preferred):** PKCE OAuth — plugin opens browser to `/link`, user clicks Authorize → one-time code → plugin redeems at `POST /api/link/token` → per-device key issued. No key ever displayed.

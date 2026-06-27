@@ -12,6 +12,11 @@ export interface PlatformRow {
   fps: number | null
   orientation: string | null
   enabled: boolean
+  // Twitch-only: HEVC/Enhanced-Broadcasting eligibility + the user's passthrough
+  // choice. eRTMP passthrough is used only when both are true; otherwise Twitch
+  // falls through to the H.264 transcode path. Undefined for non-Twitch rows.
+  twitch_hevc_eligible?: boolean | null
+  twitch_use_passthrough?: boolean | null
 }
 
 // YouTube ingests HEVC only over HLS (its RTMP endpoint is H.264-only). The
@@ -78,10 +83,16 @@ export function buildAgentOutputs(
       }
     }
 
-    // Twitch landscape → HEVC passthrough via Enhanced RTMP (eRTMP).
-    // Twitch supports eRTMP natively; this skips the landscape NVENC H.264 encode
-    // entirely, saving an NVENC session and sending better-quality HEVC directly.
-    if (p.platform === 'twitch' && orientation === 'landscape') {
+    // Twitch landscape → HEVC passthrough via Enhanced RTMP (eRTMP), but ONLY for
+    // channels Twitch authorizes for HEVC (Partner/select-Affiliate 2K tier) and
+    // when the user has opted into passthrough. Twitch rejects HEVC from
+    // non-eligible channels (it negotiates H.264 and drops the stream ~2s in), so
+    // everyone else falls through to the H.264 transcode path below. eRTMP skips
+    // the NVENC encode entirely — better quality, no GPU encode cost.
+    if (
+      p.platform === 'twitch' && orientation === 'landscape' &&
+      p.twitch_hevc_eligible && (p.twitch_use_passthrough ?? true)
+    ) {
       return {
         name: p.platform,
         url: 'rtmps://ingest.global-contribute.live-video.net:443/app',
