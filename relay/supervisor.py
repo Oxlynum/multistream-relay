@@ -211,7 +211,7 @@ def _tee_targets(outputs: list[dict]) -> str:
         url = _full_rtmp_url(o)
         if not _tee_safe(url):
             continue
-        parts.append(f"[f=flv:onfail=ignore]{url}")
+        parts.append(f"[f=flv:onfail=ignore:use_fifo=1:fifo_options=queue_size=512,drop_pkts_on_overflow=1]{url}")
     return "|".join(parts)
 
 
