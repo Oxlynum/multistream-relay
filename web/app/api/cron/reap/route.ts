@@ -1,6 +1,7 @@
 import { createServerClient } from '@/lib/supabase'
-import { teardownInstance } from '@/lib/pod-teardown'
-import { ACTIVE_PROVIDERS, getProvider } from '@/lib/providers'
+import { teardownInstance, teardownHub } from '@/lib/pod-teardown'
+import { ACTIVE_PROVIDERS, ACTIVE_VPS_PROVIDERS, getProvider } from '@/lib/providers'
+import { VPS_READINESS_TIMEOUT_MS, HUB_IDLE_GRACE_MS } from '@/lib/datacenters'
 import type { RacerEntry } from '@/lib/gpu-broker'
 
 // The independent backstop. Runs daily (Vercel Hobby caps crons at once/day) and
@@ -34,13 +35,19 @@ export async function GET(request: Request) {
   const supabase = createServerClient()
   const { data: instances } = await supabase
     .from('gpu_instances')
-    .select('user_id, last_seen_at, created_at, idle_since, streaming, status, max_session_at')
+    .select('user_id, last_seen_at, created_at, idle_since, streaming, status, max_session_at, vps_hub_id')
     .neq('status', 'stopped')
 
   const now = Date.now()
   const reaped: { user_id: string; reason: string }[] = []
 
   for (const inst of instances ?? []) {
+    // VPS hub tenants are governed by the hub clocks (Clock A heartbeat / Clock B
+    // teardownHub), not the per-pod staleness rules — their last_seen_at is driven
+    // by the shared hub, and a still-booting hub session is legitimately unpaired.
+    // Skip them here; teardownHub re-points/errors them and they get cleaned once
+    // unlinked (vps_hub_id null).
+    if (inst.vps_hub_id) continue
     const lastSeen = inst.last_seen_at ? new Date(inst.last_seen_at).getTime() : null
     const createdAt = inst.created_at ? new Date(inst.created_at).getTime() : now
     const idleSince = inst.idle_since ? new Date(inst.idle_since).getTime() : null
@@ -139,5 +146,61 @@ export async function GET(request: Request) {
     console.error('[reaper] orphan reconcile failed:', e)
   }
 
-  return Response.json({ ok: true, checked: instances?.length ?? 0, reaped, orphans })
+  // ── Clock B: VPS hub lifecycle (scale-to-zero backstop + dead/stuck hubs) ──
+  // The hub heartbeat self-destructs an empty hub promptly; this is the backstop
+  // for a hub that stopped heartbeating (box/agent dead) or never came live.
+  const reapedHubs: { hub_id: string; reason: string }[] = []
+  try {
+    const { data: hubs } = await supabase
+      .from('vps_hubs')
+      .select('id, status, session_count, last_seen_at, created_at, empty_since')
+    for (const hub of hubs ?? []) {
+      const created = hub.created_at ? new Date(hub.created_at).getTime() : now
+      const lastSeen = hub.last_seen_at ? new Date(hub.last_seen_at).getTime() : null
+      const emptySince = hub.empty_since ? new Date(hub.empty_since).getTime() : null
+      let reason = ''
+      if (hub.status === 'spawning' && now - created > VPS_READINESS_TIMEOUT_MS) {
+        reason = 'spawn_timeout'        // never POSTed /ready within the boot window
+      } else if (lastSeen && (now - lastSeen) / 1000 > STALE_S) {
+        reason = 'stale_hub'            // stopped heartbeating — box/agent dead
+      } else if (hub.status === 'live' && (hub.session_count ?? 0) <= 0 && emptySince && now - emptySince > HUB_IDLE_GRACE_MS) {
+        reason = 'scale_to_zero'        // empty past grace (heartbeat path should've caught it)
+      }
+      if (reason) {
+        await teardownHub(hub.id, `reaper:${reason}`)
+        reapedHubs.push({ hub_id: hub.id, reason })
+      }
+    }
+  } catch (e) {
+    console.error('[reaper] hub Clock B failed:', e)
+  }
+
+  // ── VPS orphan reconcile: destroy any hub box with no vps_hubs row ─────────
+  // The classic "created but the row write lost a race / the function died" case,
+  // now for Hetzner. listInstances is label-filtered (managed-by=slimcast).
+  const orphanHubs: string[] = []
+  try {
+    const { data: hubRows } = await supabase.from('vps_hubs').select('provider_id')
+    const knownHubIds = new Set((hubRows ?? []).map(h => h.provider_id).filter(Boolean))
+    for (const provider of ACTIVE_VPS_PROVIDERS) {
+      let live: Array<{ id: string; name: string }>
+      try { live = await provider.listInstances() } catch (e) { console.error(`[reaper] ${provider.name} listInstances failed:`, e); continue }
+      for (const box of live) {
+        if (!box.name?.startsWith('slimcast-hub-')) continue
+        if (knownHubIds.has(box.id)) continue
+        try {
+          // destroy(id) without primaryIpId → hetzner.destroy() looks it up and
+          // releases the IP only if already unassigned (auto_delete handles the rest).
+          await provider.destroy(box.id)
+          orphanHubs.push(`${provider.name}:${box.id}`)
+        } catch (e) {
+          console.error(`[reaper] failed to destroy orphan hub ${provider.name}:${box.id}:`, e)
+        }
+      }
+    }
+  } catch (e) {
+    console.error('[reaper] hub orphan reconcile failed:', e)
+  }
+
+  return Response.json({ ok: true, checked: instances?.length ?? 0, reaped, orphans, reapedHubs, orphanHubs })
 }

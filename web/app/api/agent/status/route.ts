@@ -1,8 +1,9 @@
 import type { NextRequest } from 'next/server'
-import { authenticateAgentDetailed } from '@/lib/agent-auth'
+import { authenticateAgentDetailed, authenticateNode } from '@/lib/agent-auth'
 import { createServerClient } from '@/lib/supabase'
 import { triggerAutoRefill } from '@/app/api/credits/auto-refill/route'
-import { teardownInstance, sweepStalePods } from '@/lib/pod-teardown'
+import { teardownInstance, teardownHub, sweepStalePods } from '@/lib/pod-teardown'
+import { HUB_IDLE_GRACE_MS } from '@/lib/datacenters'
 import {
   buildBillingContext,
   computeBurnRate,
@@ -17,8 +18,96 @@ const MAX_BILL_INTERVAL_S = 60
 // A pod that's up but not streaming this long is abandoned → destroy it.
 const IDLE_GRACE_S = 5 * 60 // 5m
 
+// Billing master switch (vps-hub-plan §7: DEACTIVATED during the VPS-hub build —
+// free streaming in dev). OFF by default; the credit deduction, auto-refill, and
+// credits<=0 self-destruct are all gated on it. The idle / max-session / orphan
+// self-destruct safety is NOT gated (rogue-cost protection always stays on).
+// Reversible: set SLIMCAST_BILLING_ACTIVE=true to re-enable.
+const BILLING_ACTIVE = process.env.SLIMCAST_BILLING_ACTIVE === 'true'
+
+// ── VPS-as-the-Hub heartbeat (Clock A) ───────────────────────────────────────
+// A shared hub posts ONE heartbeat for all its tenants (authenticated by its 'vps'
+// key, resolved by authenticateNode → never a single user). For each tenant it
+// refreshes last_seen_at/streaming/idle_since and applies Clock A: a LOGICAL
+// teardown of just that tenant on idle/max-session (detach_from_hub + drop the
+// session row — NEVER destroys the shared box; Clock B/reaper does that when the
+// box goes empty). Do NOT route a hub key through the per-user pod path below
+// (landmine #2: that would teardown the whole box on the first tenant's idle).
+async function handleVpsStatus(request: NextRequest, hubId: string): Promise<Response> {
+  const body = await request.json().catch(() => ({})) as {
+    streams?: Array<{ ingest_key?: string; streaming?: boolean }>
+    cost?: { egress_gb_hr?: number; ingress_gb_hr?: number; projected_usd_hr?: number }
+  }
+  const supabase = createServerClient()
+  const now = Date.now()
+  const nowIso = new Date(now).toISOString()
+
+  const hubUpdate: Record<string, unknown> = { last_seen_at: nowIso }
+  if (body.cost) {
+    hubUpdate.cost_usd_hr = body.cost.projected_usd_hr ?? null
+    hubUpdate.egress_gb_hr = body.cost.egress_gb_hr ?? null
+    hubUpdate.ingress_gb_hr = body.cost.ingress_gb_hr ?? null
+  }
+  await supabase.from('vps_hubs').update(hubUpdate).eq('id', hubId)
+
+  const reported = body.streams ?? []
+  const { data: sessions } = await supabase
+    .from('gpu_instances')
+    .select('user_id, ingest_key, idle_since, max_session_at')
+    .eq('vps_hub_id', hubId)
+
+  for (const s of sessions ?? []) {
+    const r = reported.find(x => x.ingest_key === s.ingest_key)
+    const streaming = r?.streaming ?? false
+    const idleSince = streaming ? null : (s.idle_since ?? nowIso)
+
+    await supabase.from('gpu_instances')
+      .update({ last_seen_at: nowIso, streaming, idle_since: idleSince })
+      .eq('user_id', s.user_id).eq('vps_hub_id', hubId)
+
+    // Clock A — logical teardown of THIS tenant only (billing off → no credits kill).
+    const idleFor = idleSince ? (now - new Date(idleSince).getTime()) / 1000 : 0
+    const maxAt = s.max_session_at ? new Date(s.max_session_at).getTime() : null
+    if (maxAt && now >= maxAt) {
+      await teardownInstance(s.user_id, 'hub_clockA:session_expired')
+    } else if (!streaming && idleFor > IDLE_GRACE_S) {
+      await teardownInstance(s.user_id, 'hub_clockA:idle_timeout')
+    }
+  }
+
+  // Scale-to-zero (Clock B, timely path): if this hub has been empty past the idle
+  // grace, self-destruct now rather than waiting for the cron reaper (which only
+  // backstops a hub that stopped heartbeating). Re-read the refcount so a tenant
+  // that attached this instant isn't dropped.
+  const { data: hubNow } = await supabase
+    .from('vps_hubs')
+    .select('session_count, empty_since')
+    .eq('id', hubId)
+    .maybeSingle()
+  if (
+    hubNow && (hubNow.session_count ?? 0) <= 0 && hubNow.empty_since &&
+    (now - new Date(hubNow.empty_since).getTime()) > HUB_IDLE_GRACE_MS
+  ) {
+    console.log(`[agent/status] hub ${hubId} empty past grace — scale-to-zero`)
+    await teardownHub(hubId, 'scale_to_zero')
+    return Response.json({ command: 'stop', reason: 'scale_to_zero' })
+  }
+
+  // The relay learns the live stream set from /api/agent/hub-config; per-tenant
+  // stops happen implicitly when a torn-down tenant drops out of that set. So the
+  // status response is just an ack (+ large credits so the relay never self-stops).
+  return Response.json({ ok: true, credits_seconds: 999999 })
+}
+
 // Agent posts heartbeats here every 10s with live stream status.
 export async function POST(request: NextRequest) {
+  // Role-aware: a 'vps' hub key heartbeats for many tenants — handle first so it
+  // never falls into the per-user pod billing/self-destruct path.
+  const node = await authenticateNode(request)
+  if (node?.role === 'vps' && node.hubId) {
+    return handleVpsStatus(request, node.hubId)
+  }
+
   const authed = await authenticateAgentDetailed(request)
   if (!authed) {
     return Response.json({ error: 'Unauthorized' }, { status: 401 })
@@ -97,7 +186,9 @@ export async function POST(request: NextRequest) {
       UUID_RE.test(devBypassId) &&
       devBypassId === userId
     if (devNoBilling) console.log(`[billing] dev bypass active for ${userId} — deduction of ${deduct} tkn skipped`)
-    if (deduct > 0 && !devNoBilling) {
+    // Billing deactivated (default): skip the credit deduction. burnRate is still
+    // computed above as harmless telemetry.
+    if (BILLING_ACTIVE && deduct > 0 && !devNoBilling) {
       credits = parseFloat(Math.max(0, credits - deduct).toFixed(3))
       await supabase
         .from('profiles')
@@ -185,7 +276,7 @@ export async function POST(request: NextRequest) {
       })
       .eq('user_id', userId)
 
-    if (streaming && credits < 1.0) {
+    if (BILLING_ACTIVE && streaming && credits < 1.0) {
       const refilled = await triggerAutoRefill(userId)
       if (refilled) {
         const { data: updated } = await supabase
@@ -229,7 +320,7 @@ export async function POST(request: NextRequest) {
     const maxSessionAt = instance?.max_session_at ? new Date(instance.max_session_at).getTime() : null
 
     let killReason = ''
-    if (credits <= 0) killReason = 'credits_exhausted'
+    if (BILLING_ACTIVE && credits <= 0) killReason = 'credits_exhausted'
     else if (maxSessionAt && now >= maxSessionAt) killReason = 'session_expired'
     else if (!streaming && idleFor > IDLE_GRACE_S) killReason = 'idle_timeout'
 

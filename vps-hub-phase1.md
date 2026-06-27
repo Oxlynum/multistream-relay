@@ -42,13 +42,16 @@ increment → returns hub row or none); `detach_from_hub(hub_id)` (decrement, fl
 - [x] **S6** Role-aware `/ready` (hub→live, promote provisioning tenants) + `/failed` (hub→teardownHub). Pod CAS path unchanged.
 - [ ] **S7** Relay vps role: skip `_gpu_self_test` + GPU preview; hub-config poll + reconcile `dict[ingest_key→Supervisor]`; thread per-stream source/width/height; `mediamtx.vps.yml` wildcard path.
 - [ ] **S8** `hook.sh` per-path signaling (`/tmp/obs_connected.<path>` only for true publish path) + per-stream flag watch (no box-wide `stop_all`).
-- [ ] **S9** Billing deactivation (flag `SLIMCAST_BILLING_ACTIVE`, default off) + status-route hub heartbeat branch (Clock A). `status/route.ts`, `billing.ts`.
+- [x] **S9** Billing deactivated (flag `SLIMCAST_BILLING_ACTIVE`, default OFF — gates deduction/auto-refill/credits-kill; idle/max-session safety stays) + status-route hub heartbeat branch (Clock A per-tenant + timely scale-to-zero self-destruct). `status/route.ts`.
 - [x] **S10** `teardownInstance` hub-aware: hub-session teardown = logical `detach_from_hub` (NEVER destroys box) + new `teardownHub()` (Clock B physical destroy + IP release). `pod-teardown.ts`.
-- [ ] **S11** Hub-aware reaper: Clock B scale-to-zero + Hetzner reconcile + leaked-IP sweep + tighter cron. `cron/reap`, `vercel.json`.
-- [ ] **S12** Verify `gpu/status` srt_url resolves to hub (byte-for-byte) + end-to-end live test.
+- [x] **S11** Hub-aware reaper: per-session loop skips hub tenants; Clock B (spawn_timeout/stale_hub/scale_to_zero) + Hetzner orphan reconcile. `empty_since` (migration 20260628000004) drives scale-to-zero grace. Cron stays daily (Hobby cap) — heartbeat path covers timely scale-to-zero; cron is the crashed-hub backstop. Standalone leaked-IP sweep DEFERRED (auto_delete=true + teardownHub IP-release cover it).
+- [ ] **S7** Relay vps role: skip `_gpu_self_test` + GPU preview; hub-config poll + reconcile `dict[ingest_key→Supervisor]`; thread per-stream source/width/height; `mediamtx.vps.yml` wildcard path.
+- [ ] **S8** `hook.sh` per-path signaling + per-stream flag watch.
+- [ ] **S12** Verify `gpu/status` srt_url resolves to hub (✅ confirmed needs no code change — builds srt_url from session ip/srt_port/ingest_key/passphrase, which broker points at the hub) + end-to-end live test.
 
-> ⚠️ Before flipping `SLIMCAST_VPS_HUB=true` for the live test, S7+S8+S9+S11 MUST land (a spawned hub
-> with no reaper leaks cost; a hub heartbeat with no S9 branch hits the pod path on the spawner's userId).
+> ⚠️ Web control plane (S1–S6,S9–S11) is DONE + shipped (flag off). Before flipping `SLIMCAST_VPS_HUB=true`
+> for the live test, the RELAY vps role (S7+S8) MUST land + a review pass. The relay image must rebuild
+> (relay/** CI) and `SLIMCAST_RELAY_IMAGE` re-pin before a hub can boot the vps role.
 
 Deps: S3←S1; S4←S1,S3; S5←S1,S2; S6←S1,S3,S5; S7←S4; S8←S7; S9←S1,S3; S10←S1,S5; S11←S1,S5,S10; S12←S5,S6,S7,S9,S10.
 
