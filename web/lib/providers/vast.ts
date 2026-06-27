@@ -191,11 +191,13 @@ export const vastProvider: GpuProvider = {
     // probe, so the broker cascades host-by-host and blows the 5-min provision budget.
     // Datacenter hosts pass UDP + outbound on the FIRST try (fast provision), and the
     // only cost — distance — doesn't matter over SRT (its buffer absorbs the jitter).
-    // So datacenter is the right pool for SRT too; the per-host probe is still run as
-    // a safety net but rarely rejects a datacenter host.
+    // datacenter filter removed 2026-06-27: the entire datacenter pool became RTX 5090
+    // (Blackwell) which fails NVENC-in-container even on whole-GPU rentals. The 46
+    // consumer Ampere whole-GPU hosts (RTX 3060-3090, cc=860, gpu_frac=1.0) are the
+    // only viable pool. direct_port_count>=3 screens out residential NAT hosts; the
+    // broker v2 /failed cascade handles the rare host that blocks outbound to Twitch.
     const q: Record<string, unknown> = {
       verified: { eq: true }, rentable: { eq: true }, rented: { eq: false },
-      datacenter: { eq: true },
       num_gpus: { eq: 1 }, dph_total: { lte: maxPricePerHr }, type: 'on-demand',
       order: [['dph_total', 'asc']], limit: 100,
     }
