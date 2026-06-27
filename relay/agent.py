@@ -332,9 +332,11 @@ def _gpu_self_test(attempts: int = 2) -> tuple[bool, str]:
         hevc_tmp = tempfile.mktemp(suffix=".hevc")
         try:
             # Pass 1: H.264 NVENC encode
+            # 320x240: safely above NVENC's minimum frame dimension on all drivers.
+            # 128x128 fails on driver ≥570 with "Frame Dimension less than minimum".
             enc = subprocess.run([
                 "ffmpeg", "-hide_banner", "-loglevel", "error",
-                "-f", "lavfi", "-i", "color=c=black:s=128x128:r=5:d=0.4",
+                "-f", "lavfi", "-i", "color=c=black:s=320x240:r=5:d=0.4",
                 "-c:v", "h264_nvenc", "-f", "h264", h264_tmp,
             ], capture_output=True, text=True, timeout=25)
             if enc.returncode != 0:
@@ -361,7 +363,7 @@ def _gpu_self_test(attempts: int = 2) -> tuple[bool, str]:
             # on certain hosts (e.g. machine 67876 — passed H.264 but died on HEVC).
             hevc_enc = subprocess.run([
                 "ffmpeg", "-hide_banner", "-loglevel", "error",
-                "-f", "lavfi", "-i", "color=c=black:s=128x128:r=5:d=0.4",
+                "-f", "lavfi", "-i", "color=c=black:s=320x240:r=5:d=0.4",
                 "-c:v", "hevc_nvenc", "-f", "hevc", hevc_tmp,
             ], capture_output=True, text=True, timeout=25)
             if hevc_enc.returncode != 0:
