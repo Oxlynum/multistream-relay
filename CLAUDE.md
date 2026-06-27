@@ -102,6 +102,8 @@ cd web && STRIPE_SECRET_KEY=sk_... node scripts/setup-stripe.mjs
 - `TWITCH_CLIENT_ID/SECRET`, `GOOGLE_CLIENT_ID/SECRET`, `FACEBOOK_APP_ID/SECRET`
 - `SLIMCAST_DEV_NO_BILLING_USER_ID` — dev billing bypass (blank in prod)
 - `SLIMCAST_BROKER_V2` — `true` (default, v2 push-readiness+race) / `false` (v1 cascade fallback)
+- `SLIMCAST_VPS_HUB` — `false` (default) / `true` enables the VPS-as-the-Hub path (Phase 0 scaffolding only so far; see `vps-hub-plan.md`)
+- `HETZNER_API_TOKEN` — Hetzner Cloud Read+Write token for the VPS hub provider (`lib/providers/hetzner.ts`) + `scripts/test-hetzner.mjs`. Not in `.env.example` git (ignored) — add manually.
 
 ## Working conventions (standing authorization — do these on wrap-up)
 - **Update CLAUDE.md** when architecture, provider, schema, or load-bearing assumptions change.
@@ -211,15 +213,16 @@ Still confirm before destructive/irreversible actions (deleting data, force-push
 † **Twitch HEVC eRTMP passthrough is gated on account eligibility, detected, not assumed.** Twitch only authorizes HEVC for the 2K tier (Partner/select-Affiliate); 1080p and non-eligible accounts get H.264. `lib/twitch-eligibility.ts` calls `GetClientConfiguration` (with a spoofed RTX 4090 — GPU is unverifiable client data) and reads `encoder_configurations[0].type`: `hevc` → eligible, `h264` → not (Twitch also downgrades a 1440p request to 1080p H.264 for non-eligible accounts — confirms it's account- not resolution-gated; both unlock together, server-authoritative, bound to the stream key, unspoofable). Eligibility is probed on Twitch key save / OAuth connect / manual re-check and stored on `platform_connections` (`twitch_hevc_eligible`, `twitch_use_passthrough`, `twitch_max_height`, `twitch_eligibility_checked_at`). `agent-config.ts` routes Twitch to `mode:'ertmp'` ONLY when `twitch_hevc_eligible && twitch_use_passthrough`; otherwise it falls through to the H.264 landscape tee group. Dashboard surfaces the passthrough toggle + 2K only when eligible. The full eRTMP relay stack (GPU spoof, BPM SEI `relay/bpm_inject.py`, `-rtmp_enhanced_codecs hvc1`) is correct and lights up automatically for any eligible channel — see `memory/ertmp_cpu_passthrough_plan.md`.
 
 ## Supabase schema
-Tables: `profiles`, `agent_api_keys`, `platform_connections`, `gpu_instances`, `stream_sessions`, `achievements`, `agent_commands`, `credited_payments`, `rate_limits`, `connection_metrics`, `device_link_codes`.
+Tables: `profiles`, `agent_api_keys`, `platform_connections`, `gpu_instances`, `stream_sessions`, `achievements`, `agent_commands`, `credited_payments`, `rate_limits`, `connection_metrics`, `device_link_codes`, `relay_nodes`.
 
 Key columns:
 - `profiles`: `streaming_credits_seconds` (default 7200), `portrait_zoom/pos_x/pos_y`, `landscape_bitrate_kbps` (6000), `portrait_bitrate_kbps` (4000), `has_2k_addon`.
 - `gpu_instances`: `provider` (default `'vast'`), `burn_rate`, `srt_port`, `session_id`, `max_session_at`, `idle_since`, `outputs` (jsonb), `streaming`, `cost_usd_hr`, `egress_gb_hr`, `ingress_gb_hr`, `suggested_ingest_kbps`, `throttle_tier` (budget throttle telemetry). **Broker v2 columns:** `phase` (text — `requested|racing|ready|streaming|ended`; maps to `status` for backward compat), `racers` (jsonb — array of `{provider, provider_id, state, machine_id?}` for all in-flight racer pods), `race_round` (int — guards next-round kick against duplicate /failed POSTs), `provision_lat/lon` (numeric — stored at provision so /api/agent/failed can rank next-round candidates).
-- `agent_api_keys`: service-role only (hashes never reach browser). Labels: `user`/`pod`/`device`.
+- `agent_api_keys`: service-role only (hashes never reach browser). Labels: `user`/`pod`/`device`/`vps`/`gpu`.
+- `relay_nodes` (VPS-as-the-Hub, Phase 0 — inert until `SLIMCAST_VPS_HUB`): child of `gpu_instances` (CASCADE) so one session can own a VPS hub **and** a GPU backend (sidesteps `gpu_instances UNIQUE(user_id)`). `role` (`vps_hub`/`gpu_backend`), `provider`, ports (`srt_in_port`/`rtmp_beacon_port`/`bridge_in_port`/`bridge_return_port`/`hls_port`), `racers` jsonb, cost telemetry; `UNIQUE(instance_id, role)`, owner-read RLS. `gpu_instances` gained `topology`/`needs_transcode`/`vps_node_id`/`gpu_node_id`/`bridge_secret`; `connection_metrics.direction` adds `bridge`.
 
 Postgres fns: `credit_payment_once` (idempotent credit), `rate_limit_hit` (fixed-window).
-Latest migration: `20260627000002_twitch_hevc_eligibility.sql` (adds `twitch_hevc_eligible`, `twitch_use_passthrough`, `twitch_max_height`, `twitch_eligibility_checked_at` to `platform_connections` — Twitch HEVC eRTMP eligibility gating, see Platforms supported †).
+Latest migration: `20260628000001_vps_hub_nodes.sql` (VPS-as-the-Hub Phase 0 — `relay_nodes` child table + additive `gpu_instances`/`agent_api_keys`/`connection_metrics` changes above; all additive, inert until `SLIMCAST_VPS_HUB`. Full plan: `vps-hub-plan.md` §1b live findings). Prior: `20260627000002_twitch_hevc_eligibility.sql` (Twitch HEVC eRTMP eligibility gating, see Platforms supported †).
 
 ## OBS plugin account linking
 - **Connect button (preferred):** PKCE OAuth — plugin opens browser to `/link`, user clicks Authorize → one-time code → plugin redeems at `POST /api/link/token` → per-device key issued. No key ever displayed.
