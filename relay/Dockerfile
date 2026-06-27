@@ -61,7 +61,7 @@ RUN chmod +x start.sh hook.sh 2>/dev/null || true
 # srt://<pod>:<mapped>?streamid=publish:<ingest-key>, gated by the per-pod ingest
 # key. The 8889 echo lets the broker verify the host forwards UDP + can reach the
 # platforms before committing.
-EXPOSE 1935 8080 8890/udp 8889/udp
+EXPOSE 1935 8080 8888 8890/udp 8889/udp
 
 # agent.py is the production entrypoint.
 # It handles pairing with Vercel, starting MediaMTX, and polling config.
