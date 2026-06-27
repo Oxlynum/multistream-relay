@@ -183,7 +183,7 @@ def _encode_flags(bv: int, fps: int) -> list[str]:
         "-preset", "p6", "-tune", "hq", "-multipass", "fullres",
         "-rc", "cbr", "-b:v", f"{bv}k", "-maxrate", f"{bv}k", "-bufsize", f"{bufsize}k",
         "-profile:v", "high", "-g", str(gop),
-        "-bf", "3", "-b_ref_mode", "middle", "-rc-lookahead", "32",
+        "-bf", "0", "-rc-lookahead", "8",
         "-spatial-aq", "1", "-temporal-aq", "1", "-aq-strength", "6",
         "-r", str(fps),
         "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
@@ -351,7 +351,7 @@ def build_group_cmd(
         cmd += ["-vf", f"scale_cuda=-2:{max_h}"]
 
     cmd += _encode_flags(bv, fps)
-    cmd += ["-f", "tee", _tee_targets(outputs)]
+    cmd += ["-flush_packets", "1", "-f", "tee", _tee_targets(outputs)]
     return cmd
 
 
