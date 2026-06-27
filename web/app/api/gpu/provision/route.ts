@@ -209,6 +209,11 @@ async function runV2Race({ userId, lat, lon, imageTag, podEnv, userOutputs, supa
 
   const podName = `slimcast-${userId.slice(0, 8)}`
 
+  // Serialize racer writes: both pods in a round call onRacerCreated concurrently.
+  // Without this lock the second write races the first and overwrites it, leaving
+  // one racer invisible to /api/agent/failed (which then wrongly declares all dead
+  // and rotates the key before the invisible pod can pair).
+  let racerWriteLock = Promise.resolve()
   const raceResult = await startProvisionRace({
     lat, lon,
     name: podName,
@@ -217,19 +222,18 @@ async function runV2Race({ userId, lat, lon, imageTag, podEnv, userOutputs, supa
     userOutputs,
     racersN: 2,
     onRacerCreated: async (racer: RacerEntry) => {
-      // Read current racers, append this one, write back.
-      // Since UNIQUE(user_id) guarantees only one provision at a time per user,
-      // these calls are effectively serialized — no cross-user conflict.
-      const { data: row } = await supabase
-        .from('gpu_instances')
-        .select('racers')
-        .eq('user_id', userId)
-        .maybeSingle()
-      const current = (row?.racers ?? []) as RacerEntry[]
-      current.push(racer)
-      await supabase.from('gpu_instances')
-        .update({ racers: current, phase: 'racing', status: 'provisioning' })
-        .eq('user_id', userId)
+      await (racerWriteLock = racerWriteLock.then(async () => {
+        const { data: row } = await supabase
+          .from('gpu_instances')
+          .select('racers')
+          .eq('user_id', userId)
+          .maybeSingle()
+        const current = (row?.racers ?? []) as RacerEntry[]
+        current.push(racer)
+        await supabase.from('gpu_instances')
+          .update({ racers: current, phase: 'racing', status: 'provisioning' })
+          .eq('user_id', userId)
+      }))
     },
   })
 

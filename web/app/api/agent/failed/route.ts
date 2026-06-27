@@ -157,6 +157,9 @@ export async function POST(request: NextRequest) {
   // Skip candidates used in prior rounds (each round uses the next N in the ranked list).
   const skipN = (currentRound + 1) * 2  // 2 racers per round
 
+  // Same lock as in the provision route: concurrent pod creates must not
+  // race each other on the racers jsonb array (see provision/route.ts for details).
+  let racerWriteLock = Promise.resolve()
   const raceResult = await startProvisionRace({
     lat, lon,
     name: `slimcast-${userId.slice(0, 8)}`,
@@ -165,16 +168,18 @@ export async function POST(request: NextRequest) {
     racersN: 2,
     skipN,
     onRacerCreated: async (racer: RacerEntry) => {
-      const { data: row } = await supabase
-        .from('gpu_instances')
-        .select('racers')
-        .eq('user_id', userId)
-        .maybeSingle()
-      const current = (row?.racers ?? []) as RacerEntry[]
-      current.push(racer)
-      await supabase.from('gpu_instances')
-        .update({ racers: current, phase: 'racing', status: 'provisioning' })
-        .eq('user_id', userId)
+      await (racerWriteLock = racerWriteLock.then(async () => {
+        const { data: row } = await supabase
+          .from('gpu_instances')
+          .select('racers')
+          .eq('user_id', userId)
+          .maybeSingle()
+        const current = (row?.racers ?? []) as RacerEntry[]
+        current.push(racer)
+        await supabase.from('gpu_instances')
+          .update({ racers: current, phase: 'racing', status: 'provisioning' })
+          .eq('user_id', userId)
+      }))
     },
   })
 
