@@ -131,7 +131,9 @@ def _resolve_ertmp_url(out: dict) -> str:
         "client": {
             "name": "obs-studio",
             "version": "31.0.0",
-            "supported_codecs": ["h264", "h265"],
+            # Only declare h265 — if we list h264 too, Twitch may negotiate H.264
+            # and disconnect when we send HEVC (codec mismatch).
+            "supported_codecs": ["h265"],
         },
         "preferences": {
             "vod_track_audio": False,
@@ -158,6 +160,15 @@ def _resolve_ertmp_url(out: dict) -> str:
     )
     with urllib.request.urlopen(req, timeout=10) as resp:
         config = json.loads(resp.read())
+
+    # Log the negotiated codec/tracks so we can diagnose mismatches.
+    enc_cfgs = config.get("encoder_configurations", [])
+    codecs = [c.get("codec") or c.get("type", "?") for c in enc_cfgs]
+    resolutions = [f"{c.get('width')}x{c.get('height')}" for c in enc_cfgs]
+    print(f"[ertmp] GetClientConfiguration: {len(enc_cfgs)} track(s), codecs={codecs}, res={resolutions}", flush=True)
+    status = config.get("status", {})
+    if status:
+        print(f"[ertmp] status: {status}", flush=True)
 
     endpoints = config.get("ingest_endpoints", [])
     endpoint = next((e for e in endpoints if e.get("protocol") == "RTMPS"), None)
@@ -430,7 +441,7 @@ def build_ertmp_cmd(out: dict, source: str = LOCAL_SOURCE) -> list[str]:
         ingest_url = _full_rtmp_url(out)
         print(f"[ertmp] GetClientConfiguration failed ({exc}); using raw URL (will likely fail)", flush=True)
     return [
-        "ffmpeg", "-hide_banner", "-loglevel", "warning",
+        "ffmpeg", "-hide_banner", "-loglevel", "verbose",
         *_input_args(source),
         "-i", source,
         "-c", "copy",
