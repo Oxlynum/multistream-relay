@@ -30,7 +30,9 @@ import os
 import subprocess
 import threading
 import time
+import urllib.error
 import urllib.parse
+import urllib.request
 
 CONFIG_PATH = os.environ.get("RELAY_CONFIG", "config.json")
 # Loopback feed republished by MediaMTX. We pull over SRT (MPEG-TS), NOT RTSP:
@@ -62,6 +64,123 @@ CRASH_LOOP_MIN_RUNTIME = 15.0   # an exit sooner than this counts as a crash, no
 # on every apply) and literal-replace them in every log line. Literal replacement
 # is exact: no regex guesswork, no over-redaction of harmless path segments.
 _SECRETS: set[str] = set()
+
+
+# ---- eRTMP session cache -------------------------------------------------
+# GetClientConfiguration returns a per-session auth token valid ~48h. Cache it
+# so plan_runners() can call _resolve_ertmp_url() on every apply() (every 10s)
+# without hammering the Twitch API. Cleared by Supervisor.stop_all() so each
+# new stream start gets a fresh session.
+_ertmp_session_cache: dict[str, str] = {}  # stream_key -> resolved_url
+_ertmp_cache_lock = threading.Lock()
+
+
+def _get_gpu_info() -> dict:
+    """Query nvidia-smi for model, driver version, and VRAM."""
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name,driver_version,memory.total",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5,
+        )
+        parts = [p.strip() for p in result.stdout.strip().split("\n")[0].split(",")]
+        return {
+            "model": parts[0] if parts else "NVIDIA GPU",
+            "driver": parts[1] if len(parts) > 1 else "560.35",
+            "memory_bytes": int(parts[2]) * 1024 * 1024 if len(parts) > 2 else 10 * 1024 ** 3,
+        }
+    except Exception:
+        return {"model": "NVIDIA GPU", "driver": "560.35", "memory_bytes": 10 * 1024 ** 3}
+
+
+def _resolve_ertmp_url(out: dict) -> str:
+    """Call Twitch GetClientConfiguration to get a session ingest URL + auth token.
+
+    Twitch's Enhanced Broadcasting endpoint requires a per-session authentication
+    token in place of the raw stream key. The token encodes the negotiated quality
+    config and is verified by the ingest server — using the raw key causes exit 187.
+    """
+    stream_key = out.get("key", "").strip()
+    with _ertmp_cache_lock:
+        if stream_key in _ertmp_session_cache:
+            return _ertmp_session_cache[stream_key]
+
+    gpu = _get_gpu_info()
+    body = {
+        "service": "IVS",
+        "schema_version": "2025-01-25",
+        "authentication": stream_key,
+        "capabilities": {
+            "cpu": {"physical_cores": 4, "logical_cores": 8, "speed": None, "name": "Intel Xeon"},
+            "memory": {"total": 16 * 1024 ** 3, "free": 8 * 1024 ** 3},
+            "gaming_features": None,
+            "system": {
+                "version": "5.15.0", "name": "Ubuntu",
+                "build": 0, "release": "22.04", "revision": "",
+                "bits": 64, "arm": False, "armEmulation": False,
+            },
+            "gpu": [{
+                "model": gpu["model"],
+                "vendor_id": 4318,          # 0x10DE = NVIDIA
+                "device_id": 0,
+                "dedicated_video_memory": gpu["memory_bytes"],
+                "shared_system_memory": 0,
+                "driver_version": gpu["driver"],
+            }],
+        },
+        "client": {
+            "name": "obs-studio",
+            "version": "31.0.0",
+            "supported_codecs": ["h264", "h265"],
+        },
+        "preferences": {
+            "vod_track_audio": False,
+            "composition_gpu_index": 0,
+            "canvases": [{
+                "width": SOURCE_WIDTH, "height": SOURCE_HEIGHT,
+                "base_width": SOURCE_WIDTH, "base_height": SOURCE_HEIGHT,
+                "framerate": {"numerator": 60, "denominator": 1},
+            }],
+            "audio_samples_per_sec": 48000,
+            "audio_channels": 2,
+            "audio_fixed_buffering": False,
+            "audio_max_buffering_ms": 20,
+            "maximum_video_tracks": 1,
+        },
+    }
+
+    data = json.dumps(body).encode()
+    req = urllib.request.Request(
+        "https://ingest.twitch.tv/api/v3/GetClientConfiguration",
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        config = json.loads(resp.read())
+
+    endpoints = config.get("ingest_endpoints", [])
+    endpoint = next((e for e in endpoints if e.get("protocol") == "RTMPS"), None)
+    if endpoint is None and endpoints:
+        endpoint = endpoints[0]
+    if not endpoint:
+        raise ValueError(f"GetClientConfiguration returned no endpoints")
+
+    session_key = endpoint["authentication"]
+    url_template = endpoint["url_template"]
+    config_id = config.get("meta", {}).get("config_id", "")
+
+    resolved = url_template.replace("{stream_key}", session_key)
+    if config_id:
+        resolved += f"?clientConfigId={config_id}"
+
+    # Redact the session token just like we redact stream keys.
+    if len(session_key) >= 4:
+        _SECRETS.add(session_key)
+
+    with _ertmp_cache_lock:
+        _ertmp_session_cache[stream_key] = resolved
+    return resolved
 
 
 def _register_secrets(cfg: dict) -> None:
@@ -300,10 +419,16 @@ def build_passthrough_cmd(out: dict, source: str = LOCAL_SOURCE) -> list[str]:
 def build_ertmp_cmd(out: dict, source: str = LOCAL_SOURCE) -> list[str]:
     """HEVC copy -> Enhanced RTMP (eRTMP) for platforms that support it (Twitch).
 
-    FFmpeg's FLV muxer auto-negotiates the Enhanced RTMP handshake when it sees a
-    HEVC stream — no extra flags needed. The source HEVC + AAC from OBS passes
-    through untouched, skipping the landscape NVENC encode entirely.
+    Twitch Enhanced Broadcasting requires a per-session ingest URL and auth token
+    from GetClientConfiguration; using the raw stream key causes an immediate
+    disconnect (exit 187). _resolve_ertmp_url() fetches + caches this token.
     """
+    try:
+        ingest_url = _resolve_ertmp_url(out)
+    except Exception as exc:
+        # Log and fall back to the configured URL so the runner starts and logs the error.
+        ingest_url = _full_rtmp_url(out)
+        print(f"[ertmp] GetClientConfiguration failed ({exc}); using raw URL (will likely fail)", flush=True)
     return [
         "ffmpeg", "-hide_banner", "-loglevel", "warning",
         *_input_args(source),
@@ -311,7 +436,7 @@ def build_ertmp_cmd(out: dict, source: str = LOCAL_SOURCE) -> list[str]:
         "-c", "copy",
         "-f", "flv",
         "-flvflags", "no_duration_filesize",
-        _full_rtmp_url(out),
+        ingest_url,
     ]
 
 
@@ -624,6 +749,8 @@ class Supervisor:
         with self.lock:
             for runner in self.runners.values():
                 runner.stop()
+        with _ertmp_cache_lock:
+            _ertmp_session_cache.clear()
 
     def restart_all(self, cfg: dict) -> None:
         self.stop_all()
