@@ -229,7 +229,7 @@ export const vastProvider: GpuProvider = {
       (o.internet_up_cost_per_tb ?? 0) <= MAX_EGRESS_COST_PER_TB &&  // reject bandwidth gougers
       allInPricePerHr(o) <= maxPricePerHr &&                          // all-in, not just GPU
       !MACHINE_DENYLIST.has(o.machine_id) &&                          // skip known GPU-blind hosts (by machine)
-      nvencPreferenceTier(o) === 0 &&                                 // Hard-reject driver 570+ regression
+      (o.gpu_frac ?? 1) >= 1.0 &&                                    // whole GPU only — fractional shares fail CUDA_ERROR_NO_DEVICE regardless of driver
       !!o.public_ipaddr,
     )
     if (usable.length === 0) return []
