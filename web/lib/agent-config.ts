@@ -78,6 +78,22 @@ export function buildAgentOutputs(
       }
     }
 
+    // Twitch landscape → HEVC passthrough via Enhanced RTMP (eRTMP).
+    // Twitch supports eRTMP natively; this skips the landscape NVENC H.264 encode
+    // entirely, saving an NVENC session and sending better-quality HEVC directly.
+    if (p.platform === 'twitch' && orientation === 'landscape') {
+      return {
+        name: p.platform,
+        url: 'rtmps://ingest.global-contribute.live-video.net:443/app',
+        key: streamKey,
+        bitrate_kbps: perOutput?.bitrate_kbps ?? (p.bitrate_kbps ?? defaultBitrate(p.platform)),
+        fps: p.fps ?? 60,
+        orientation,
+        mode: 'ertmp',
+        resolution,
+        enabled: p.enabled,
+      }
+    }
 
     // Per-output bitrate wins; fall back to group cap, then platform default.
     const bitrate = perOutput?.bitrate_kbps
