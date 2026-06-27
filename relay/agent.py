@@ -373,7 +373,6 @@ def _gpu_self_test(attempts: int = 2) -> tuple[bool, str]:
             hevc_dec = subprocess.run([
                 "ffmpeg", "-hide_banner", "-loglevel", "error",
                 "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
-                "-c:v", "hevc_cuvid",
                 "-i", hevc_tmp,
                 "-f", "null", "-",
             ], capture_output=True, text=True, timeout=25)
