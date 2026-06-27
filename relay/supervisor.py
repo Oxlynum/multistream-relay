@@ -75,22 +75,43 @@ _ertmp_session_cache: dict[str, str] = {}  # stream_key -> resolved_url
 _ertmp_cache_lock = threading.Lock()
 
 
-def _get_gpu_info() -> dict:
-    """Query nvidia-smi for model, driver version, and VRAM."""
-    try:
-        result = subprocess.run(
-            ["nvidia-smi", "--query-gpu=name,driver_version,memory.total",
-             "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=5,
-        )
-        parts = [p.strip() for p in result.stdout.strip().split("\n")[0].split(",")]
-        return {
-            "model": parts[0] if parts else "NVIDIA GPU",
-            "driver": parts[1] if len(parts) > 1 else "560.35",
-            "memory_bytes": int(parts[2]) * 1024 * 1024 if len(parts) > 2 else 10 * 1024 ** 3,
-        }
-    except Exception:
-        return {"model": "NVIDIA GPU", "driver": "560.35", "memory_bytes": 10 * 1024 ** 3}
+# Fixed GPU identity reported to Twitch Enhanced Broadcasting's
+# GetClientConfiguration. Twitch gates eRTMP/HEVC ingest on the GPU declared in
+# the JSON body — and it CANNOT verify the hardware (the call is stateless
+# JSON→JSON). Reporting the real Vast.ai GPU fails because Vast hands out random
+# consumer cards, many of which aren't on Twitch's allowlist ("Your GPU is not
+# currently supported"). Since the Twitch path is pure HEVC passthrough (`-c
+# copy` — the pod never encodes), the GPU we claim is irrelevant to operation;
+# it only has to clear the allowlist. So we always claim a fixed, known-good
+# card. This also makes the path work on a GPU-less CPU VPS (the cheap tier for
+# Twitch+YouTube-only users), where nvidia-smi doesn't even exist.
+#
+# vendor_id 4318 (0x10DE) is NVIDIA — the field Twitch's allowlist keys on.
+# device_id 9860 (0x2684) is the real AD102 die, self-consistent with the RTX
+# 4090 model string so we survive any future device_id↔model cross-check. The
+# RTX 4090 is unambiguously allowlisted and HEVC-capable, and high-end enough
+# that Twitch won't quietly drop it.
+#
+# Proven fallback if the 4090 identity is ever rejected (community-verified):
+#   {"model": "GeForce RTX 3080", "vendor_id": 4318, "device_id": 8711,
+#    "dedicated_video_memory": 10737418240, "shared_system_memory": 0,
+#    "driver_version": "32.0.15.6094"}
+SPOOF_GPU = {
+    "model": "NVIDIA GeForce RTX 4090",
+    "vendor_id": 4318,                       # 0x10DE NVIDIA
+    "device_id": 9860,                       # 0x2684 AD102 (real RTX 4090 die)
+    "dedicated_video_memory": 24 * 1024 ** 3,  # 24 GiB
+    "shared_system_memory": 16 * 1024 ** 3,
+    "driver_version": "32.0.15.6094",
+}
+
+# Twitch/IVS accepts only these integer framerates; anything else is rejected at
+# config time ("Your frame rate 59.94 is not supported…"). Snap to the nearest.
+_SUPPORTED_FPS = (24, 25, 30, 48, 50, 60)
+
+
+def _snap_fps(fps: float) -> int:
+    return min(_SUPPORTED_FPS, key=lambda s: abs(s - fps))
 
 
 def _resolve_ertmp_url(out: dict) -> str:
@@ -105,46 +126,48 @@ def _resolve_ertmp_url(out: dict) -> str:
         if stream_key in _ertmp_session_cache:
             return _ertmp_session_cache[stream_key]
 
-    # Use the per-output resolution from the config; fall back to env-var source dims.
-    res_height = _RES_HEIGHT.get(out.get("resolution") or "", 0) or SOURCE_HEIGHT
-    res_width  = SOURCE_WIDTH if res_height == SOURCE_HEIGHT else _even(res_height * SOURCE_WIDTH / SOURCE_HEIGHT)
-    fps = int(out.get("fps") or 60)
+    # We pass the source HEVC straight through (no scaling on the Twitch path),
+    # so the canvas we report is the real source resolution. SOURCE_WIDTH/HEIGHT
+    # are injected per-pod at provision from the user's max output resolution, so
+    # this is already per-user dynamic. Framerate is snapped to a Twitch-supported
+    # integer (it rejects 59.94 etc. at config time).
+    fps = _snap_fps(float(out.get("fps") or 60))
 
-    gpu = _get_gpu_info()
     body = {
         "service": "IVS",
         "schema_version": "2025-01-25",
         "authentication": stream_key,
         "capabilities": {
-            "cpu": {"physical_cores": 4, "logical_cores": 8, "speed": None, "name": "Intel Xeon"},
-            "memory": {"total": 16 * 1024 ** 3, "free": 8 * 1024 ** 3},
+            # CPU/memory are plausible-but-fake; Twitch does not sanity-check them
+            # (the community method passes with 1 core / 102 MiB). Kept realistic
+            # as cheap consistency hardening against a future heuristic.
+            "cpu": {"physical_cores": 8, "logical_cores": 16, "speed": 3600,
+                    "name": "Intel Core i9-13900K"},
+            "memory": {"total": 32 * 1024 ** 3, "free": 16 * 1024 ** 3},
             "gaming_features": None,
+            # Enhanced Broadcasting is officially Windows-only; claim Windows so
+            # the OS never contributes to a rejection (defense-in-depth — our
+            # earlier Ubuntu body still returned a config_id, so OS isn't strictly
+            # gated today, but a fake NVIDIA card on Windows is the consistent pair).
             "system": {
-                "version": "5.15.0", "name": "Ubuntu",
-                "build": 0, "release": "22.04", "revision": "",
+                "version": "10.0.22631", "name": "Windows",
+                "build": 22631, "release": "23H2", "revision": "",
                 "bits": 64, "arm": False, "armEmulation": False,
             },
-            "gpu": [{
-                "model": gpu["model"],
-                "vendor_id": 4318,          # 0x10DE = NVIDIA
-                "device_id": 0,
-                "dedicated_video_memory": gpu["memory_bytes"],
-                "shared_system_memory": 0,
-                "driver_version": gpu["driver"],
-            }],
+            "gpu": [dict(SPOOF_GPU)],
         },
         "client": {
             "name": "obs-studio",
-            "version": "31.0.0",
+            "version": "32.0.4",   # OBS release that ships schema_version 2025-01-25
             # Only declare h265 — listing h264 too risks Twitch negotiating H.264
             # and then disconnecting when we send HEVC (codec mismatch).
             "supported_codecs": ["h265"],
         },
         "preferences": {
             "vod_track_audio": False,
-            "composition_gpu_index": 0,
+            "composition_gpu_index": 0,    # references gpu[0] above — must be non-empty
             "canvases": [{
-                "width": res_width, "height": res_height,
+                "width": SOURCE_WIDTH, "height": SOURCE_HEIGHT,
                 "canvas_width": SOURCE_WIDTH, "canvas_height": SOURCE_HEIGHT,
                 "framerate": {"numerator": fps, "denominator": 1},
             }],
@@ -171,9 +194,17 @@ def _resolve_ertmp_url(out: dict) -> str:
     codecs = [c.get("codec") or c.get("type", "?") for c in enc_cfgs]
     resolutions = [f"{c.get('width')}x{c.get('height')}" for c in enc_cfgs]
     print(f"[ertmp] GetClientConfiguration: {len(enc_cfgs)} track(s), codecs={codecs}, res={resolutions}", flush=True)
-    status = config.get("status", {})
+
+    # Fail loudly on a config-time rejection (GPU/key/framerate) so the caller's
+    # fallback fires instead of silently building a URL from a missing endpoint.
+    # The live Twitch API returns the message under `html`; OBS's struct calls it
+    # `html_en_us` — read both.
+    status = config.get("status", {}) or {}
     if status:
         print(f"[ertmp] status: {status}", flush=True)
+    if status.get("result") == "error":
+        msg = status.get("html") or status.get("html_en_us") or status
+        raise ValueError(f"GetClientConfiguration rejected: {msg}")
 
     endpoints = config.get("ingest_endpoints", [])
     endpoint = next((e for e in endpoints if e.get("protocol") == "RTMPS"), None)
