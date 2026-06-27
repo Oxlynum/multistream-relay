@@ -105,6 +105,11 @@ def _resolve_ertmp_url(out: dict) -> str:
         if stream_key in _ertmp_session_cache:
             return _ertmp_session_cache[stream_key]
 
+    # Use the per-output resolution from the config; fall back to env-var source dims.
+    res_height = _RES_HEIGHT.get(out.get("resolution") or "", 0) or SOURCE_HEIGHT
+    res_width  = SOURCE_WIDTH if res_height == SOURCE_HEIGHT else _even(res_height * SOURCE_WIDTH / SOURCE_HEIGHT)
+    fps = int(out.get("fps") or 60)
+
     gpu = _get_gpu_info()
     body = {
         "service": "IVS",
@@ -131,17 +136,17 @@ def _resolve_ertmp_url(out: dict) -> str:
         "client": {
             "name": "obs-studio",
             "version": "31.0.0",
-            # Only declare h265 — if we list h264 too, Twitch may negotiate H.264
-            # and disconnect when we send HEVC (codec mismatch).
+            # Only declare h265 — listing h264 too risks Twitch negotiating H.264
+            # and then disconnecting when we send HEVC (codec mismatch).
             "supported_codecs": ["h265"],
         },
         "preferences": {
             "vod_track_audio": False,
             "composition_gpu_index": 0,
             "canvases": [{
-                "width": SOURCE_WIDTH, "height": SOURCE_HEIGHT,
-                "base_width": SOURCE_WIDTH, "base_height": SOURCE_HEIGHT,
-                "framerate": {"numerator": 60, "denominator": 1},
+                "width": res_width, "height": res_height,
+                "canvas_width": SOURCE_WIDTH, "canvas_height": SOURCE_HEIGHT,
+                "framerate": {"numerator": fps, "denominator": 1},
             }],
             "audio_samples_per_sec": 48000,
             "audio_channels": 2,
