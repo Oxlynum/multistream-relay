@@ -41,3 +41,13 @@ jobs:
             ${{ env.IMAGE }}:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Pin Vercel to new image SHA
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: |
+          npx vercel env rm SLIMCAST_RELAY_IMAGE production --yes --token=$VERCEL_TOKEN 2>/dev/null || true
+          echo "${{ env.IMAGE }}:${{ github.sha }}" | npx vercel env add SLIMCAST_RELAY_IMAGE production --token=$VERCEL_TOKEN
+          npx vercel --prod --token=$VERCEL_TOKEN --yes
