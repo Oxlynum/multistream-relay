@@ -139,7 +139,7 @@ export async function POST(request: Request) {
   const landscapeCap: number = (profileBitrates as { landscape_bitrate_kbps?: number } | null)?.landscape_bitrate_kbps ?? 6000
   const portraitCap: number  = (profileBitrates as { portrait_bitrate_kbps?: number } | null)?.portrait_bitrate_kbps ?? 4000
   const has2kAddon = (profileBitrates as { has_2k_addon?: boolean } | null)?.has_2k_addon ?? false
-  const costCeilingUsd = has2kAddon ? 1.5 : 1.0
+  const costCeilingUsd = has2kAddon ? 1.0 : 0.5
 
   const outputSettings = ((profileBitrates as { output_settings?: Record<string, { resolution?: string }> } | null)?.output_settings) ?? {}
   const maxResLabel = Object.values(outputSettings)

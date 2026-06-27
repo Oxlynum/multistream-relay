@@ -133,7 +133,7 @@ export async function POST(request: NextRequest) {
     .single()
 
   const has2kAddon = (profile as { has_2k_addon?: boolean } | null)?.has_2k_addon ?? false
-  const costCeilingUsd = has2kAddon ? 1.5 : 1.0
+  const costCeilingUsd = has2kAddon ? 1.0 : 0.5
   const outputSettings = ((profile as { output_settings?: Record<string, { resolution?: string }> } | null)?.output_settings) ?? {}
   const maxResLabel = Object.values(outputSettings)
     .map(s => s?.resolution)

@@ -4,8 +4,9 @@
 
 // Never auto-provision a host above this all-in hourly price. Enforced twice: the
 // provider's candidate filter (pricePerHr) AND the live cost guard against the
-// provider's real reported price.
-export const PRICE_CEILING = 1.00
+// provider's real reported price. This is the baseline (1080p) ceiling — 2K streams
+// use a higher ceiling set at provision time in SLIMCAST_COST_CEILING_USD.
+export const PRICE_CEILING = 0.50
 
 // Readiness gate: after a pod is created we poll until it has a public IP + mapped
 // ingest ports (i.e. it actually booted). If it never does within the timeout,
