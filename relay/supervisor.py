@@ -214,12 +214,7 @@ def _tee_targets(outputs: list[dict]) -> str:
         url = _full_rtmp_url(o)
         if not _tee_safe(url):
             continue
-        # use_fifo runs each RTMP output in a separate thread with a packet queue.
-        # When TCP backs up (congestion), the encoder keeps running and the queue
-        # absorbs the backlog instead of stalling the whole pipeline. 512 packets
-        # ≈ 8s buffer at 60fps. drop_pkts_on_overflow drops oldest packets if the
-        # queue fills (long-lasting congestion) rather than blocking the encoder.
-        parts.append(f"[f=flv:onfail=ignore:use_fifo=1:fifo_options=queue_size=512\\:drop_pkts_on_overflow=1]{url}")
+        parts.append(f"[f=flv:onfail=ignore]{url}")
     return "|".join(parts)
 
 
