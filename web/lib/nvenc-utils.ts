@@ -2,7 +2,7 @@ export interface UserOutputConfig {
   orientation: string  // 'landscape' | 'portrait'
   resolution: string   // e.g. '1080p'
   bitrate_kbps: number
-  mode: string         // 'passthrough' | 'transcode'
+  mode: string         // 'passthrough' | 'ertmp' | 'transcode'
   enabled: boolean
 }
 
@@ -13,7 +13,8 @@ export interface UserOutputConfig {
  *   - Platforms with the same (orientation, resolution, bitrate_kbps) are tee'd
  *     onto a single encoder → 1 session regardless of how many platforms share it.
  *   - Portrait and landscape are always separate sessions (different crop+scale).
- *   - Passthrough (YouTube HEVC copy) uses 0 NVENC sessions.
+ *   - Passthrough (YouTube HEVC HLS copy) AND ertmp (eligible-Twitch HEVC eRTMP
+ *     copy) both use 0 NVENC sessions — they are `-c copy`, no re-encode.
  *
  * Consumer GeForce cards (RTX 3090/4090/5090) have a 3-session hardware cap.
  * When this returns >3, the broker must skip consumer GPUs.
@@ -21,7 +22,7 @@ export interface UserOutputConfig {
 export function requiredNvencSessions(outputs: UserOutputConfig[]): number {
   const tuples = new Set<string>()
   for (const o of outputs) {
-    if (!o.enabled || o.mode === 'passthrough') continue
+    if (!o.enabled || o.mode === 'passthrough' || o.mode === 'ertmp') continue
     tuples.add(`${o.orientation}|${o.resolution}|${o.bitrate_kbps}`)
   }
   return tuples.size

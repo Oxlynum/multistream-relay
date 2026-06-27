@@ -27,3 +27,22 @@ export const MAX_BOOT_ATTEMPTS = 2
 // central US minimizes worst-case latency for an unknown US user.
 export const FALLBACK_LAT = 39.0
 export const FALLBACK_LON = -95.0
+
+// ── VPS-as-the-Hub knobs (lib/vps-broker.ts) ─────────────────────────────────
+// Never spawn a hub above this hourly price. Per §1b the cheapest 22TB-bundle hub
+// (cx23) is ~$0.0104/hr; $0.20 leaves headroom up to ~cpx42/cx53 while still
+// excluding the big dedicated boxes a passthrough hub never needs.
+export const VPS_PRICE_CEILING = 0.20
+
+// How long a spawning hub has to POST /api/agent/ready before the reaper abandons
+// it. Generous because first boot includes a cloud-init docker-pull of the private
+// relay image (Phase 4 prebuilt snapshot will shrink this).
+export const VPS_READINESS_TIMEOUT_MS = 300_000
+
+// Scale-to-zero (Clock B): a live hub with session_count==0 is destroyed after this
+// idle grace, so brief gaps / quick restarts don't thrash the box.
+export const HUB_IDLE_GRACE_MS = 10 * 60 * 1000
+
+// Default per-box tenant capacity (load-test §10.4 pending; the box is bandwidth-
+// bound on its 22TB bundle, not CPU-bound, once the preview is off).
+export const HUB_MAX_SESSIONS = 10

@@ -1,6 +1,8 @@
 import { createServerClient } from '@/lib/supabase'
 import { generateApiKey, hashApiKey, authenticateUserOrAgent } from '@/lib/agent-auth'
 import { provisionGpu, startProvisionRace, type UserOutputConfig, type RacerEntry } from '@/lib/gpu-broker'
+import { acquireHubOrSpawn } from '@/lib/vps-broker'
+import { classifyMode, needsTranscode } from '@/lib/agent-config'
 import { teardownInstance, sweepStalePods } from '@/lib/pod-teardown'
 import { checkRateLimit } from '@/lib/rate-limit'
 import { FALLBACK_LAT, FALLBACK_LON } from '@/lib/datacenters'
@@ -132,7 +134,7 @@ export async function POST(request: Request) {
       .single(),
     supabase
       .from('platform_connections')
-      .select('platform, orientation, enabled, bitrate_kbps')
+      .select('platform, orientation, enabled, bitrate_kbps, twitch_hevc_eligible, twitch_use_passthrough')
       .eq('user_id', userId),
   ])
 
@@ -156,12 +158,19 @@ export async function POST(request: Request) {
 
   const userOutputs: UserOutputConfig[] = (platformRows ?? []).map((p: {
     platform: string; orientation: string | null; enabled: boolean; bitrate_kbps: number | null
+    twitch_hevc_eligible?: boolean | null; twitch_use_passthrough?: boolean | null
   }) => {
     const orientation = p.orientation ?? 'landscape'
-    const isPassthrough = p.platform === 'youtube' && orientation === 'landscape'
+    // Mode-aware (mirrors agent-config exactly — landmine #10): an eligible-Twitch
+    // eRTMP stream is passthrough-class (no NVENC), so it must NOT force a GPU rental.
+    const mode = classifyMode(p.platform, orientation, p.twitch_hevc_eligible, p.twitch_use_passthrough)
     const bitrate = p.bitrate_kbps ?? (orientation === 'portrait' ? portraitCap : landscapeCap)
-    return { orientation, resolution: '1080p', bitrate_kbps: bitrate, mode: isPassthrough ? 'passthrough' : 'transcode', enabled: p.enabled }
+    return { orientation, resolution: '1080p', bitrate_kbps: bitrate, mode, enabled: p.enabled }
   })
+
+  // VPS-as-the-Hub: a stream with zero GPU-needing outputs (all passthrough/ertmp)
+  // can run on a card-less VPS hub. needsGpu gates the S5 broker branch below.
+  const needsGpu = needsTranscode(userOutputs)
 
   const podEnv = [
     { key: 'SLIMCAST_API_KEY',        value: podRawKey },
@@ -185,6 +194,22 @@ export async function POST(request: Request) {
     provision_lat: lat,
     provision_lon: lon,
   }).eq('user_id', userId)
+
+  // ── VPS-as-the-Hub path (behind flag) ──────────────────────────────────────
+  // A stream whose every enabled output is GPU-free (passthrough/ertmp) runs on a
+  // shared, card-less Hetzner hub — no GPU rented. Inert until SLIMCAST_VPS_HUB.
+  if (process.env.SLIMCAST_VPS_HUB === 'true' && !needsGpu) {
+    // The hub authenticates with its OWN 'vps' key; the per-user pod key minted
+    // above is unused for hub sessions, so drop it.
+    await supabase.from('agent_api_keys').delete().eq('user_id', userId).eq('label', 'pod')
+    const hub = await acquireHubOrSpawn({ userId, lat, lon, imageTag, callbackUrl, supabase })
+    if (!hub.ok) {
+      await releaseClaim()
+      return Response.json({ error: 'No VPS capacity available right now.', detail: hub.error }, { status: 503 })
+    }
+    console.log(`[provision] VPS hub ${hub.attached ? 'attached' : 'spawned'} for ${userId}: hub=${hub.hubId} status=${hub.status} region=${hub.region}`)
+    return Response.json({ ok: true, vps_hub: true, attached: hub.attached, status: hub.status })
+  }
 
   // ── Broker path selection ──────────────────────────────────────────────────
   const useV2 = process.env.SLIMCAST_BROKER_V2 !== 'false'  // default ON

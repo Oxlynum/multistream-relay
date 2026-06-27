@@ -52,6 +52,26 @@ export function bitrateRange(platform: string): { min: number; max: number } {
   return PLATFORM_BITRATE_LIMITS[platform] ?? { min: 1000, max: 8000 }
 }
 
+// Single source of truth for which delivery path a platform takes. Used by
+// buildAgentOutputs AND the provision route (so the GPU-vs-VPS decision can't drift
+// from what the agent actually does — landmine #10):
+//   passthrough = YouTube landscape (HEVC over HLS, `-c copy`, no GPU)
+//   ertmp       = Twitch landscape, HEVC-eligible + opted in (eRTMP `-c copy`, no GPU)
+//   transcode   = everything else (NVENC re-encode, needs a GPU)
+export function classifyMode(
+  platform: string,
+  orientation: string,
+  twitchHevcEligible?: boolean | null,
+  twitchUsePassthrough?: boolean | null,
+): 'passthrough' | 'ertmp' | 'transcode' {
+  if (platform === 'youtube' && orientation === 'landscape') return 'passthrough'
+  if (
+    platform === 'twitch' && orientation === 'landscape' &&
+    twitchHevcEligible && (twitchUsePassthrough ?? true)
+  ) return 'ertmp'
+  return 'transcode'
+}
+
 export function buildAgentOutputs(
   platforms: PlatformRow[],
   outputSettings?: OutputSettingsMap,
@@ -68,8 +88,10 @@ export function buildAgentOutputs(
     const perOutput = outputSettings?.[p.platform]
     const resolution = perOutput?.resolution ?? '1080p'
 
+    const mode = classifyMode(p.platform, orientation, p.twitch_hevc_eligible, p.twitch_use_passthrough)
+
     // YouTube landscape → HEVC passthrough via HLS (YouTube RTMP endpoint is H.264-only).
-    if (p.platform === 'youtube' && orientation === 'landscape') {
+    if (mode === 'passthrough') {
       return {
         name: p.platform,
         url: youtubeHlsUrl(streamKey),
@@ -77,7 +99,7 @@ export function buildAgentOutputs(
         bitrate_kbps: perOutput?.bitrate_kbps ?? (p.bitrate_kbps ?? defaultBitrate(p.platform)),
         fps: p.fps ?? 60,
         orientation,
-        mode: 'passthrough',
+        mode,
         resolution,
         enabled: p.enabled,
       }
@@ -85,14 +107,11 @@ export function buildAgentOutputs(
 
     // Twitch landscape → HEVC passthrough via Enhanced RTMP (eRTMP), but ONLY for
     // channels Twitch authorizes for HEVC (Partner/select-Affiliate 2K tier) and
-    // when the user has opted into passthrough. Twitch rejects HEVC from
-    // non-eligible channels (it negotiates H.264 and drops the stream ~2s in), so
-    // everyone else falls through to the H.264 transcode path below. eRTMP skips
-    // the NVENC encode entirely — better quality, no GPU encode cost.
-    if (
-      p.platform === 'twitch' && orientation === 'landscape' &&
-      p.twitch_hevc_eligible && (p.twitch_use_passthrough ?? true)
-    ) {
+    // when the user has opted into passthrough (classifyMode gates this). Twitch
+    // rejects HEVC from non-eligible channels (negotiates H.264, drops ~2s in), so
+    // everyone else falls through to the H.264 transcode path below. eRTMP skips the
+    // NVENC encode entirely — better quality, no GPU encode cost.
+    if (mode === 'ertmp') {
       return {
         name: p.platform,
         url: 'rtmps://ingest.global-contribute.live-video.net:443/app',
@@ -100,7 +119,7 @@ export function buildAgentOutputs(
         bitrate_kbps: perOutput?.bitrate_kbps ?? (p.bitrate_kbps ?? defaultBitrate(p.platform)),
         fps: p.fps ?? 60,
         orientation,
-        mode: 'ertmp',
+        mode,
         resolution,
         enabled: p.enabled,
       }
@@ -117,9 +136,35 @@ export function buildAgentOutputs(
       bitrate_kbps: bitrate,
       fps: p.fps ?? 60,
       orientation,
-      mode: 'transcode',
+      mode,
       resolution,
       enabled: p.enabled,
     }
   })
+}
+
+// VPS-as-the-Hub: an output is GPU-free iff its mode is passthrough (YouTube HLS
+// `-c copy`) or ertmp (eligible-Twitch HEVC `-c copy`). 'transcode' needs NVENC.
+export type AgentOutput = ReturnType<typeof buildAgentOutputs>[number]
+
+export function isPassthroughMode(mode: string): boolean {
+  return mode === 'passthrough' || mode === 'ertmp'
+}
+
+// True iff any ENABLED output needs a GPU (mode==='transcode'). Used by the broker
+// to decide VPS-only (passthrough) vs VPS+GPU (Phase 2). Structural input so both
+// AgentOutput[] and the provision route's UserOutputConfig[] qualify. Do NOT reuse
+// requiredNvencSessions() for this intent — same idea, but keep them separate.
+export function needsTranscode(outputs: Array<{ enabled: boolean; mode: string }>): boolean {
+  return outputs.some(o => o.enabled && o.mode === 'transcode')
+}
+
+// The VPS hub runs ONLY the GPU-free outputs. Thin filter over buildAgentOutputs so
+// the per-platform routing (YouTube HLS, Twitch eligibility gate) never forks.
+export function buildVpsConfig(
+  platforms: PlatformRow[],
+  outputSettings?: OutputSettingsMap,
+  groups?: GroupBitrates,
+): AgentOutput[] {
+  return buildAgentOutputs(platforms, outputSettings, groups).filter(o => isPassthroughMode(o.mode))
 }

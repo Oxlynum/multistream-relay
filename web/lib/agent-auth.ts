@@ -45,6 +45,52 @@ export async function authenticateAgentDetailed(
 }
 
 /**
+ * VPS-as-the-Hub: authenticate a NODE key (a shared box's own key), NOT a user.
+ *
+ * A multi-tenant VPS hub has ONE 'vps' key that serves many tenants, so it has no
+ * single owning user — folding it into the userId path (authenticateAgent) would
+ * silently scope every hub request to one tenant. This sibling resolves the hub by
+ * matching the key hash against vps_hubs.hub_key_hash. ('gpu' backend keys, Phase 2,
+ * resolve the same way against relay_nodes.) Returns null for user/pod/device keys.
+ */
+export interface NodeAuth {
+  nodeKeyHash: string
+  role: 'vps' | 'gpu'
+  hubId?: string   // set for role==='vps'
+}
+
+export async function authenticateNode(request: Request): Promise<NodeAuth | null> {
+  const auth = request.headers.get('authorization')
+  if (!auth?.startsWith('Bearer ')) return null
+  const rawKey = auth.slice(7).trim()
+  if (!rawKey) return null
+
+  const keyHash = hashApiKey(rawKey)
+  const supabase = createServerClient()
+
+  const { data: keyRow } = await supabase
+    .from('agent_api_keys')
+    .select('label')
+    .eq('key_hash', keyHash)
+    .single()
+  if (!keyRow) return null
+
+  if (keyRow.label === 'vps') {
+    const { data: hub } = await supabase
+      .from('vps_hubs')
+      .select('id')
+      .eq('hub_key_hash', keyHash)
+      .maybeSingle()
+    if (!hub?.id) return null
+    return { nodeKeyHash: keyHash, role: 'vps', hubId: hub.id }
+  }
+  if (keyRow.label === 'gpu') {
+    return { nodeKeyHash: keyHash, role: 'gpu' }
+  }
+  return null   // user/pod/device keys are not node keys
+}
+
+/**
  * Resolve a user from either an agent API key (OBS plugin) or a Supabase
  * session JWT (dashboard) — both arrive in the Authorization: Bearer header.
  * Used by the GPU lifecycle + credit routes that both surfaces call.

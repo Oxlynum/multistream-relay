@@ -1,8 +1,20 @@
 import type { NextRequest } from 'next/server'
-import { authenticateAgent, generateApiKey, hashApiKey } from '@/lib/agent-auth'
+import { authenticateAgent, authenticateNode, generateApiKey, hashApiKey } from '@/lib/agent-auth'
 import { createServerClient } from '@/lib/supabase'
 import { startProvisionRace, type RacerEntry } from '@/lib/gpu-broker'
 import { getProvider } from '@/lib/providers'
+import { teardownHub } from '@/lib/pod-teardown'
+
+// VPS-as-the-Hub: a hub reports a fatal startup error. The box is confirmed dead, so
+// tear it down immediately (destroy server + release primary IP + error its tenants)
+// rather than waiting for the reaper — Hetzner bills hourly. No GPU race rounds (a
+// hub isn't raced). Checked first so a 'vps' key doesn't hit the pod-race path.
+async function handleVpsFailed(request: NextRequest, hubId: string): Promise<Response> {
+  const body = await request.json().catch(() => ({})) as { reason?: string }
+  console.log(`[agent/failed] vps hub ${hubId} fatal: ${body.reason ?? 'unknown'}`)
+  await teardownHub(hubId, `agent_failed:${body.reason ?? 'unknown'}`)
+  return Response.json({ ack: true })
+}
 
 // Pod self-reports that it cannot serve (GPU self-test failed or fatal boot error).
 //
@@ -13,6 +25,12 @@ import { getProvider } from '@/lib/providers'
 const MAX_RACE_ROUNDS = 2   // rounds 0, 1, 2 → max 3 rounds × N racers each
 
 export async function POST(request: NextRequest) {
+  // Role-aware: a 'vps' hub key resolves to a hub, not a user — handle first.
+  const node = await authenticateNode(request)
+  if (node?.role === 'vps' && node.hubId) {
+    return handleVpsFailed(request, node.hubId)
+  }
+
   const userId = await authenticateAgent(request)
   if (!userId) {
     return Response.json({ error: 'Unauthorized' }, { status: 401 })

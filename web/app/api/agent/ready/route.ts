@@ -1,8 +1,38 @@
 import type { NextRequest } from 'next/server'
-import { authenticateAgent, hashApiKey } from '@/lib/agent-auth'
+import { authenticateAgent, authenticateNode, hashApiKey } from '@/lib/agent-auth'
 import { createServerClient } from '@/lib/supabase'
 import { getProvider } from '@/lib/providers'
 import type { RacerEntry } from '@/lib/gpu-broker'
+
+// VPS-as-the-Hub readiness (role-aware): a hub reports healthy at the BOX level —
+// flip vps_hubs to 'live' and promote its attached provisioning tenants to running
+// (so /api/gpu/status starts serving each tenant's srt_url). NO per-session CAS, no
+// winner/loser (a hub is deterministic, not raced N-wide), and it never touches a
+// tenant's session except the provisioning→running promotion. Checked FIRST so a
+// 'vps' key (which also carries a user_id in agent_api_keys) never falls into the
+// per-user pod CAS path below.
+async function handleVpsReady(request: NextRequest, hubId: string): Promise<Response> {
+  const body = await request.json().catch(() => ({})) as { ip?: string }
+  const supabase = createServerClient()
+  const nowIso = new Date().toISOString()
+
+  const hubUpdate: Record<string, unknown> = { status: 'live', last_seen_at: nowIso }
+  if (body.ip) hubUpdate.ip_address = body.ip
+  await supabase.from('vps_hubs').update(hubUpdate).eq('id', hubId)
+
+  const { data: hub } = await supabase.from('vps_hubs').select('ip_address').eq('id', hubId).maybeSingle()
+  const hubIp = body.ip ?? hub?.ip_address ?? null
+
+  // Promote tenants that attached while the hub was spawning. (Attaches to an
+  // already-live hub were set 'running' at attach time — this is for the spawner +
+  // early joiners.)
+  const sessionUpdate: Record<string, unknown> = { status: 'running', phase: 'ready', last_seen_at: nowIso }
+  if (hubIp) sessionUpdate.ip_address = hubIp
+  await supabase.from('gpu_instances').update(sessionUpdate).eq('vps_hub_id', hubId).eq('status', 'provisioning')
+
+  console.log(`[agent/ready] vps hub ${hubId} live ip=${hubIp}`)
+  return Response.json({ ok: true })
+}
 
 // Pod self-reports that it is healthy and serving.
 //
@@ -14,6 +44,13 @@ import type { RacerEntry } from '@/lib/gpu-broker'
 // CAS: the first pod to POST ready for this session WINS — its IP/port are saved
 // and its SRT URL becomes serveable. All other racers are told to self-destruct.
 export async function POST(request: NextRequest) {
+  // Role-aware: a 'vps' hub key resolves to a hub (never a single user), so handle
+  // it before the per-user pod CAS path.
+  const node = await authenticateNode(request)
+  if (node?.role === 'vps' && node.hubId) {
+    return handleVpsReady(request, node.hubId)
+  }
+
   const userId = await authenticateAgent(request)
   if (!userId) {
     return Response.json({ error: 'Unauthorized' }, { status: 401 })

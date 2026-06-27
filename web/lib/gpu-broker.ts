@@ -43,7 +43,7 @@ const RTMP_PROBE_RETRY_MS = 3000
 // Fast-failing on these avoids spinning out the full READINESS_TIMEOUT_MS.
 const TERMINAL_STATES = new Set(['exited', 'stopped', 'offline', 'error', 'terminated'])
 
-function haversineKm(aLat: number, aLon: number, bLat: number, bLon: number): number {
+export function haversineKm(aLat: number, aLon: number, bLat: number, bLon: number): number {
   const R = 6371
   const dLat = ((bLat - aLat) * Math.PI) / 180
   const dLon = ((bLon - aLon) * Math.PI) / 180

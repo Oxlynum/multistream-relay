@@ -33,18 +33,22 @@ RPCs: `attach_to_hub(region)` (FOR UPDATE SKIP LOCKED conditional `session_count
 increment → returns hub row or none); `detach_from_hub(hub_id)` (decrement, floor 0).
 
 ## Sub-steps (checklist)
-- [ ] **S1** Data model: `vps_hubs` + `gpu_instances.vps_hub_id` + attach/detach RPCs + spawn-lock index. `supabase db push`.
-- [ ] **S2** Mode-aware provision inputs + `needsTranscode` (mirror `agent-config` mode logic; exclude passthrough AND ertmp). `provision/route.ts`, `agent-config.ts`.
-- [ ] **S3** `authenticateNode()` (resolves a 'vps' key → hub, never a user_id) + `buildVpsConfig()` (thin filter of `buildAgentOutputs` to mode∈{passthrough,ertmp}). `agent-auth.ts`, `agent-config.ts`.
-- [ ] **S4** `GET /api/agent/hub-config` (authenticateNode vps; returns all attached tenants' streams w/ decrypted keys + large `credits_seconds`).
-- [ ] **S5** `vps-broker.ts` `acquireHubOrSpawn` + provision flag branch + cloud-init wiring + SYNC IP persist + `datacenters.ts` knobs (`VPS_PRICE_CEILING`, `VPS_READINESS_TIMEOUT_MS`, region lat/lon).
-- [ ] **S6** Role-aware `/ready` + `/failed` (hub branch: flip status, re-point tenants; pod CAS path unchanged).
+- [x] **S1** Data model: `vps_hubs` + `gpu_instances.vps_hub_id` + attach/detach RPCs + spawn-lock index. (migration 20260628000002, applied+verified)
+- [x] **S1b** Hub secrets (`srt_passphrase`, `panel_password`) + attach RPC widened to `status in (live,spawning)` for early joiners. (migration 20260628000003, applied)
+- [x] **S2** Mode-aware provision inputs + `needsTranscode` via shared `classifyMode`; `requiredNvencSessions` now skips `ertmp`. `provision/route.ts`, `agent-config.ts`, `nvenc-utils.ts`.
+- [x] **S3** `authenticateNode()` (resolves a 'vps' key → hub, never a user_id) + `buildVpsConfig()`. `agent-auth.ts`, `agent-config.ts`.
+- [x] **S4** `GET /api/agent/hub-config` (authenticateNode vps; all attached tenants' streams + large `credits_seconds`; touches hub `last_seen_at`).
+- [x] **S5** `vps-broker.ts` `acquireHubOrSpawn` (join nearest-first, else spawn w/ lock) + provision flag branch + cloud-init wiring + SYNC IP persist + `datacenters.ts` knobs. Exported `haversineKm`.
+- [x] **S6** Role-aware `/ready` (hub→live, promote provisioning tenants) + `/failed` (hub→teardownHub). Pod CAS path unchanged.
 - [ ] **S7** Relay vps role: skip `_gpu_self_test` + GPU preview; hub-config poll + reconcile `dict[ingest_key→Supervisor]`; thread per-stream source/width/height; `mediamtx.vps.yml` wildcard path.
 - [ ] **S8** `hook.sh` per-path signaling (`/tmp/obs_connected.<path>` only for true publish path) + per-stream flag watch (no box-wide `stop_all`).
-- [ ] **S9** Billing deactivation + status-route hub heartbeat branch (Clock A). `status/route.ts`, `billing.ts`.
-- [ ] **S10** `teardownInstance` hub-aware: passthrough session teardown = logical detach (NEVER destroys box). `pod-teardown.ts`.
+- [ ] **S9** Billing deactivation (flag `SLIMCAST_BILLING_ACTIVE`, default off) + status-route hub heartbeat branch (Clock A). `status/route.ts`, `billing.ts`.
+- [x] **S10** `teardownInstance` hub-aware: hub-session teardown = logical `detach_from_hub` (NEVER destroys box) + new `teardownHub()` (Clock B physical destroy + IP release). `pod-teardown.ts`.
 - [ ] **S11** Hub-aware reaper: Clock B scale-to-zero + Hetzner reconcile + leaked-IP sweep + tighter cron. `cron/reap`, `vercel.json`.
-- [ ] **S12** Verify `gpu/status` srt_url resolves to hub (byte-for-byte) + end-to-end live test (YouTube, second tenant joins, per-stream stop logical, idle hub scale-to-zero).
+- [ ] **S12** Verify `gpu/status` srt_url resolves to hub (byte-for-byte) + end-to-end live test.
+
+> ⚠️ Before flipping `SLIMCAST_VPS_HUB=true` for the live test, S7+S8+S9+S11 MUST land (a spawned hub
+> with no reaper leaks cost; a hub heartbeat with no S9 branch hits the pod path on the spawner's userId).
 
 Deps: S3←S1; S4←S1,S3; S5←S1,S2; S6←S1,S3,S5; S7←S4; S8←S7; S9←S1,S3; S10←S1,S5; S11←S1,S5,S10; S12←S5,S6,S7,S9,S10.
 
