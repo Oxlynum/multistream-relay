@@ -183,7 +183,7 @@ def _encode_flags(bv: int, fps: int) -> list[str]:
         "-preset", "p6", "-tune", "hq", "-multipass", "fullres",
         "-rc", "cbr", "-b:v", f"{bv}k", "-maxrate", f"{bv}k", "-bufsize", f"{bufsize}k",
         "-profile:v", "high", "-g", str(gop),
-        "-bf", "3", "-b_ref_mode", "middle", "-rc-lookahead", "32",
+        "-bf", "2", "-b_ref_mode", "middle", "-rc-lookahead", "32",
         "-spatial-aq", "1", "-temporal-aq", "1", "-aq-strength", "6",
         "-r", str(fps),
         "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
@@ -214,7 +214,12 @@ def _tee_targets(outputs: list[dict]) -> str:
         url = _full_rtmp_url(o)
         if not _tee_safe(url):
             continue
-        parts.append(f"[f=flv:onfail=ignore]{url}")
+        # use_fifo runs each RTMP output in a separate thread with a packet queue.
+        # When TCP backs up (congestion), the encoder keeps running and the queue
+        # absorbs the backlog instead of stalling the whole pipeline. 512 packets
+        # ≈ 8s buffer at 60fps. drop_pkts_on_overflow drops oldest packets if the
+        # queue fills (long-lasting congestion) rather than blocking the encoder.
+        parts.append(f"[f=flv:onfail=ignore:use_fifo=1:fifo_options=queue_size=512\\:drop_pkts_on_overflow=1]{url}")
     return "|".join(parts)
 
 
@@ -344,7 +349,7 @@ def build_group_cmd(
             f"scale={pw}:{ph}"
         )
         cmd += ["-vf", vf]
-    elif max_h < SOURCE_HEIGHT:
+    elif max_h <= SOURCE_HEIGHT:
         # Landscape stays entirely on-GPU: scale_cuda operates on the CUDA surfaces
         # the NVDEC decoder already produced (hwaccel_output_format=cuda). -2 keeps
         # the source aspect ratio with an even width NVENC accepts.
