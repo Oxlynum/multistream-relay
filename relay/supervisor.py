@@ -310,6 +310,7 @@ def build_ertmp_cmd(out: dict, source: str = LOCAL_SOURCE) -> list[str]:
         "-i", source,
         "-c", "copy",
         "-f", "flv",
+        "-flvflags", "no_duration_filesize",
         _full_rtmp_url(out),
     ]
 
