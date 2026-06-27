@@ -1,0 +1,252 @@
+import type { VpsProvider, VpsCandidate, CreatedVps, VpsStatus } from './types'
+
+// Hetzner Cloud provider — the first VPS hub backend for VPS-as-the-Hub.
+//
+// Unlike Vast (a GPU marketplace), Hetzner is a fixed-catalog host: a handful of
+// server types, each priced per location, with BUNDLED traffic (not per-TB
+// metered). Key facts that shaped this file:
+//   - Bills PER HOUR, ROUNDED UP. (Lifecycle = long-lived multi-tenant hubs so a
+//     restart doesn't buy a fresh billed hour — see vps-hub-plan.md §1a.)
+//   - The primary IPv4 is a SEPARATE billable resource (~€0.50/mo) that SURVIVES
+//     server deletion. destroy() MUST release it (delete server, THEN delete the
+//     primary IP) or it leaks forever. This is the #1 leak risk.
+//   - Ports are FIXED: container port == host == public, no remap to discover.
+//   - Rate limit: 3600 req/hr (shared by broker + reaper — see §10 open item 5).
+//
+// Verified against the live API with scripts/test-hetzner.mjs (server-type catalog
+// + create → status → destroy → release-IP lifecycle). Don't trust the shapes here
+// until that round-trip passes — same discipline as vast.ts.
+
+const BASE = 'https://api.hetzner.cloud/v1'
+const TOKEN = process.env.HETZNER_API_TOKEN
+
+// Default OS image for the hub. cloud-init installs Docker on top.
+const DEFAULT_IMAGE = process.env.HETZNER_IMAGE || 'ubuntu-22.04'
+
+// Soft floor for a server type to be a viable hub: it must terminate SRT + remux +
+// (for transcode) source-forward + platform fan-out. Tune after the §2.6 load-test;
+// these keep the absurdly tiny tiers (cpx11/cx22) out of the candidate set for now.
+const MIN_CORES = Number(process.env.HETZNER_MIN_CORES || 2)
+const MIN_MEMORY_GB = Number(process.env.HETZNER_MIN_MEMORY_GB || 4)
+
+const BYTES_PER_TB = 1_000_000_000_000
+
+function authHeaders(): Record<string, string> {
+  return { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' }
+}
+
+async function hzFetch(path: string, init?: RequestInit): Promise<Response> {
+  return fetch(`${BASE}${path}`, {
+    ...init,
+    headers: { ...authHeaders(), ...(init?.headers as Record<string, string> | undefined) },
+    signal: AbortSignal.timeout(10000),
+  })
+}
+
+// ── live catalog shapes (defensive: fields are read with ?. and defaulted) ────
+interface HzLocation {
+  id: number
+  name: string
+  city?: string
+  country?: string
+  latitude?: number
+  longitude?: number
+  network_zone?: string
+}
+
+interface HzPrice {
+  location: string
+  price_hourly?: { gross?: string; net?: string }
+  price_monthly?: { gross?: string; net?: string }
+  included_traffic?: number               // bytes
+  price_per_tb_traffic?: { gross?: string; net?: string }
+}
+
+interface HzServerType {
+  id: number
+  name: string                            // e.g. 'cpx31' (NOT 'cpx32' — that id is invented)
+  cores: number
+  memory: number                          // GiB
+  disk: number
+  architecture?: string                   // 'x86' | 'arm'
+  cpu_type?: string                       // 'shared' | 'dedicated'
+  deprecation?: unknown | null            // non-null → deprecated, skip
+  prices?: HzPrice[]
+}
+
+interface HzServer {
+  id: number
+  name?: string
+  status?: string
+  datacenter?: { location?: HzLocation }
+  public_net?: { ipv4?: { id?: number; ip?: string } | null }
+  labels?: Record<string, string>
+}
+
+function num(s: string | undefined, fallback = 0): number {
+  const n = s != null ? parseFloat(s) : NaN
+  return Number.isFinite(n) ? n : fallback
+}
+
+export const hetznerProvider: VpsProvider = {
+  name: 'hetzner',
+
+  async listCandidates({ maxPricePerHr }): Promise<VpsCandidate[]> {
+    if (!TOKEN) return []
+    try {
+      // Pull the live catalog: server types (with per-location pricing) + locations
+      // (for real lat/lon). Both are small, single-page responses.
+      const [stRes, locRes] = await Promise.all([
+        hzFetch('/server_types?per_page=50'),
+        hzFetch('/locations'),
+      ])
+      if (!stRes.ok || !locRes.ok) {
+        console.error(`[hetzner] catalog fetch → server_types ${stRes.status}, locations ${locRes.status}`)
+        return []
+      }
+      const serverTypes = ((await stRes.json()).server_types ?? []) as HzServerType[]
+      const locations = ((await locRes.json()).locations ?? []) as HzLocation[]
+      const locByName = new Map(locations.map(l => [l.name, l]))
+
+      const candidates: VpsCandidate[] = []
+      for (const st of serverTypes) {
+        if (st.deprecation) continue                                  // skip deprecated lines
+        if ((st.architecture ?? 'x86') !== 'x86') continue            // relay image is amd64
+        if ((st.cores ?? 0) < MIN_CORES) continue
+        if ((st.memory ?? 0) < MIN_MEMORY_GB) continue
+        for (const pr of st.prices ?? []) {
+          const loc = locByName.get(pr.location)
+          if (!loc || loc.latitude == null || loc.longitude == null) continue
+          const hourly = num(pr.price_hourly?.gross)
+          if (hourly <= 0 || hourly > maxPricePerHr) continue
+          candidates.push({
+            provider: 'hetzner',
+            serverType: st.name,
+            region: pr.location,
+            pricePerHr: hourly,
+            includedTrafficTb: (pr.included_traffic ?? 0) / BYTES_PER_TB,
+            pricePerTbOverage: num(pr.price_per_tb_traffic?.gross),
+            lat: loc.latitude,
+            lon: loc.longitude,
+            label: `hetzner:${st.name} ${loc.city ?? loc.name} (${st.cores}c/${st.memory}g)`,
+            placement: { serverType: st.name, location: pr.location, image: DEFAULT_IMAGE },
+          })
+        }
+      }
+      return candidates
+    } catch (err) {
+      console.error('[hetzner] listCandidates failed:', err instanceof Error ? err.message : err)
+      return []
+    }
+  },
+
+  async create({ candidate, name, cloudInit, sshKeyIds, firewallIds }): Promise<CreatedVps> {
+    if (!TOKEN) throw new Error('HETZNER_API_TOKEN not set')
+    const body: Record<string, unknown> = {
+      name,
+      server_type: candidate.placement.serverType,
+      location: candidate.placement.location,
+      image: candidate.placement.image ?? DEFAULT_IMAGE,
+      user_data: cloudInit,
+      start_after_create: true,
+      // IPv4 only (we don't use IPv6 for ingest); IPv4 is the billable primary IP
+      // we must release on destroy.
+      public_net: { enable_ipv4: true, enable_ipv6: false },
+      labels: { 'managed-by': 'slimcast' },
+    }
+    if (sshKeyIds?.length) body.ssh_keys = sshKeyIds
+    if (firewallIds?.length) body.firewalls = firewallIds.map(id => ({ firewall: Number(id) }))
+
+    const res = await hzFetch('/servers', { method: 'POST', body: JSON.stringify(body) })
+    const text = await res.text()
+    let j: { server?: HzServer; error?: { message?: string } } = {}
+    try { j = JSON.parse(text) } catch { /* non-JSON */ }
+    if (!res.ok || !j.server?.id) {
+      throw new Error(`Hetzner create → ${res.status}: ${j.error?.message ?? text.slice(0, 200)}`)
+    }
+    const ipv4 = j.server.public_net?.ipv4 ?? null
+    return {
+      vpsId: String(j.server.id),
+      primaryIpId: ipv4?.id != null ? String(ipv4.id) : undefined,
+      ip: ipv4?.ip ?? null,
+      costPerHr: candidate.pricePerHr,
+    }
+  },
+
+  async getStatus(vpsId): Promise<VpsStatus> {
+    const res = await hzFetch(`/servers/${vpsId}`)
+    if (res.status === 404) return { status: 'terminated', ip: null, primaryIpId: null, region: null }
+    if (!res.ok) return { status: 'unknown', ip: null, primaryIpId: null, region: null }
+    const srv = ((await res.json()).server ?? {}) as HzServer
+    const ipv4 = srv.public_net?.ipv4 ?? null
+    return {
+      status: srv.status ?? 'unknown',
+      ip: ipv4?.ip ?? null,
+      primaryIpId: ipv4?.id != null ? String(ipv4.id) : null,
+      region: srv.datacenter?.location?.name ?? null,
+    }
+  },
+
+  // Idempotent. Primary-IP lifecycle (confirmed live via test-hetzner.mjs 2026-06-28):
+  // the auto-created primary IP defaults to auto_delete=true, so Hetzner releases it
+  // ASYNCHRONOUSLY once the server teardown completes — there's NO synchronous window
+  // in which to delete it ourselves (an assigned IP returns 422). So:
+  //   1. Delete the server.
+  //   2. Touch the IP ONLY if it's already UNASSIGNED — a genuine orphan (auto_delete
+  //      was somehow false). An assigned IP is mid-auto-delete (or awaiting the async
+  //      server teardown); deleting it now 422s, so we leave it to auto_delete and the
+  //      reaper backstop (which sweeps unassigned managed primary IPs). This is what
+  //      eliminated the old false "RELEASE FAILED" alarm.
+  // A 404 anywhere is success (already gone).
+  async destroy(vpsId, opts): Promise<void> {
+    // Resolve the primary IP id up front (before the server is gone) if not supplied,
+    // so the reaper path (which only knows the IP from getStatus) still works.
+    let primaryIpId = opts?.primaryIpId ?? null
+    if (!primaryIpId) {
+      try { primaryIpId = (await this.getStatus(vpsId)).primaryIpId } catch { /* best-effort */ }
+    }
+    try {
+      const dr = await hzFetch(`/servers/${vpsId}`, { method: 'DELETE' })
+      if (!dr.ok && dr.status !== 404) {
+        console.error(`[hetzner] delete server ${vpsId} → ${dr.status}`)
+      }
+    } catch (err) {
+      console.error(`[hetzner] delete server ${vpsId} failed:`, err instanceof Error ? err.message : err)
+    }
+    if (primaryIpId) {
+      try {
+        const gr = await hzFetch(`/primary_ips/${primaryIpId}`)
+        if (gr.status === 404) {
+          // already released by auto_delete — nothing to do (the common path)
+        } else if (gr.ok) {
+          const ip = ((await gr.json()).primary_ip ?? {}) as { assignee_id?: number | null }
+          if (ip.assignee_id == null) {
+            // genuine orphan (auto_delete was false) → release it now
+            const ir = await hzFetch(`/primary_ips/${primaryIpId}`, { method: 'DELETE' })
+            if (!ir.ok && ir.status !== 404) {
+              console.error(`[hetzner] release orphan primary_ip ${primaryIpId} → ${ir.status}`)
+            }
+          }
+          // else: still assigned → auto_delete / reaper will release it (don't 422-spam)
+        }
+      } catch (err) {
+        console.error(`[hetzner] primary_ip ${primaryIpId} cleanup check failed:`, err instanceof Error ? err.message : err)
+      }
+    }
+  },
+
+  // Label-filtered to managed-by=slimcast so the reaper only ever reconciles our
+  // own boxes (never touches anything else in the Hetzner project).
+  async listInstances(): Promise<Array<{ id: string; name: string }>> {
+    if (!TOKEN) return []
+    try {
+      const res = await hzFetch(`/servers?label_selector=${encodeURIComponent('managed-by=slimcast')}`)
+      if (!res.ok) { console.error(`[hetzner] list servers → ${res.status}`); return [] }
+      const arr = ((await res.json()).servers ?? []) as HzServer[]
+      return arr.map(s => ({ id: String(s.id), name: s.name ?? '' }))
+    } catch (err) {
+      console.error('[hetzner] list servers failed:', err instanceof Error ? err.message : err)
+      return []
+    }
+  },
+}

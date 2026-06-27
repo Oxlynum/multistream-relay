@@ -79,3 +79,79 @@ export interface GpuProvider {
   // Best-effort: resolve to [] (don't throw) if the provider is unreachable.
   listInstances(): Promise<Array<{ id: string; name: string }>>
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VPS-as-the-Hub provider surface (Phase 0 scaffolding, behind SLIMCAST_VPS_HUB).
+//
+// A VPS provider is DELIBERATELY a separate interface from GpuProvider — never
+// generalize the two. Vast stays 100% untouched so it can't regress, and the two
+// box types differ in shape: a VPS has FIXED public ports (container port == host
+// port == public, no marketplace remap), bundled bandwidth (not per-TB metered),
+// and a primary IPv4 that is a SEPARATE billable resource which survives server
+// deletion (the #1 leak — destroy() must release it). It rents from a fixed
+// regional catalog, not a live offer marketplace, so there's no per-offer
+// geolocation step: regions carry their own coordinates.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// One rentable VPS option: a server type in a specific region. The broker picks
+// the nearest region with capacity, then the cheapest adequate server type there.
+export interface VpsCandidate {
+  provider: string        // owning provider ('hetzner'); routes create/destroy
+  serverType: string      // provider's server-type id (e.g. 'cpx31' — verify live, NOT 'cpx32')
+  region: string          // provider region/location id (e.g. 'ash', 'fsn1')
+  pricePerHr: number      // hourly price (Hetzner bills per hour, ROUNDED UP)
+  includedTrafficTb: number   // bundled egress before overage (Hetzner ~20TB)
+  pricePerTbOverage: number   // $/TB once the bundle is exceeded
+  lat: number             // region centroid — for nearest-region ranking + GPU anchoring
+  lon: number
+  label: string           // human-readable, e.g. 'hetzner:cpx31 Ashburn'
+  // Opaque provider payload handed back to create(). Hetzner: { serverType, location,
+  // image, datacenter? }. The broker never inspects it.
+  placement: Record<string, unknown>
+}
+
+export interface CreatedVps {
+  vpsId: string           // provider server id
+  primaryIpId?: string    // Hetzner primary-IP resource id — MUST be released on destroy
+  ip?: string | null      // public IPv4 if known at create
+  costPerHr?: number
+}
+
+export interface VpsStatus {
+  status: string          // provider lifecycle ('running'|'initializing'|'off'|...)
+  ip: string | null       // public IPv4
+  primaryIpId: string | null   // so teardown can release it even if create's return was lost
+  region: string | null
+}
+
+// A bundled-bandwidth VPS provider (Hetzner first; Vultr later as a second entry
+// in ACTIVE_VPS_PROVIDERS — zero broker change). Ports are fixed, so there's no
+// port-mapping discovery: the relay binds the same ports we tell the broker.
+export interface VpsProvider {
+  name: string
+
+  // The rentable catalog at or under maxPricePerHr, one VpsCandidate per
+  // (serverType × region) that can handle the hub workload. Derived from the
+  // provider's LIVE server-type + region APIs (server-type ids drift; never
+  // hardcode them). Best-effort: resolve to [] (don't throw) if unreachable.
+  listCandidates(opts: { maxPricePerHr: number }): Promise<VpsCandidate[]>
+
+  create(args: {
+    candidate: VpsCandidate
+    name: string            // server name + the label the reaper matches on
+    cloudInit: string       // #cloud-config user_data (installs Docker, runs the relay role)
+    sshKeyIds?: string[]    // provider ssh-key ids to inject (debug access)
+    firewallIds?: string[]  // provider firewall ids to attach
+  }): Promise<CreatedVps>
+
+  getStatus(vpsId: string): Promise<VpsStatus>
+
+  // Destroy MUST be idempotent AND release the primary IPv4: on Hetzner the IP is
+  // a separate resource that survives server deletion and bills ~€0.50/mo forever
+  // if leaked. Order: delete server, THEN release the primary IP.
+  destroy(vpsId: string, opts?: { primaryIpId?: string | null }): Promise<void>
+
+  // Live servers as { id, name } (label-filtered to managed-by:slimcast) so the
+  // reaper can destroy any box the DB has no row for. Best-effort: [] on failure.
+  listInstances(): Promise<Array<{ id: string; name: string }>>
+}

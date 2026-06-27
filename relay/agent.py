@@ -65,6 +65,22 @@ VERCEL_URL = os.environ.get("SLIMCAST_VERCEL_URL", "https://slimcast-oxlynum.ver
 POLL_INTERVAL = int(os.environ.get("AGENT_POLL_INTERVAL", "10"))
 MEDIAMTX_CONFIG = os.environ.get("MEDIAMTX_CONFIG", "mediamtx.yml")
 
+# RELAY_ROLE — VPS-as-the-Hub data-plane role (Phase 0 skeleton). One image, three roles:
+#   'all-in-one' (DEFAULT — today's behavior, byte-for-byte unchanged): GPU pod that
+#                ingests SRT, transcodes, and fans out to platforms itself.
+#   'vps'        : Hetzner CPU hub — SRT ingest + passthrough delivery + (for transcode)
+#                  source-forward to a GPU and platform fan-out. SKIPS the GPU self-test.
+#   'gpu'        : Vast GPU backend — receives the source over the bridge, NVDEC→NVENC
+#                  transcodes, returns one stream per orientation to the VPS. Never a tee.
+# Phase 0 only RECOGNIZES + logs the role; the per-role branching (self-test skip,
+# plan_runners() split, role MediaMTX configs) lands in Phase 1/2 behind SLIMCAST_VPS_HUB.
+# Until then any non-'all-in-one' value is inert — agent.py runs the all-in-one path.
+RELAY_ROLE = (os.environ.get("RELAY_ROLE", "all-in-one").strip() or "all-in-one")
+if RELAY_ROLE not in ("all-in-one", "vps", "gpu"):
+    log.warning("unknown RELAY_ROLE=%r — falling back to all-in-one", RELAY_ROLE)
+    RELAY_ROLE = "all-in-one"
+log.info("RELAY_ROLE=%s", RELAY_ROLE)
+
 # Vast-injected env vars (confirmed available at container start — 2026-06-26).
 # The pod uses these to self-report its own public URL without waiting for the
 # cloud to probe it (push-readiness model, v2 broker).
