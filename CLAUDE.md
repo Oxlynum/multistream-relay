@@ -70,6 +70,13 @@ Install to the `.plugin` bundle ONLY — never `cp` into `bin/64bit` (duplicate 
 
 **relay/** — CI auto-builds on `relay/**` push to `main` → `ghcr.io/oxlynum/multistream-relay:latest` + `:<sha>` rollback tags. Manual promote: `docker buildx imagetools create --tag ...:latest ...:slim`.
 
+> ⚠️ **After every relay/** push: update `SLIMCAST_RELAY_IMAGE` in Vercel to the new full commit SHA** — do NOT use `:latest`. Vast pods cannot resolve the `:latest` tag from GHCR (returns "manifest unknown") but pull SHA-tagged images fine. Get the SHA with `git rev-parse HEAD` after the relay commit, then:
+> ```bash
+> vercel env rm SLIMCAST_RELAY_IMAGE production --yes
+> echo "ghcr.io/oxlynum/multistream-relay:$(git rev-parse HEAD)" | vercel env add SLIMCAST_RELAY_IMAGE production
+> vercel --prod
+> ```
+
 **relay/** local testing:
 ```bash
 cd relay
