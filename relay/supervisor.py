@@ -183,7 +183,7 @@ def _encode_flags(bv: int, fps: int) -> list[str]:
         "-preset", "p6", "-tune", "hq", "-multipass", "fullres",
         "-rc", "cbr", "-b:v", f"{bv}k", "-maxrate", f"{bv}k", "-bufsize", f"{bufsize}k",
         "-profile:v", "high", "-g", str(gop),
-        "-bf", "2", "-b_ref_mode", "middle", "-rc-lookahead", "32",
+        "-bf", "1", "-b_ref_mode", "middle", "-rc-lookahead", "32",
         "-spatial-aq", "1", "-temporal-aq", "1", "-aq-strength", "6",
         "-r", str(fps),
         "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
