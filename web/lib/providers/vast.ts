@@ -131,6 +131,7 @@ const MACHINE_DENYLIST = new Set<number>([
   67876,
   46001, // RTX 2080 Ti (2026-06-26 NVENC failed)
   11424, // RTX 3090 (2026-06-26 NVENC regression 570+)
+  51579, // RTX A6000 Virginia (2026-06-27 frac=1/6 MIG; NVENC contention + persistent stream freezing)
   ...(process.env.VAST_MACHINE_DENYLIST ?? '')
     .split(',').map(s => parseInt(s.trim(), 10)).filter(Number.isFinite),
 ])
