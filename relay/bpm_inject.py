@@ -58,9 +58,11 @@ BPM_TS_EVENT_PIR = 4     # packet interleave request event
 HEVC_SEI_NAL_HEADER = bytes([0x50, 0x01])
 START_CODE_3 = b"\x00\x00\x01"
 
-# HEVC VCL NAL types 0..31 are slices; an IDR access unit contains type 19/20.
-HEVC_NAL_IDR_W_RADL = 19
-HEVC_NAL_IDR_N_LP = 20
+# HEVC IRAP (keyframe) VCL NAL types: BLA/IDR/CRA span 16..23. We detect these by
+# parsing the bitstream rather than trusting the container keyframe flag, which is
+# not reliably set after an `-c copy` mpegts re-mux feeding PyAV.
+HEVC_IRAP_MIN = 16
+HEVC_IRAP_MAX = 23
 
 
 def _rfc3339_now() -> bytes:
@@ -145,6 +147,18 @@ def _bpm_block() -> bytes:
             + _build_sei_nal(BPM_ERM_UUID, _bpm_erm_payload(ts)))
 
 
+def _has_irap(data: bytes) -> bool:
+    """True if the access unit contains an HEVC IRAP (keyframe) VCL NAL. Scans
+    Annex-B start codes with bytes.find (fast), checking nal_unit_type 16..23."""
+    pos = data.find(b"\x00\x00\x01")
+    while pos != -1 and pos + 3 < len(data):
+        nt = (data[pos + 3] >> 1) & 0x3F
+        if HEVC_IRAP_MIN <= nt <= HEVC_IRAP_MAX:
+            return True
+        pos = data.find(b"\x00\x00\x01", pos + 3)
+    return False
+
+
 def inject(data: bytes) -> bytes:
     """Append the BPM SEI block to a keyframe access unit. Suffix SEI (type 40)
     must follow the VCL NALs, so appending at the end of the AU is correct."""
@@ -162,12 +176,18 @@ def run(src, dst, out_format: str) -> int:
 
     vid = inp.streams.video[0].index if inp.streams.video else None
 
+    injected = 0
+    vframes = 0
     for pkt in inp.demux():
         if pkt.dts is None or pkt.stream.index not in smap:
             continue
         ostream = smap[pkt.stream.index]
 
-        if pkt.stream.index == vid and pkt.is_keyframe:
+        is_key = pkt.stream.index == vid and (pkt.is_keyframe or _has_irap(bytes(pkt)))
+        if pkt.stream.index == vid:
+            vframes += 1
+
+        if is_key:
             new = av.Packet(inject(bytes(pkt)))
             new.pts = pkt.pts
             new.dts = pkt.dts
@@ -177,6 +197,10 @@ def run(src, dst, out_format: str) -> int:
             # Preserve the keyframe flag so the muxer marks the frame type.
             new.is_keyframe = True
             out.mux(new)
+            injected += 1
+            if injected <= 3 or injected % 30 == 0:
+                print(f"[bpm] injected BPM SEI into {injected} keyframes "
+                      f"({vframes} video frames seen)", file=sys.stderr, flush=True)
         else:
             pkt.stream = ostream
             out.mux(pkt)

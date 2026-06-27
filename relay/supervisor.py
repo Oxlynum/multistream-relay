@@ -493,7 +493,7 @@ def build_ertmp_cmd(out: dict, source: str = LOCAL_SOURCE) -> list[str]:
         f"ffmpeg -hide_banner -loglevel error {in_flags} -i '{source}' "
         "-c copy -f mpegts pipe:1 "
         "| python3 /app/bpm_inject.py "
-        "| ffmpeg -hide_banner -loglevel warning -i pipe:0 "
+        "| ffmpeg -hide_banner -loglevel verbose -i pipe:0 "
         f"-c copy -f flv -flvflags no_duration_filesize '{ingest_url}'"
     )
     return ["bash", "-c", pipeline]
