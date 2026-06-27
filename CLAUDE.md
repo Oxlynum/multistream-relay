@@ -40,6 +40,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - OBS plugin v2.1.0 in `slimcast-obs/` — OBS-driven lifecycle, no manual GPU controls.
 - **SRT ingest path PROVEN (2026-06-26):** external SRT push from a laptop, through Vast's UDP forwarding, into MediaMTX connects + authenticates (passphrase) + routes by streamid + fires the `runOnReady` hook. Loopback also verified. **The SRT/transcode layer is healthy — not the source of stream-start failures.**
 - **Broker v2 shipped (2026-06-27):** replaced the RunPod-shaped synchronous cascade with a Vast-native design: (1) pods **push** readiness via `POST /api/agent/ready` / `/failed` instead of being probed from serverless; (2) provision fans out **N=2 pods in parallel** (first-ready-wins CAS); (3) provision route returns **202 in ~5s** instead of holding the cascade in a 300s request. Phase 0 stopgap also in: `MAX_BOOT_ATTEMPTS` 5→2, `READINESS_TIMEOUT_MS` 180s→110s, RTMP probe 3×10s→2×3s, fast-fail on terminal Vast states, `sweepStalePods` fire-and-forget. Enable: `SLIMCAST_BROKER_V2=true` (default ON). Roll back: `SLIMCAST_BROKER_V2=false`. Full design: `vastbroker-v2.md` (repo root).
+- **End-to-end stream confirmed working (2026-06-27):** First successful full stream — OBS → SRT → RTX 3080 Ti → NVENC → Twitch live. Consumer Ampere whole-GPU pool (~$0.05–0.20/hr) is the active host pool.
+- **Relay self-test frame size: 320×240.** NVENC on drivers ≥550 rejects frames below its minimum dimension. `128×128` (old size) failed on every GPU type tested. `320×240` is safe across all known driver versions. Do not lower this in `agent.py`.
+- **GPU filter: consumer GPUs require `gpu_frac >= 1.0`** (MPS time-slicing fails CUDA device injection). Data center GPUs (A100/H100/L40/A10/A40/etc.) allow any `gpu_frac` (hardware MIG). Filter lives in `lib/providers/vast.ts`.
+- **Broker race condition (fixed 2026-06-27):** `onRacerCreated` fired concurrently for both round-1 pods, each doing read-modify-write on the `racers` jsonb column — second write silently overwrote the first, leaving one pod invisible. When the visible pod failed, broker declared "all dead" and rotated the key, leaving the invisible pod unable to pair. Fixed by chaining `onRacerCreated` writes on a promise lock in both `provision/route.ts` and `agent/failed/route.ts`.
 
 ## Layout
 - `relay/` — GPU Docker image: `supervisor.py`, `agent.py`, `app.py`, MediaMTX, `hook.sh`
@@ -68,7 +72,9 @@ cmake --install build/macos-arm64 --prefix "$HOME/Library/Application Support/ob
 ```
 Install to the `.plugin` bundle ONLY — never `cp` into `bin/64bit` (duplicate dock). Windows: `windows-x64`. Restart OBS to load.
 
-**relay/** — CI auto-builds on `relay/**` push to `main` → `ghcr.io/oxlynum/multistream-relay:latest` + `:<sha>` rollback tags. Manual promote: `docker buildx imagetools create --tag ...:latest ...:slim`.
+**relay/** — CI auto-builds on `relay/**` push to `main` → `ghcr.io/oxlynum/multistream-relay:latest` + `:<sha>` rollback tags. **CI also auto-pins `SLIMCAST_RELAY_IMAGE` in Vercel to the new SHA and redeploys** — no manual step needed. Requires `VERCEL_TOKEN`, `VERCEL_ORG_ID`, `VERCEL_PROJECT_ID` GitHub repo secrets (already set). Manual promote: `docker buildx imagetools create --tag ...:latest ...:slim`.
+
+> **Never use `:latest` for `SLIMCAST_RELAY_IMAGE`.** GHCR CDN caches manifest lookups; Vast hosts resolve `:latest` at create-time and pin to the cached digest. Pods will pull stale images even minutes after a new push. The CI automation handles this — after any relay change just push to main and CI pins the correct SHA automatically.
 
 **relay/** local testing:
 ```bash
