@@ -27,6 +27,7 @@ from __future__ import annotations
 import collections
 import json
 import os
+import signal
 import subprocess
 import threading
 import time
@@ -464,11 +465,21 @@ def build_passthrough_cmd(out: dict, source: str = LOCAL_SOURCE) -> list[str]:
 
 
 def build_ertmp_cmd(out: dict, source: str = LOCAL_SOURCE) -> list[str]:
-    """HEVC copy -> Enhanced RTMP (eRTMP) for platforms that support it (Twitch).
+    """HEVC copy -> Enhanced RTMP (eRTMP) for Twitch, with BPM SEI injection.
 
-    Twitch Enhanced Broadcasting requires a per-session ingest URL and auth token
-    from GetClientConfiguration; using the raw stream key causes an immediate
-    disconnect (exit 187). _resolve_ertmp_url() fetches + caches this token.
+    Twitch Enhanced Broadcasting requires two things beyond a plain HEVC push:
+      1. A per-session ingest URL + auth token from GetClientConfiguration
+         (_resolve_ertmp_url; using the raw key disconnects with exit 187).
+      2. Broadcast Performance Metrics (BPM) SEI on every IDR, or Twitch drops the
+         connection a few seconds in. A raw `-c copy` of Apple VT HEVC has none, so
+         bpm_inject.py appends them at the bitstream level (no re-encode).
+
+    Pipeline: jellyfin-ffmpeg reads the SRT loopback and re-muxes to MPEG-TS; the
+    injector appends BPM SEI to each keyframe; jellyfin-ffmpeg muxes the result to
+    the eRTMP endpoint. ffmpeg owns the network I/O (SRT in, eRTMP out — both
+    proven), so PyAV only ever touches pipe+mpegts. `pipefail` makes any stage's
+    failure exit the pipeline so OutputRunner restarts it; the runner starts the
+    whole pipeline in its own process group and kills the group on stop.
     """
     try:
         ingest_url = _resolve_ertmp_url(out)
@@ -476,15 +487,16 @@ def build_ertmp_cmd(out: dict, source: str = LOCAL_SOURCE) -> list[str]:
         # Log and fall back to the configured URL so the runner starts and logs the error.
         ingest_url = _full_rtmp_url(out)
         print(f"[ertmp] GetClientConfiguration failed ({exc}); using raw URL (will likely fail)", flush=True)
-    return [
-        "ffmpeg", "-hide_banner", "-loglevel", "verbose",
-        *_input_args(source),
-        "-i", source,
-        "-c", "copy",
-        "-f", "flv",
-        "-flvflags", "no_duration_filesize",
-        ingest_url,
-    ]
+    in_flags = " ".join(_input_args(source))
+    pipeline = (
+        "set -o pipefail; "
+        f"ffmpeg -hide_banner -loglevel error {in_flags} -i '{source}' "
+        "-c copy -f mpegts pipe:1 "
+        "| python3 /app/bpm_inject.py "
+        "| ffmpeg -hide_banner -loglevel warning -i pipe:0 "
+        f"-c copy -f flv -flvflags no_duration_filesize '{ingest_url}'"
+    )
+    return ["bash", "-c", pipeline]
 
 
 def build_group_cmd(
@@ -575,15 +587,30 @@ class OutputRunner:
 
     def _kill_proc(self) -> None:
         p = self._proc
-        if p and p.poll() is None:
-            try:
+        if not p or p.poll() is not None:
+            return
+        # Each runner starts in its own session/process group (start_new_session),
+        # so kill the whole group — this reaps the eRTMP runner's 3-stage pipeline
+        # (two ffmpegs + the injector), not just the bash leader. Single-process
+        # runners have only one member, so the behaviour is unchanged for them.
+        try:
+            pgid = os.getpgid(p.pid)
+        except Exception:
+            pgid = None
+        try:
+            if pgid is not None:
+                os.killpg(pgid, signal.SIGTERM)
+            else:
                 p.terminate()
-                try:
-                    p.wait(timeout=5)
-                except subprocess.TimeoutExpired:
+            try:
+                p.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                if pgid is not None:
+                    os.killpg(pgid, signal.SIGKILL)
+                else:
                     p.kill()
-            except Exception:
-                pass
+        except Exception:
+            pass
 
     # ---- run loop --------------------------------------------------------
     def _run_loop(self) -> None:
@@ -597,6 +624,7 @@ class OutputRunner:
                     stderr=subprocess.PIPE,
                     text=True,
                     bufsize=1,
+                    start_new_session=True,   # own process group → clean group kill
                 )
             except FileNotFoundError:
                 self.state = "error"
