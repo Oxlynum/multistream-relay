@@ -297,6 +297,23 @@ def build_passthrough_cmd(out: dict, source: str = LOCAL_SOURCE) -> list[str]:
     ]
 
 
+def build_ertmp_cmd(out: dict, source: str = LOCAL_SOURCE) -> list[str]:
+    """HEVC copy -> Enhanced RTMP (eRTMP) for platforms that support it (Twitch).
+
+    FFmpeg's FLV muxer auto-negotiates the Enhanced RTMP handshake when it sees a
+    HEVC stream — no extra flags needed. The source HEVC + AAC from OBS passes
+    through untouched, skipping the landscape NVENC encode entirely.
+    """
+    return [
+        "ffmpeg", "-hide_banner", "-loglevel", "warning",
+        *_input_args(source),
+        "-i", source,
+        "-c", "copy",
+        "-f", "flv",
+        _full_rtmp_url(out),
+    ]
+
+
 def build_group_cmd(
     outputs: list[dict],
     orientation: str,
@@ -490,7 +507,8 @@ def plan_runners(cfg: dict) -> dict[str, dict]:
     crop = cfg.get("crop") or {}
 
     passthrough = [o for o in outputs if o.get("mode") == "passthrough"]
-    transcode = [o for o in outputs if o.get("mode") != "passthrough"]
+    ertmp = [o for o in outputs if o.get("mode") == "ertmp"]
+    transcode = [o for o in outputs if o.get("mode") not in ("passthrough", "ertmp")]
     landscape = [o for o in transcode if o.get("orientation", "landscape") != "portrait"]
     portrait = [o for o in transcode if o.get("orientation") == "portrait"]
 
@@ -501,6 +519,13 @@ def plan_runners(cfg: dict) -> dict[str, dict]:
             "cmd": build_passthrough_cmd(o),
             "platforms": [o["name"]],
             "mode": "passthrough",
+        }
+
+    for o in ertmp:
+        plan[f"passthrough:{o['name']}"] = {
+            "cmd": build_ertmp_cmd(o),
+            "platforms": [o["name"]],
+            "mode": "ertmp",
         }
 
     if landscape:

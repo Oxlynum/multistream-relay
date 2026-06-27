@@ -19,3 +19,7 @@ multistream-relay.zip
 
 # Research / scratch notes (not for the repo)
 nvidia-research.txt
+
+# Local credentials — never commit
+.envrc
+.env*

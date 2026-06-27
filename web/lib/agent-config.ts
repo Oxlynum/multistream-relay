@@ -63,7 +63,7 @@ export function buildAgentOutputs(
     const perOutput = outputSettings?.[p.platform]
     const resolution = perOutput?.resolution ?? '1080p'
 
-    // YouTube landscape → HEVC passthrough (no re-encode, best quality).
+    // YouTube landscape → HEVC passthrough via HLS (YouTube RTMP endpoint is H.264-only).
     if (p.platform === 'youtube' && orientation === 'landscape') {
       return {
         name: p.platform,
@@ -73,6 +73,23 @@ export function buildAgentOutputs(
         fps: p.fps ?? 60,
         orientation,
         mode: 'passthrough',
+        resolution,
+        enabled: p.enabled,
+      }
+    }
+
+    // Twitch landscape → HEVC passthrough via Enhanced RTMP (eRTMP).
+    // Twitch supports eRTMP natively; this skips the landscape NVENC H.264 encode
+    // entirely, saving an NVENC session and sending better-quality HEVC directly.
+    if (p.platform === 'twitch' && orientation === 'landscape') {
+      return {
+        name: p.platform,
+        url: p.rtmp_url,
+        key: streamKey,
+        bitrate_kbps: perOutput?.bitrate_kbps ?? (p.bitrate_kbps ?? defaultBitrate(p.platform)),
+        fps: p.fps ?? 60,
+        orientation,
+        mode: 'ertmp',
         resolution,
         enabled: p.enabled,
       }
