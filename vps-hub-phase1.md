@@ -6,6 +6,13 @@
 > byte-for-byte unchanged. **MULTI-TENANT**: one VPS serves many users (join-or-spawn,
 > scale-to-zero). Billing DEACTIVATED (only self-destruct safety kept). Read with `vps-hub-plan.md`.
 
+## ⚠️ PRELAUNCH REMOVAL (temporary dev code — DELETE before production)
+- **Private-dev access gate** in `web/app/api/gpu/provision/route.ts` (marked `TEMPORARY PRIVATE-DEV GATE`):
+  blocks all streaming except emails in `SLIMCAST_ALLOWED_EMAILS`. Currently set to `oxlynum@gmail.com`
+  in Vercel prod. Before launch: delete the gate block AND unset/clear `SLIMCAST_ALLOWED_EMAILS`.
+- **Billing deactivated** globally via `SLIMCAST_BILLING_ACTIVE` (default off). Before launch: the billing
+  overhaul re-enables it (see vps-hub-plan.md §7).
+
 ## Resolved decisions (Phase 1)
 - **Data model:** NEW shared `vps_hubs` table + `gpu_instances.vps_hub_id` FK. `relay_nodes`
   (Phase 0) is per-session → reserved for the Phase-2 GPU backend, NOT used for the shared hub.

@@ -30,6 +30,29 @@ export async function POST(request: Request) {
 
   console.log(`[provision] user=${userId} ua=${request.headers.get('user-agent') ?? 'unknown'}`)
 
+  // ⚠️ TEMPORARY PRIVATE-DEV GATE — DELETE BEFORE PRODUCTION (see vps-hub-phase1.md).
+  // While the VPS-hub is in development, restrict ALL streaming (both the VPS and
+  // all-in-one paths) to an allowlist of emails (SLIMCAST_ALLOWED_EMAILS, comma-
+  // separated). Unset/empty = open (no gate). Fail-OPEN on a lookup error so a
+  // transient blip can't lock out the legit user. REMOVE this whole block at launch.
+  const devAllowlist = (process.env.SLIMCAST_ALLOWED_EMAILS ?? '')
+    .split(',').map(s => s.trim().toLowerCase()).filter(Boolean)
+  if (devAllowlist.length) {
+    try {
+      const { data: u } = await supabase.auth.admin.getUserById(userId)
+      const email = (u?.user?.email ?? '').toLowerCase()
+      if (email && !devAllowlist.includes(email)) {
+        console.warn(`[provision] private-dev gate: blocked ${email}`)
+        return Response.json(
+          { error: 'SlimCast is in private development — your account is not enabled yet.' },
+          { status: 403 },
+        )
+      }
+    } catch (e) {
+      console.warn('[provision] private-dev gate lookup failed (allowing):', e instanceof Error ? e.message : e)
+    }
+  }
+
   // Phase 0: fire-and-forget sweep (was awaited, costing the first few seconds of
   // every provision on the critical path). The heartbeat already sweeps on each beat.
   sweepStalePods().catch(e => console.error('[sweep] provision-time error:', e))
