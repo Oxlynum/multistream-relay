@@ -3,7 +3,7 @@ import { generateApiKey, hashApiKey, authenticateUserOrAgent } from '@/lib/agent
 import { provisionGpu, startProvisionRace, type UserOutputConfig, type RacerEntry } from '@/lib/gpu-broker'
 import { acquireHubOrSpawn, startGpuBackendRace } from '@/lib/vps-broker'
 import { classifyMode, needsTranscode } from '@/lib/agent-config'
-import { teardownInstance, sweepStalePods } from '@/lib/pod-teardown'
+import { teardownInstance, sweepExpiredLeases } from '@/lib/pod-teardown'
 import { checkRateLimit } from '@/lib/rate-limit'
 import { spendableTokens } from '@/lib/billing'
 import { FALLBACK_LAT, FALLBACK_LON, VPS_READINESS_TIMEOUT_MS } from '@/lib/datacenters'
@@ -60,7 +60,7 @@ export async function POST(request: Request) {
 
   // Phase 0: fire-and-forget sweep (was awaited, costing the first few seconds of
   // every provision on the critical path). The heartbeat already sweeps on each beat.
-  sweepStalePods().catch(e => console.error('[sweep] provision-time error:', e))
+  sweepExpiredLeases().catch(e => console.error('[sweep] provision-time error:', e))
 
   if (!(await checkRateLimit(`provision:${userId}`, 5, 60))) {
     return Response.json({ error: 'Too many requests. Slow down.' }, { status: 429 })

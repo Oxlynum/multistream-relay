@@ -1,28 +1,27 @@
 import { createServerClient } from '@/lib/supabase'
-import { teardownInstance, teardownHub } from '@/lib/pod-teardown'
+import { sweepExpiredLeases } from '@/lib/pod-teardown'
 import { reraceGpuBackend } from '@/lib/vps-broker'
 import { ACTIVE_PROVIDERS, ACTIVE_BACKEND_PROVIDERS, ACTIVE_VPS_PROVIDERS, getProvider } from '@/lib/providers'
-import { VPS_READINESS_TIMEOUT_MS, HUB_IDLE_GRACE_MS } from '@/lib/datacenters'
 import type { RacerEntry } from '@/lib/gpu-broker'
 
-// The independent backstop. Runs daily (Vercel Hobby caps crons at once/day) and
-// destroys any pod that the in-pod safeties can't catch — chiefly a pod that has
-// stopped phoning home (agent crashed, lost network, host node died) and would
-// otherwise bill forever. The live agent self-destructs within seconds on
-// idle/credits/max-session, so this only matters when the agent is dead; for
-// faster reaping of that case, move to a Pro plan (every-minute) or point an
-// external uptime pinger at this endpoint. Endpoint is safe to call any time.
+// The DEMOTED-TO-FLOOR backstop (termination-system-plan §9.4). The primary reaper
+// is now the heartbeat-driven sweepExpiredLeases() — fired from every live relay's
+// status beat (pod / hub / gpu), it reaps any stale box within ~1 beat with no cron
+// dependency. This daily cron remains for two things the lease alone can't cover:
+//   1. The ALL-IDLE floor: if NOTHING is heartbeating, nothing drives the sweep —
+//      so the cron runs sweepExpiredLeases() itself once a day as the safety net.
+//   2. The ROW-LESS orphan reconcile: a box whose DB row was lost (create-then-die,
+//      account-deletion CASCADE) has no renew_deadline to read, so the lease can't
+//      see it — only provider.listInstances() vs the known rows can. Plus the v2
+//      racer cleanup and the live-parent GPU re-race (richer geo-anchor logic).
+// Runs daily on Vercel Hobby; safe to call any time (it only reaps PAST-DEADLINE or
+// genuinely-row-less boxes, so even an unauthenticated hit can't kill a healthy box).
 
-// No heartbeat for this long → the pod is gone or unreachable; destroy it.
+// No heartbeat for this long → consider a GPU-backend node stale (re-race floor).
 const STALE_S = 150
-// Provisioned but never paired within this window → boot failed; destroy it.
-const NEVER_PAIRED_S = 180
 const IDLE_GRACE_S = 5 * 60
-// Backstop for the confirmable 12h deadline: kill only well past it (the live
-// heartbeat already enforces the exact deadline for healthy pods).
-const MAX_SESSION_GRACE_S = 60
-// A GPU backend races across multiple providers (Vast + RunPod) + can re-race, so
-// its never-paired window is wider than the all-in-one pod's (180s).
+// A GPU backend races across multiple providers + can re-race, so its never-paired
+// window is wider than a pod's.
 const GPU_NODE_NEVER_PAIRED_S = 300
 
 export async function GET(request: Request) {
@@ -37,43 +36,16 @@ export async function GET(request: Request) {
   }
 
   const supabase = createServerClient()
-  const { data: instances } = await supabase
-    .from('gpu_instances')
-    .select('user_id, last_seen_at, created_at, idle_since, streaming, status, max_session_at, vps_hub_id')
-    .neq('status', 'stopped')
+
+  // ── Lease pass (the all-idle floor) ──────────────────────────────────────────
+  // The single universal sweeper: gpu_instances (pod + hub-tenant leases), vps_hubs
+  // (box lease + derived scale-to-zero) and gpu-backend nodes (dead-parent destroy).
+  // This supersedes the old per-pod staleness loop AND the Clock B hub lifecycle loop
+  // (both of which read the now-removed session_count). Heartbeats drive it in real
+  // time; this daily call is purely the backstop for a fully-idle fleet.
+  await sweepExpiredLeases()
 
   const now = Date.now()
-  const reaped: { user_id: string; reason: string }[] = []
-
-  for (const inst of instances ?? []) {
-    // VPS hub tenants are governed by the hub clocks (Clock A heartbeat / Clock B
-    // teardownHub), not the per-pod staleness rules — their last_seen_at is driven
-    // by the shared hub, and a still-booting hub session is legitimately unpaired.
-    // Skip them here; teardownHub re-points/errors them and they get cleaned once
-    // unlinked (vps_hub_id null).
-    if (inst.vps_hub_id) continue
-    const lastSeen = inst.last_seen_at ? new Date(inst.last_seen_at).getTime() : null
-    const createdAt = inst.created_at ? new Date(inst.created_at).getTime() : now
-    const idleSince = inst.idle_since ? new Date(inst.idle_since).getTime() : null
-    const maxSessionAt = inst.max_session_at ? new Date(inst.max_session_at).getTime() : null
-
-    let reason = ''
-    if (lastSeen === null) {
-      // Never checked in. Give it a provisioning grace window, then kill.
-      if ((now - createdAt) / 1000 > NEVER_PAIRED_S) reason = 'never_paired'
-    } else if ((now - lastSeen) / 1000 > STALE_S) {
-      reason = 'stale_heartbeat'
-    } else if (maxSessionAt && now > maxSessionAt + MAX_SESSION_GRACE_S * 1000) {
-      reason = 'max_session'
-    } else if (!inst.streaming && idleSince && (now - idleSince) / 1000 > IDLE_GRACE_S) {
-      reason = 'idle_timeout'
-    }
-
-    if (reason) {
-      await teardownInstance(inst.user_id, `reaper:${reason}`)
-      reaped.push({ user_id: inst.user_id, reason })
-    }
-  }
 
   // ── Racer cleanup: destroy loser/failed racers from v2 races ──────────────
   // teardownInstance handles this on user-initiated stops; here we clean up
@@ -169,36 +141,10 @@ export async function GET(request: Request) {
     console.error('[reaper] orphan reconcile failed:', e)
   }
 
-  // ── Clock B: VPS hub lifecycle (scale-to-zero backstop + dead/stuck hubs) ──
-  // The hub heartbeat self-destructs an empty hub promptly; this is the backstop
-  // for a hub that stopped heartbeating (box/agent dead) or never came live.
-  const reapedHubs: { hub_id: string; reason: string }[] = []
-  try {
-    const { data: hubs } = await supabase
-      .from('vps_hubs')
-      .select('id, status, session_count, last_seen_at, created_at, empty_since')
-    for (const hub of hubs ?? []) {
-      const created = hub.created_at ? new Date(hub.created_at).getTime() : now
-      const lastSeen = hub.last_seen_at ? new Date(hub.last_seen_at).getTime() : null
-      const emptySince = hub.empty_since ? new Date(hub.empty_since).getTime() : null
-      let reason = ''
-      if (hub.status === 'spawning' && now - created > VPS_READINESS_TIMEOUT_MS) {
-        reason = 'spawn_timeout'        // never POSTed /ready within the boot window
-      } else if (lastSeen && (now - lastSeen) / 1000 > STALE_S) {
-        reason = 'stale_hub'            // stopped heartbeating — box/agent dead
-      } else if (hub.status === 'live' && (hub.session_count ?? 0) <= 0 && emptySince && now - emptySince > HUB_IDLE_GRACE_MS) {
-        reason = 'scale_to_zero'        // empty past grace (heartbeat path should've caught it)
-      }
-      if (reason) {
-        // scale_to_zero uses the drain-barrier CAS (abort if a tenant raced in);
-        // spawn_timeout/stale_hub destroy unconditionally (the box is dead).
-        await teardownHub(hub.id, `reaper:${reason}`, { onlyIfEmpty: reason === 'scale_to_zero' })
-        reapedHubs.push({ hub_id: hub.id, reason })
-      }
-    }
-  } catch (e) {
-    console.error('[reaper] hub Clock B failed:', e)
-  }
+  // (Clock B hub lifecycle — spawn_timeout / stale_hub / scale_to_zero — is now
+  // handled by sweepExpiredLeases above: the hub box lease covers dead/stuck hubs
+  // and the spawn-time lease covers spawn_timeout; derived emptiness covers
+  // scale-to-zero. No session_count-reading loop remains.)
 
   // ── VPS orphan reconcile: destroy any hub box with no vps_hubs row ─────────
   // The classic "created but the row write lost a race / the function died" case,
@@ -345,5 +291,5 @@ export async function GET(request: Request) {
     console.error('[reaper] gpu node sweep failed:', e)
   }
 
-  return Response.json({ ok: true, checked: instances?.length ?? 0, reaped, orphans, reapedHubs, orphanHubs, reapedGpuNodes, reracedGpuNodes })
+  return Response.json({ ok: true, orphans, orphanHubs, reapedGpuNodes, reracedGpuNodes })
 }

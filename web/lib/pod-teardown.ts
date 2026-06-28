@@ -1,5 +1,6 @@
 import { createServerClient } from '@/lib/supabase'
 import { getProvider, getVpsProvider } from '@/lib/providers'
+import { HUB_IDLE_GRACE_MS, MAX_SESSION_GRACE_S } from '@/lib/datacenters'
 import type { RacerEntry } from '@/lib/gpu-broker'
 
 // The single, idempotent way to destroy a user's SESSION. Used by manual stop
@@ -8,9 +9,10 @@ import type { RacerEntry } from '@/lib/gpu-broker'
 // pod key — every path here is best-effort and always cleans up bookkeeping.
 //
 // VPS-as-the-Hub (Clock A): a session attached to a SHARED hub (vps_hub_id set) is
-// torn down LOGICALLY — decrement the hub's refcount (detach_from_hub) and drop the
-// session row, but NEVER destroy the box (it serves other tenants; the reaper's
-// Clock B destroys an idle hub). Only the legacy per-user GPU pod path destroys an
+// torn down LOGICALLY — drop the session row but NEVER destroy the box (it serves
+// other tenants; the lease sweeper / Clock B destroys an idle hub). There is no
+// refcount to decrement: hub occupancy is DERIVED from live leases (the deleted
+// row simply stops counting). Only the legacy per-user GPU pod path destroys an
 // actual instance here.
 export async function teardownInstance(userId: string, reason: string): Promise<boolean> {
   const supabase = createServerClient()
@@ -51,9 +53,11 @@ export async function teardownInstance(userId: string, reason: string): Promise<
   }
 
   if (instance.vps_hub_id) {
-    // Clock A: shared-hub tenant — logical detach only. We won the delete above, so
-    // this decrement is exactly-once. NEVER destroys the box (reaper Clock B does).
-    await supabase.rpc('detach_from_hub', { p_hub_id: instance.vps_hub_id })
+    // Clock A: shared-hub tenant — logical teardown only. NEVER destroys the box
+    // (the lease sweeper / Clock B does). There is NOTHING to decrement: hub
+    // occupancy is DERIVED from live leases, so deleting this row above already
+    // dropped it from hub_active_tenant_count(). The old detach_from_hub refcount
+    // decrement — and its wedge-on-lost-decrement failure mode — is gone.
   } else {
     // Legacy GPU pod path: destroy the pod + any racers.
     try {
@@ -126,17 +130,19 @@ export async function teardownInstance(userId: string, reason: string): Promise<
 export async function teardownHub(hubId: string, reason: string, opts?: { onlyIfEmpty?: boolean }): Promise<void> {
   const supabase = createServerClient()
 
-  // Atomic CLAIM (drain barrier): flip status→'ended' so no new attach can select
-  // this hub (attach considers only live|spawning) and concurrent teardowns don't
-  // double-run. For scale-to-zero callers (onlyIfEmpty), ALSO require
-  // session_count=0 — if a tenant raced in (incrementing to 1) the claim matches 0
-  // rows and we abort, so we never destroy a box a tenant just joined. attach's
-  // FOR UPDATE SKIP LOCKED + this UPDATE serialize on the row (review #4/#10/#15/#16).
-  let claim = supabase.from('vps_hubs').update({ status: 'ended' }).eq('id', hubId).neq('status', 'ended')
-  if (opts?.onlyIfEmpty) claim = claim.eq('session_count', 0)
-  const { data: hub } = await claim
-    .select('provider, provider_id, primary_ip_id, hub_key_hash')
-    .maybeSingle()
+  // Atomic CLAIM (drain barrier) via RPC: flip status→'ended' so no new attach can
+  // select this hub (attach considers only live|spawning) and concurrent teardowns
+  // don't double-run. For scale-to-zero callers (onlyIfEmpty) the RPC re-checks the
+  // DERIVED live-lease tenant count under a FOR UPDATE row lock — it serializes
+  // against attach_session_to_hub's own FOR UPDATE on the same row, so a tenant that
+  // just attached is committed-and-counted and the claim aborts rather than
+  // destroying a box it just joined. (Replaces the old .eq('session_count', 0)
+  // barrier — a derived count can't be a single-row column predicate.)
+  const { data: claimed } = await supabase.rpc('claim_hub_for_teardown', {
+    p_hub_id: hubId,
+    p_only_if_empty: !!opts?.onlyIfEmpty,
+  })
+  const hub = (claimed as Array<{ provider: string; provider_id: string | null; primary_ip_id: string | null; hub_key_hash: string | null }> | null)?.[0]
   if (!hub) return   // already ended, or (onlyIfEmpty) a tenant raced in — leave it live
 
   // Capture this hub's transcode tenants' GPU backend nodes BEFORE we unlink them.
@@ -204,46 +210,102 @@ export async function teardownHub(hubId: string, reason: string, opts?: { onlyIf
   console.log(`[teardownHub] destroyed hub ${hubId}: ${reason}`)
 }
 
-// How long without a heartbeat before a pod is considered dead.
-const SWEEP_STALE_S = 150
-// Provisioned but never paired within this window → boot failed.
-const SWEEP_NEVER_PAIRED_S = 180
-const SWEEP_IDLE_GRACE_S = 5 * 60
-
 /**
- * Inline reaper — no cron cost. Called opportunistically on every pod heartbeat
- * and at provision time. Single DB read; teardowns only fire when truly stale.
- * Idempotent: safe to call concurrently from multiple in-flight requests.
+ * The ONE universal, provider-blind lease sweeper (termination-system-plan §9.4).
+ * Replaces the old pod-only sweepStalePods. Covers ALL THREE billable kinds via a
+ * single time-gate model — no `vps_hub_id` skip, no per-role staleness constants,
+ * no daily-cron dependency.
+ *
+ * Heartbeat-driven: every live relay's status POST fires this (pod, hub AND gpu
+ * roles), so any one live box drives reaping of the dead ones within ~1 beat. It
+ * reuses the idempotent teardownInstance / teardownHub, so concurrent invocations
+ * are safe (the DELETE/claim is the gate). The daily cron keeps calling it too, as
+ * the all-idle floor (nothing live to drive the sweep).
+ *
+ * The lease itself is what tolerates reconnection: a box lease rides the
+ * datacenter→Vercel link (user jitter can't trip it), and a tenant reconnect lease
+ * is renewed by OBS-source-present — so this sweeper never false-kills a healthy
+ * stream the way the old single 150s threshold (doubling as reconnect-tolerance AND
+ * orphan-reaping) could.
  */
-export async function sweepStalePods(): Promise<void> {
+export async function sweepExpiredLeases(): Promise<void> {
   const supabase = createServerClient()
-  const { data } = await supabase
-    .from('gpu_instances')
-    .select('user_id, last_seen_at, created_at, idle_since, streaming, vps_hub_id')
-    .neq('status', 'stopped')
-
   const now = Date.now()
-  for (const inst of data ?? []) {
-    // VPS hub tenants are governed by the hub clocks (Clock A heartbeat / Clock B
-    // teardownHub), NOT these per-pod staleness rules — a still-booting hub session
-    // is legitimately unpaired. Mirror the cron reaper's guard (review #2/#7).
-    if (inst.vps_hub_id) continue
-    const lastSeen  = inst.last_seen_at ? new Date(inst.last_seen_at).getTime() : null
-    const createdAt = inst.created_at   ? new Date(inst.created_at).getTime()   : now
-    const idleSince = inst.idle_since   ? new Date(inst.idle_since).getTime()   : null
 
-    let reason = ''
-    if (!lastSeen && (now - createdAt) / 1000 > SWEEP_NEVER_PAIRED_S) {
-      reason = 'never_paired'
-    } else if (lastSeen && (now - lastSeen) / 1000 > SWEEP_STALE_S) {
-      reason = 'stale_heartbeat'
-    } else if (!inst.streaming && idleSince && (now - idleSince) / 1000 > SWEEP_IDLE_GRACE_S) {
-      reason = 'idle_timeout'
+  // ── 1. gpu_instances — legacy pods (box lease) AND hub tenants (reconnect lease).
+  // No vps_hub_id skip: a hub tenant whose OBS source has been absent past its
+  // reconnect lease is reaped here (logical detach + its GPU backend), and the
+  // derived hub-emptiness picks up the drop automatically on the next reconcile.
+  const { data: insts } = await supabase
+    .from('gpu_instances')
+    .select('user_id, renew_deadline, max_session_at')
+    .neq('status', 'stopped')
+  for (const i of insts ?? []) {
+    const leaseExpired = i.renew_deadline != null && new Date(i.renew_deadline).getTime() < now
+    const capExpired = i.max_session_at != null &&
+      new Date(i.max_session_at).getTime() + MAX_SESSION_GRACE_S * 1000 < now
+    if (leaseExpired || capExpired) {
+      console.log(`[sweep] lease expired for ${i.user_id}: ${capExpired ? 'max_session' : 'lease'}`)
+      await teardownInstance(i.user_id, `sweep:${capExpired ? 'max_session' : 'lease_expired'}`)
     }
+  }
 
-    if (reason) {
-      console.log(`[sweep] tearing down stale pod for ${inst.user_id}: ${reason}`)
-      await teardownInstance(inst.user_id, `sweep:${reason}`)
+  // ── 2. vps_hubs — box lease lapsed (dead agent/box) → HARD destroy (the incident
+  // fix: no longer waits for the daily cron). Else reconcile DERIVED emptiness and
+  // scale-to-zero an empty hub past the idle grace.
+  const { data: hubs } = await supabase
+    .from('vps_hubs')
+    .select('id, renew_deadline')
+    .neq('status', 'ended')
+  for (const h of hubs ?? []) {
+    const hubId = h.id as string
+    const boxDead = h.renew_deadline != null && new Date(h.renew_deadline).getTime() < now
+    if (boxDead) {
+      console.log(`[sweep] hub ${hubId} box lease expired — hard destroy`)
+      await teardownHub(hubId, 'sweep:box_lease_expired')   // hard — relay heartbeat gone
+      continue
+    }
+    // Reconcile empty_since from the DERIVED live-lease count (never a stored
+    // refcount → the wedged-counter immortal-hub orphan is structurally impossible).
+    const { data: rec } = await supabase.rpc('reconcile_hub_emptiness', { p_hub_id: hubId })
+    const row = (rec as Array<{ out_active_count: number; out_empty_since: string | null }> | null)?.[0]
+    if (row && row.out_active_count === 0 && row.out_empty_since &&
+        now - new Date(row.out_empty_since).getTime() > HUB_IDLE_GRACE_MS) {
+      console.log(`[sweep] hub ${hubId} empty past grace — scale-to-zero`)
+      await teardownHub(hubId, 'sweep:scale_to_zero', { onlyIfEmpty: true })
+    }
+  }
+
+  // ── 3. relay_nodes(gpu_backend) — box lease lapsed AND parent session gone →
+  // destroy. A still-live parent's stale node is left to the cron floor's richer
+  // re-race path (geo re-anchor / key rotation), so this sweeper never churns a
+  // GPU mid-stream.
+  const { data: nodes } = await supabase
+    .from('relay_nodes')
+    .select('id, provider, provider_id, racers, node_key_hash, instance_id, renew_deadline')
+    .eq('role', 'gpu_backend')
+  for (const n of nodes ?? []) {
+    const boxDead = n.renew_deadline != null && new Date(n.renew_deadline).getTime() < now
+    if (!boxDead) continue
+    let parentLive = false
+    if (n.instance_id) {
+      const { data: parent } = await supabase
+        .from('gpu_instances').select('status').eq('id', n.instance_id as string).maybeSingle()
+      parentLive = !!parent && parent.status === 'running'
+    }
+    if (parentLive) continue   // cron floor re-races a live-parent stale node
+    try {
+      if (n.provider_id) await getProvider(n.provider).destroy(n.provider_id)
+      for (const r of (n.racers ?? []) as RacerEntry[]) {
+        if (r.provider_id && r.provider_id !== n.provider_id) {
+          try { await getProvider(r.provider).destroy(r.provider_id) } catch { /* best effort */ }
+        }
+      }
+      if (n.node_key_hash) await supabase.from('agent_api_keys').delete().eq('key_hash', n.node_key_hash)
+      await supabase.from('relay_nodes').delete().eq('id', n.id)
+      console.log(`[sweep] gpu backend ${n.id} lease expired (parent gone) — destroyed`)
+    } catch (e) {
+      console.error(`[sweep] gpu backend destroy failed ${n.id}:`, e)
     }
   }
 }

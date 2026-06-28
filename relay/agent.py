@@ -109,8 +109,12 @@ PID_FILE = "/tmp/agent.pid"
 # ── Safety watchdogs ──────────────────────────────────────────────────────────
 HEARTBEAT_FAIL_LIMIT = int(os.environ.get("AGENT_HB_FAIL_LIMIT", "6"))   # ~60s
 # Seconds after OBS disconnects before we stop encoders and terminate the pod.
-# A reconnect within this window (network blip, OBS restart) cancels the timer.
-DISCONNECT_GRACE_S = int(os.environ.get("RELAY_DISCONNECT_GRACE", "20"))
+# A reconnect within this window (network blip, OBS restart, cellular handoff,
+# short ISP drop) cancels the timer. 180s = the uniform reconnect grace from the
+# termination-system-plan (replaces the old aggressive 20s, which destroyed a pod
+# on a 25-30s blip and forced a ~45s re-provision). SRT's 5000ms buffer already
+# absorbs jitter, so only a true sustained publish-drop ever starts this clock.
+DISCONNECT_GRACE_S = int(os.environ.get("RELAY_DISCONNECT_GRACE", "180"))
 # If OBS never connects within this many seconds of the pod being ready, terminate.
 # Prevents paying for a pod that OBS can't reach (wrong region, port issue, etc.)
 # 180s (not 120): the SRT UDP port can take ~60s to map on Vast, and the dock can
@@ -955,6 +959,14 @@ def main() -> None:
                 sup.stop_all()
                 streaming = False
         else:
+            # AUTO-RESUME FIX (termination-system-plan §10 item 6): if a previous
+            # missed-heartbeat burst stopped outputs while OBS stayed connected, the
+            # apply-gate sig=(config_hash, tier) is unchanged, so the apply block would
+            # NEVER restart the encoders even though heartbeats recovered — silently
+            # ending a stream OBS never dropped. Force a re-apply on recovery.
+            if hb_failures >= HEARTBEAT_FAIL_LIMIT and obs_connected:
+                log.info("Heartbeats recovered with OBS still connected — re-applying outputs.")
+                last_applied_sig = None
             hb_failures = 0
             command = hb_resp.get("command")
             if command == "stop":

@@ -46,10 +46,33 @@ export const VPS_PRICE_CEILING = 0.20
 // relay image (Phase 4 prebuilt snapshot will shrink this).
 export const VPS_READINESS_TIMEOUT_MS = 300_000
 
-// Scale-to-zero (Clock B): a live hub with session_count==0 is destroyed after this
-// idle grace, so brief gaps / quick restarts don't thrash the box.
+// Scale-to-zero (Clock B): a live hub with zero DERIVED live-lease tenants is
+// destroyed after this idle grace, so brief gaps / quick restarts don't thrash
+// the box. (empty_since is reconciled from the derived count, not a refcount.)
 export const HUB_IDLE_GRACE_MS = 10 * 60 * 1000
 
 // Default per-box tenant capacity (load-test §10.4 pending; the box is bandwidth-
 // bound on its 22TB bundle, not CPU-bound, once the preview is off).
 export const HUB_MAX_SESSIONS = 10
+
+// ── Universal termination lease (termination-system-plan.md Phase 1) ─────────
+// Two independent timers resolve the old "one 150s threshold doubles as both
+// reconnect-tolerance AND orphan-reaping" tension (§9.1):
+//
+//   BOX lease — renewed by EVERY relay→Vercel heartbeat (~10s beat). A box whose
+//   heartbeat stops is past this within ~12 missed beats and gets swept. It rides
+//   the datacenter→Vercel link, NOT the user's home uplink, so user-side jitter
+//   can never trip it. Applies to legacy pods (gpu_instances), GPU backends
+//   (relay_nodes) and hub boxes (vps_hubs).
+export const BOX_LEASE_MS = 120_000
+//
+//   TENANT reconnect lease — renewed ONLY while a hub tenant's OBS source is
+//   present. Source absent this long → reap that tenant (and its GPU backend),
+//   while a reconnect inside the window keeps the slot. Replaces the legacy 20s
+//   OBS-disconnect kill with a forgiving 3 min (must match the 180s literal in
+//   attach_session_to_hub's renew_deadline).
+export const RECONNECT_GRACE_MS = 180_000
+//
+//   Backstop grace past the confirmable 12h max_session_at hard cap before a
+//   forced kill (mirrors architecture #12).
+export const MAX_SESSION_GRACE_S = 60

@@ -2,8 +2,8 @@ import type { NextRequest } from 'next/server'
 import { authenticateAgentDetailed, authenticateNode, type NodeAuth } from '@/lib/agent-auth'
 import { createServerClient } from '@/lib/supabase'
 import { triggerAutoRefill } from '@/app/api/credits/auto-refill/route'
-import { teardownInstance, teardownHub, sweepStalePods } from '@/lib/pod-teardown'
-import { HUB_IDLE_GRACE_MS } from '@/lib/datacenters'
+import { teardownInstance, teardownHub, sweepExpiredLeases } from '@/lib/pod-teardown'
+import { HUB_IDLE_GRACE_MS, BOX_LEASE_MS, RECONNECT_GRACE_MS } from '@/lib/datacenters'
 import { spendableTokens, type OutputStatus, type BillingPlatformRow } from '@/lib/billing'
 import { billStreamInterval } from '@/lib/billing-clock'
 
@@ -53,10 +53,15 @@ async function refillAndRecheck(
 // so the relay never self-stops. Operates ONLY on relay_nodes (never the gpu_instances path).
 async function handleGpuStatus(request: NextRequest, node: NodeAuth): Promise<Response> {
   const supabase = createServerClient()
-  // Bump last_seen_at AND read the owning session in one round-trip.
+  // Bump last_seen_at + renew the GPU-backend BOX lease, and read the owning session
+  // in one round-trip. renew_deadline is what lets the universal sweeper destroy this
+  // box if its heartbeat ever stops (no daily-cron dependency, any provider).
   const { data: nodeRow } = await supabase
     .from('relay_nodes')
-    .update({ last_seen_at: new Date().toISOString() })
+    .update({
+      last_seen_at: new Date().toISOString(),
+      renew_deadline: new Date(Date.now() + BOX_LEASE_MS).toISOString(),
+    })
     .eq('id', node.nodeId!)
     .select('instance_id, user_id')
     .maybeSingle()
@@ -84,6 +89,9 @@ async function handleGpuStatus(request: NextRequest, node: NodeAuth): Promise<Re
       dropped_frames: 0,
     })
   }
+  // Heartbeat-driven universal sweep: any live box reaps stale ones within ~1 beat
+  // (drops the old isPodAgent gate — a GPU backend beat now drives reaping too).
+  sweepExpiredLeases().catch(e => console.error('[sweep] gpu-beat error:', e))
   return Response.json({ ok: true, credits_seconds: 999999 })
 }
 
@@ -104,7 +112,14 @@ async function handleVpsStatus(request: NextRequest, hubId: string): Promise<Res
   const now = Date.now()
   const nowIso = new Date(now).toISOString()
 
-  const hubUpdate: Record<string, unknown> = { last_seen_at: nowIso }
+  // Renew the hub BOX lease on every heartbeat. This is the incident fix: a hub
+  // whose relay stops heartbeating (dead agent / network partition / OOM) lapses
+  // past renew_deadline within ~12 beats and the universal sweeper hard-destroys it
+  // — no longer dependent on the daily cron or on a correct scale-to-zero decision.
+  const hubUpdate: Record<string, unknown> = {
+    last_seen_at: nowIso,
+    renew_deadline: new Date(now + BOX_LEASE_MS).toISOString(),
+  }
   if (body.cost) {
     hubUpdate.cost_usd_hr = body.cost.projected_usd_hr ?? null
     hubUpdate.egress_gb_hr = body.cost.egress_gb_hr ?? null
@@ -167,8 +182,17 @@ async function handleVpsStatus(request: NextRequest, hubId: string): Promise<Res
       devBypass: isDevNoBilling(userId),
     })
 
+    // Renew the tenant RECONNECT lease ONLY while the OBS source is present. When the
+    // source is gone we deliberately do NOT bump renew_deadline, so the lease lapses
+    // after RECONNECT_GRACE_MS (3 min) and the sweeper reaps this tenant + its GPU
+    // backend — while a reconnect inside the window keeps the slot. This is the
+    // forgiving replacement for the legacy 20s OBS-disconnect kill, and it is what
+    // drops the tenant out of the DERIVED hub-emptiness count.
     await supabase.from('gpu_instances')
-      .update({ last_seen_at: nowIso, streaming, idle_since: idleSince, burn_rate: bill.burnRate })
+      .update({
+        last_seen_at: nowIso, streaming, idle_since: idleSince, burn_rate: bill.burnRate,
+        ...(streaming ? { renew_deadline: new Date(now + RECONNECT_GRACE_MS).toISOString() } : {}),
+      })
       .eq('user_id', userId).eq('vps_hub_id', hubId)
 
     // Coarse inbound (OBS→hub) health for the dock graph in hub topology. `streaming`
@@ -198,24 +222,28 @@ async function handleVpsStatus(request: NextRequest, hubId: string): Promise<Res
     }
   }
 
-  // Scale-to-zero (Clock B, timely path): if this hub has been empty past the idle
-  // grace, self-destruct now rather than waiting for the cron reaper (which only
-  // backstops a hub that stopped heartbeating). Re-read the refcount so a tenant
-  // that attached this instant isn't dropped.
-  const { data: hubNow } = await supabase
-    .from('vps_hubs')
-    .select('session_count, empty_since')
-    .eq('id', hubId)
-    .maybeSingle()
+  // Scale-to-zero (Clock B, timely path): reconcile emptiness from the DERIVED
+  // live-lease count (NOT a stored refcount — the wedged-counter immortal-hub
+  // orphan is structurally impossible now). reconcile_hub_emptiness recomputes
+  // count(tenants WHERE renew_deadline > now()) AFTER the Clock A loop above, so a
+  // tenant that just renewed its lease this beat is counted; if zero past grace,
+  // self-destruct now rather than waiting for the sweeper/cron.
+  const { data: rec } = await supabase.rpc('reconcile_hub_emptiness', { p_hub_id: hubId })
+  const recRow = (rec as Array<{ out_active_count: number; out_empty_since: string | null }> | null)?.[0]
   if (
-    hubNow && (hubNow.session_count ?? 0) <= 0 && hubNow.empty_since &&
-    (now - new Date(hubNow.empty_since).getTime()) > HUB_IDLE_GRACE_MS
+    recRow && recRow.out_active_count === 0 && recRow.out_empty_since &&
+    (now - new Date(recRow.out_empty_since).getTime()) > HUB_IDLE_GRACE_MS
   ) {
     console.log(`[agent/status] hub ${hubId} empty past grace — scale-to-zero`)
-    // onlyIfEmpty: atomic drain barrier — aborts if a tenant raced in (review #4/#15).
+    // onlyIfEmpty: the claim RPC re-checks the derived count under a row lock — a
+    // tenant that raced in is committed-and-counted and aborts the destroy.
     await teardownHub(hubId, 'scale_to_zero', { onlyIfEmpty: true })
     return Response.json({ command: 'stop', reason: 'scale_to_zero' })
   }
+
+  // Heartbeat-driven universal sweep (drops the old isPodAgent gate): a hub beat
+  // reaps any stale pod / hub / gpu-backend across the fleet within ~1 beat.
+  sweepExpiredLeases().catch(e => console.error('[sweep] hub-beat error:', e))
 
   // The relay learns the live stream set from /api/agent/hub-config; per-tenant
   // stops happen implicitly when a torn-down tenant drops out of that set. So the
@@ -362,6 +390,9 @@ export async function POST(request: NextRequest) {
       .from('gpu_instances')
       .update({
         last_seen_at: new Date(now).toISOString(),
+        // Renew the legacy pod's BOX lease — the universal sweeper destroys it if its
+        // heartbeat stops, replacing the old 150s stale-heartbeat reap path.
+        renew_deadline: new Date(now + BOX_LEASE_MS).toISOString(),
         burn_rate: burnRate,
         outputs,
         streaming,
@@ -433,7 +464,9 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  if (isPodAgent) sweepStalePods().catch(e => console.error('[sweep] error:', e))
+  // Heartbeat-driven universal sweep — runs on EVERY agent beat (the old isPodAgent
+  // gate is gone; the hub + gpu roles also drive it from their own handlers above).
+  sweepExpiredLeases().catch(e => console.error('[sweep] pod-beat error:', e))
 
   const { data: cmd } = await supabase
     .from('agent_commands')

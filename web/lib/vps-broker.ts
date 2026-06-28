@@ -157,10 +157,15 @@ async function spawnHub(args: {
       server_type: candidate.serverType,
       status: 'spawning',
       max_sessions: HUB_MAX_SESSIONS,
-      session_count: 0,
+      // Box lease starts at spawn with the full readiness window (cloud-init +
+      // docker-pull can take minutes). The first heartbeat tightens it to BOX_LEASE_MS.
+      // A hub that boots but never heartbeats lapses past this and the universal
+      // sweeper hard-destroys it — this replaces the cron-only spawn_timeout backstop.
+      renew_deadline: new Date(Date.now() + VPS_READINESS_TIMEOUT_MS).toISOString(),
       // Start the scale-to-zero clock at spawn so a hub that boots but never gets a
       // tenant (e.g. a failed post-spawn attach) is still reaped — attach clears it
-      // on the first tenant (review #3/#11).
+      // on the first tenant. (empty_since is now reconciled from the DERIVED live-lease
+      // count, never a stored refcount.)
       empty_since: new Date().toISOString(),
       hub_key_hash: hubKeyHash,
       srt_passphrase: srtPassphrase,
@@ -333,6 +338,10 @@ export async function startGpuBackendRace(args: {
       race_round: 0,
       phase: 'requested',
       status: 'provisioning',
+      // Box lease starts with the boot window; the first node heartbeat tightens it.
+      // A backend that never pairs lapses past this and the sweeper destroys it (when
+      // its parent session is gone; a live parent re-races via the cron floor).
+      renew_deadline: new Date(Date.now() + VPS_READINESS_TIMEOUT_MS).toISOString(),
     })
     .select('id')
     .maybeSingle()
@@ -478,6 +487,9 @@ export async function reraceGpuBackend(nodeId: string, supabase: Supa): Promise<
     ip_address: null,
     bridge_in_port: null,
     last_seen_at: null,
+    // Fresh boot-window lease for the re-raced box (last_seen_at is nulled, so the
+    // lease — not staleness — governs it until the new box pairs and heartbeats).
+    renew_deadline: new Date(Date.now() + VPS_READINESS_TIMEOUT_MS).toISOString(),
   }).eq('id', nodeId)
 
   const imageTag = process.env.SLIMCAST_RELAY_IMAGE || 'ghcr.io/oxlynum/multistream-relay:latest'
