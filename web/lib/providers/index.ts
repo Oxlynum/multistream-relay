@@ -1,4 +1,5 @@
 import { vastProvider } from './vast'
+import { runpodProvider } from './runpod'
 import { hetznerProvider } from './hetzner'
 import type { GpuProvider, VpsProvider } from './types'
 
@@ -13,8 +14,16 @@ import type { GpuProvider, VpsProvider } from './types'
 // stays Vast-only until then.
 export const ACTIVE_PROVIDERS: GpuProvider[] = [vastProvider]
 
+// VPS-hub GPU BACKEND catalog (the "no Vast-only" mandate). Used ONLY by the bridge
+// race (mode:'backend'), which receives an mpegts-over-TCP bridge — so TCP-only RunPod
+// is viable here (it was banned only by SRT/UDP ingest). Kept SEPARATE from
+// ACTIVE_PROVIDERS so the legacy all-in-one path (SRT ingest, flag-off rollback) stays
+// Vast-only and can't accidentally land on a RunPod box that can't take OBS's UDP.
+export const ACTIVE_BACKEND_PROVIDERS: GpuProvider[] = [vastProvider, runpodProvider]
+
 const PROVIDERS: Record<string, GpuProvider> = {
   vast: vastProvider,
+  runpod: runpodProvider,
 }
 
 /** Resolve the GPU provider that owns an existing instance (for stop/teardown).

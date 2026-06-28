@@ -58,13 +58,18 @@ export interface GpuProvider {
   //   its real geolocation and price.
   // Best-effort: should resolve to [] (not throw) if the provider is unreachable,
   // so one provider being down never blocks the others.
-  listCandidates(opts: { maxPricePerHr: number; needsProfessionalGpu: boolean }): Promise<GpuCandidate[]>
+  // `mode` distinguishes the legacy all-in-one pod (OBS ingests SRT/UDP directly →
+  // needs UDP ports) from the VPS-hub GPU BACKEND (receives an mpegts-over-TCP bridge
+  // → no UDP, fewer ports, tiny in-region egress). Defaults to 'all-in-one' so the
+  // existing path is unchanged.
+  listCandidates(opts: { maxPricePerHr: number; needsProfessionalGpu: boolean; mode?: 'all-in-one' | 'backend' }): Promise<GpuCandidate[]>
 
   create(args: {
     candidate: GpuCandidate
     name: string
     imageTag: string
     env: PodEnv[]
+    mode?: 'all-in-one' | 'backend'
   }): Promise<CreatedPod>
 
   getStatus(podId: string): Promise<PodStatus>

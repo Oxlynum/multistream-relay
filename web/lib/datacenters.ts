@@ -8,6 +8,13 @@
 // use a higher ceiling set at provision time in SLIMCAST_COST_CEILING_USD.
 export const PRICE_CEILING = 0.50
 
+// VPS-hub GPU BACKEND ceiling (the bridge race). Higher than the all-in-one ceiling
+// because the backend's egress is tiny + in-region (it returns ONE H.264 stream to
+// the VPS, not a platform fan-out), so the bandwidth component barely binds — and we
+// need headroom for RunPod SECURE (~$0.99). Tune once real in-region GPU density near
+// each Hetzner region is measured.
+export const BACKEND_PRICE_CEILING = 1.00
+
 // Readiness gate: after a pod is created we poll until it has a public IP + mapped
 // ingest ports (i.e. it actually booted). If it never does within the timeout,
 // abandon it and try the next candidate — inventory is not the same as a working

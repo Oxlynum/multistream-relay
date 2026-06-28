@@ -61,7 +61,11 @@ RUN chmod +x start.sh hook.sh 2>/dev/null || true
 # srt://<pod>:<mapped>?streamid=publish:<ingest-key>, gated by the per-pod ingest
 # key. The 8889 echo lets the broker verify the host forwards UDP + can reach the
 # platforms before committing.
-EXPOSE 1935 8080 8888 8890/udp 8889/udp
+# 8899/tcp = VPS-hub GPU-bridge ingest (RELAY_ROLE=gpu): the VPS pushes the source
+#   HEVC here as mpegts-over-TLS for NVDEC. TCP, so it comes free from EXPOSE on Vast
+#   AND works on TCP-only providers (RunPod) — the bridge is what lets the GPU catalog
+#   span beyond Vast. Unused by the all-in-one + vps roles.
+EXPOSE 1935 8080 8888 8899 8890/udp 8889/udp
 
 # agent.py is the production entrypoint.
 # It handles pairing with Vercel, starting MediaMTX, and polling config.

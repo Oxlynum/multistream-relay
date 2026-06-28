@@ -124,12 +124,21 @@ export interface ProvisionResult {
   error?: string
 }
 
-/** Build the distance-then-price ranked candidate list across all providers. */
-export async function rankedCandidates(lat: number, lon: number, needsProfessionalGpu: boolean): Promise<Array<{ c: GpuCandidate; distKm: number }>> {
+/** Build the distance-then-price ranked candidate list across a provider set.
+ * Defaults to the all-in-one path (ACTIVE_PROVIDERS, mode 'all-in-one', PRICE_CEILING);
+ * the VPS-hub GPU bridge passes ACTIVE_BACKEND_PROVIDERS + mode 'backend' + a higher
+ * BACKEND_PRICE_CEILING. */
+export async function rankedCandidates(
+  lat: number, lon: number, needsProfessionalGpu: boolean,
+  opts: { providers?: GpuProvider[]; mode?: 'all-in-one' | 'backend'; maxPricePerHr?: number } = {},
+): Promise<Array<{ c: GpuCandidate; distKm: number }>> {
+  const providers = opts.providers ?? ACTIVE_PROVIDERS
+  const maxPricePerHr = opts.maxPricePerHr ?? PRICE_CEILING
+  const mode = opts.mode ?? 'all-in-one'
   const lists = await Promise.all(
-    ACTIVE_PROVIDERS.map(async p => {
+    providers.map(async p => {
       try {
-        return await p.listCandidates({ maxPricePerHr: PRICE_CEILING, needsProfessionalGpu })
+        return await p.listCandidates({ maxPricePerHr, needsProfessionalGpu, mode })
       } catch (err) {
         console.error(`[broker] ${p.name} listCandidates failed:`, err instanceof Error ? err.message : err)
         return []
@@ -292,6 +301,13 @@ export interface RaceArgs {
   racersN?: number
   /** Skip the first `skipN` candidates (used for next-round kicks). */
   skipN?: number
+  /** Provider set to race over. Defaults to ACTIVE_PROVIDERS (all-in-one); the GPU
+   * bridge passes ACTIVE_BACKEND_PROVIDERS. */
+  providers?: GpuProvider[]
+  /** 'backend' relaxes provider port/UDP filters for the GPU bridge. */
+  mode?: 'all-in-one' | 'backend'
+  /** Price ceiling for candidate filtering (defaults to PRICE_CEILING). */
+  maxPricePerHr?: number
   /**
    * Called immediately after each pod is created (before any further await in
    * this promise chain), so the pod is reapable even if the fan-out is killed
@@ -315,13 +331,13 @@ export interface RaceResult {
  * boots" — one bad host is harmless instead of a 60–180s tax on every stream.
  */
 export async function startProvisionRace(args: RaceArgs): Promise<RaceResult> {
-  const { racersN = 2, skipN = 0, userOutputs } = args
+  const { racersN = 2, skipN = 0, userOutputs, providers = ACTIVE_PROVIDERS, mode = 'all-in-one', maxPricePerHr } = args
   const nvencSessions = userOutputs ? requiredNvencSessions(userOutputs) : 0
   const needsProfessionalGpu = nvencSessions > 3
 
-  const candidates = await rankedCandidates(args.lat, args.lon, needsProfessionalGpu)
+  const candidates = await rankedCandidates(args.lat, args.lon, needsProfessionalGpu, { providers, mode, maxPricePerHr })
   if (candidates.length === 0) {
-    return { started: false, racerCount: 0, error: 'no SRT-capable host available' }
+    return { started: false, racerCount: 0, error: 'no capable host available' }
   }
 
   // Deduplicate by physical host so two racers never share the same machine.
@@ -335,7 +351,7 @@ export async function startProvisionRace(args: RaceArgs): Promise<RaceResult> {
     return true
   })
 
-  const providerByName = new Map(ACTIVE_PROVIDERS.map(p => [p.name, p]))
+  const providerByName = new Map(providers.map(p => [p.name, p]))
   // Slice out candidates already tried in prior rounds.
   const eligible = dedupedCandidates.slice(skipN, skipN + racersN)
   if (eligible.length === 0) {
@@ -357,6 +373,7 @@ export async function startProvisionRace(args: RaceArgs): Promise<RaceResult> {
           name: args.name,
           imageTag: args.imageTag,
           env: args.env,
+          mode,
         })
         racerCount++
         const racer: RacerEntry = {

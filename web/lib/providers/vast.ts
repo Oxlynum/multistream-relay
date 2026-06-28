@@ -177,8 +177,12 @@ function gpuKeyOf(name: string): string {
 export const vastProvider: GpuProvider = {
   name: 'vast',
 
-  async listCandidates({ maxPricePerHr, needsProfessionalGpu }) {
+  async listCandidates({ maxPricePerHr, needsProfessionalGpu, mode }) {
     if (!VAST_API_KEY) return []
+    // Backend (GPU bridge) mode receives an mpegts-over-TCP bridge, NOT OBS's UDP
+    // SRT — so it needs only the bridge-in TCP port (+ a beacon), not the all-in-one
+    // RTMP + SRT(udp) + probe(udp) trio. Relax the direct-port floor accordingly.
+    const minPorts = mode === 'backend' ? 2 : MIN_DIRECT_PORTS
     // Vast machines are consumer GPUs (3-session NVENC cap on older drivers). For
     // users who need >3 simultaneous encodes we can't guarantee it, so skip Vast.
     if (needsProfessionalGpu) return []
@@ -219,7 +223,7 @@ export const vastProvider: GpuProvider = {
       o.reliability2 >= MIN_RELIABILITY &&
       o.inet_up >= MIN_UPLOAD_MBPS &&
       o.inet_down >= MIN_DOWNLOAD_MBPS &&
-      o.direct_port_count >= MIN_DIRECT_PORTS &&
+      o.direct_port_count >= minPorts &&
       (o.internet_up_cost_per_tb ?? 0) <= MAX_EGRESS_COST_PER_TB &&  // reject bandwidth gougers
       allInPricePerHr(o) <= maxPricePerHr &&                          // all-in, not just GPU
       !MACHINE_DENYLIST.has(o.machine_id) &&
@@ -262,7 +266,7 @@ export const vastProvider: GpuProvider = {
     return candidates
   },
 
-  async create({ candidate, name, imageTag, env }): Promise<CreatedPod> {
+  async create({ candidate, name, imageTag, env, mode }): Promise<CreatedPod> {
     const offerId = candidate.placement.offerId as number
     // Port mapping: Vast auto-forwards TCP EXPOSE ports but NOT UDP EXPOSE ports.
     // Verified live: relay image (EXPOSE 1935 8080 8890/udp 8889/udp) → Vast only
@@ -285,8 +289,14 @@ export const vastProvider: GpuProvider = {
       SLIMCAST_GPU_RATE_USD: String(gpuRateUsd),
       SLIMCAST_EGRESS_USD_PER_TB: String(egressUsdPerTb),
       SLIMCAST_INGRESS_USD_PER_TB: String(ingressUsdPerTb),
-      '-p 8890:8890/udp': '1',   // SRT ingest — OBS → pod
-      '-p 8889:8889/udp': '1',   // UDP echo probe — broker readiness gate
+      // UDP port maps are for the ALL-IN-ONE OBS→SRT ingest only. The GPU BACKEND
+      // (mode='backend') receives an mpegts-over-TCP bridge and needs NO UDP — its
+      // bridge-in TCP port (8899) comes free from the Dockerfile EXPOSE. Omitting
+      // these is exactly the cage that banned RunPod; backend mode lifts it.
+      ...(mode === 'backend' ? {} : {
+        '-p 8890:8890/udp': '1',   // SRT ingest — OBS → pod
+        '-p 8889:8889/udp': '1',   // UDP echo probe — broker readiness gate
+      }),
       // NOTE: the relay Dockerfile already bakes NVIDIA_VISIBLE_DEVICES=all +
       // NVIDIA_DRIVER_CAPABILITIES=compute,video,utility, and a live test proved
       // setting them here too does NOT fix a GPU-blind host — the driver libs
