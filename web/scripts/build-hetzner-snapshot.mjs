@@ -49,6 +49,12 @@ if (!TOKEN) {
 }
 const RELAY_IMAGE = fromEnvFile('SLIMCAST_RELAY_IMAGE') || 'ghcr.io/oxlynum/multistream-relay:latest'
 const IMAGE_LOGIN_RAW = fromEnvFile('VAST_IMAGE_LOGIN') // "-u USER -p TOKEN SERVER"
+// Optional: attach registered SSH key id(s) to the builder. Hetzner sets an EXPIRED root
+// password when NO ssh_keys are passed at create — which blocks even key auth via PAM,
+// making a stalled builder impossible to inspect. Pass HETZNER_BUILDER_SSH_KEY_ID (comma-
+// separated registered key ids) to get clean key login for debugging. Optional/no-op if unset.
+const BUILDER_SSH_KEY_IDS = (fromEnvFile('HETZNER_BUILDER_SSH_KEY_ID') || '')
+  .split(',').map(s => s.trim()).filter(Boolean).map(Number).filter(n => Number.isFinite(n))
 
 const args = new Set(process.argv.slice(2))
 const MODE = args.has('--list') ? 'list' : args.has('--cleanup') ? 'cleanup' : 'build'
@@ -106,56 +112,88 @@ if (!login) {
 
 const sq = v => String(v).replace(/'/g, `'\\''`)
 
-console.log('Fetching live server-type catalog + locations...')
-const [stRes, locRes] = await Promise.all([hz('/server_types?per_page=50'), hz('/locations')])
-if (!stRes.ok || !locRes.ok) {
-  console.error(`catalog fetch failed: server_types ${stRes.status}, locations ${locRes.status}`)
+console.log('Fetching live server-type catalog + locations + datacenter availability...')
+const [stRes, locRes, dcRes] = await Promise.all([
+  hz('/server_types?per_page=50'),
+  hz('/locations'),
+  hz('/datacenters'),
+])
+if (!stRes.ok || !locRes.ok || !dcRes.ok) {
+  console.error(`catalog fetch failed: server_types ${stRes.status}, locations ${locRes.status}, datacenters ${dcRes.status}`)
   process.exit(1)
 }
 const serverTypes = (await stRes.json()).server_types ?? []
 const locations = (await locRes.json()).locations ?? []
+const datacenters = (await dcRes.json()).datacenters ?? []
 // EU only (eu-central network zone) — matches the hub region policy; snapshots are
 // project-wide so building in EU is fine no matter where hubs ultimately boot.
 const euLoc = new Set(locations.filter(l => l.network_zone === 'eu-central').map(l => l.name))
 if (euLoc.size === 0) { console.error('no eu-central locations found'); process.exit(1) }
 
-// Cheapest x86 non-deprecated type that prices in an EU location.
+// A type's price list includes a location even when that location currently has NO
+// capacity for it (seen in the wild: fsn1 returning an empty availability set). The
+// authoritative "can I order this here right now" signal is the datacenter's
+// server_types.available list — without intersecting it, create 422s with
+// "unsupported location for server type".
+const availPairs = new Set()   // `${typeId}@${locationName}`
+for (const dc of datacenters) {
+  const locName = dc.location?.name
+  if (!euLoc.has(locName)) continue
+  for (const id of dc.server_types?.available ?? []) availPairs.add(`${id}@${locName}`)
+}
+if (availPairs.size === 0) { console.error('no EU datacenter has any orderable server type right now'); process.exit(1) }
+
+// Cheapest x86 non-deprecated type at an EU location that is ACTUALLY orderable now.
 const rows = []
 for (const st of serverTypes) {
   if (st.deprecation) continue
   if ((st.architecture ?? 'x86') !== 'x86') continue
-  const pr = (st.prices ?? []).find(p => euLoc.has(p.location))
-  if (!pr) continue
-  const hourly = pr.price_hourly?.gross ? parseFloat(pr.price_hourly.gross) : NaN
-  if (!Number.isFinite(hourly)) continue
-  rows.push({ st, location: pr.location, hourly })
+  for (const p of st.prices ?? []) {
+    if (!euLoc.has(p.location)) continue
+    if (!availPairs.has(`${st.id}@${p.location}`)) continue   // skip price-only-no-capacity combos
+    const hourly = p.price_hourly?.gross ? parseFloat(p.price_hourly.gross) : NaN
+    if (!Number.isFinite(hourly)) continue
+    rows.push({ st, location: p.location, hourly })
+  }
 }
 rows.sort((a, b) => a.hourly - b.hourly)
-if (rows.length === 0) { console.error('no priced x86 EU server type found'); process.exit(1) }
+if (rows.length === 0) { console.error('no orderable x86 EU server type found'); process.exit(1) }
 const pick = rows[0]
 console.log(`Builder box: ${pick.st.name} @ ${pick.location}  ($${pick.hourly.toFixed(4)}/hr, EU)`)
 console.log(`Baking relay image: ${RELAY_IMAGE}`)
 
 // Builder cloud-init: install Docker, login, pull the relay image, logout, power off.
 // (We DON'T start the container — the snapshot only needs the image present; the hub's
-//  own cloud-init runs it with per-server env.) power_state waits for runcmd to finish.
+//  own cloud-init runs it with per-server env.)
+//
+// Docker is installed in RUNCMD with an explicit dpkg-lock timeout + apt-daily disabled,
+// NOT via cloud-init's `packages:` module. Hetzner's Ubuntu image runs apt-daily /
+// unattended-upgrades on first boot, which holds the dpkg lock; the packages: module
+// races it and stalls indefinitely (docker never installs → the box never powers off →
+// the build times out). Doing apt ourselves with DPkg::Lock::Timeout makes it deterministic.
+//
+// Poweroff is GATED on a verified image pull (`docker image inspect`): the script seeing
+// status='off' is then a reliable "image is baked" signal. A failed/stalled pull leaves
+// the box running so the script's timeout aborts rather than snapshotting an empty disk.
+// NB: the no-login branch MUST be a valid YAML scalar + shell command. A bare ": #..."
+// is parsed by cloud-init as a block mapping → the WHOLE cloud-config is rejected as
+// "empty cloud config" and runcmd never runs (silent: box just never powers off). Use a
+// real no-op command instead.
 const loginCmd = login
   ? `docker login ${sq(login.server)} -u '${sq(login.username)}' -p '${sq(login.password)}'`
-  : `: # public image, no login`
+  : `echo public-image-no-login`
 const builderCloudInit = [
   '#cloud-config',
-  'package_update: true',
-  'packages:',
-  '  - docker.io',
   'runcmd:',
+  '  - systemctl stop apt-daily.service apt-daily-upgrade.service unattended-upgrades 2>/dev/null || true',
+  '  - systemctl disable --now apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true',
+  '  - DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 update',
+  '  - DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 install -y docker.io',
   '  - systemctl enable --now docker',
   `  - ${loginCmd}`,
   `  - docker pull ${sq(RELAY_IMAGE)}`,
   '  - docker logout ghcr.io 2>/dev/null || true',
-  'power_state:',
-  '  mode: poweroff',
-  '  timeout: 60',
-  '  condition: true',
+  `  - docker image inspect ${sq(RELAY_IMAGE)} >/dev/null 2>&1 && poweroff || echo pull-failed > /root/BAKE_FAIL`,
   '',
 ].join('\n')
 
@@ -172,6 +210,8 @@ const cr = await hz('/servers', {
     public_net: { enable_ipv4: true, enable_ipv6: false },
     labels: { 'managed-by': 'slimcast', purpose: 'snapshot-build' },
     user_data: builderCloudInit,
+    // Clean key login (no expired-password PAM block) when a key id is provided.
+    ...(BUILDER_SSH_KEY_IDS.length ? { ssh_keys: BUILDER_SSH_KEY_IDS } : {}),
   }),
 })
 const cj = await cr.json().catch(() => ({}))
@@ -187,8 +227,9 @@ let snapshotId = null
 try {
   // Wait for cloud-init to finish + the box to power itself off (install + pull + poweroff).
   console.log('\nWaiting for the builder to install Docker, pull the image, and power off...')
+  console.log('  (poweroff fires ONLY after a verified `docker image inspect` — so off = baked.)')
   let off = false
-  for (let i = 0; i < 120; i++) {   // up to ~10 min
+  for (let i = 0; i < 180; i++) {   // up to ~15 min (apt install + pull on a cold box)
     await sleep(5000)
     const sr = await hz(`/servers/${serverId}`)
     const srv = (await sr.json()).server ?? {}
@@ -196,8 +237,10 @@ try {
     if (srv.status === 'off') { off = true; break }
   }
   if (!off) {
-    console.error('⚠️  builder never powered off within 10 min — aborting (it may still be pulling).')
-    console.error('    Inspect it in the Hetzner console, then re-run. Cleaning up the box now.')
+    console.error('⚠️  builder never powered off within 15 min — aborting (pull stalled/failed, so the')
+    console.error('    image is NOT verified present; refusing to snapshot an empty disk). Cleaning up.')
+    console.error('    Tip: pass HETZNER_BUILDER_SSH_KEY_ID=<registered key id> and re-run to SSH in and')
+    console.error('    read /root/BAKE_FAIL + `journalctl -u cloud-final` on the stalled builder.')
     throw new Error('builder did not power off')
   }
   console.log('  ✅ builder powered off — image is baked.')

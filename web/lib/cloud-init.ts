@@ -55,9 +55,14 @@ export function buildCloudInit(opts: CloudInitOpts): string {
     .map(p => `-p ${p.host}:${p.container}/${p.proto}`)
     .join(' ')
 
+  // The no-login branch MUST be a valid YAML scalar + shell command. A bare ": #..."
+  // is parsed by cloud-init as a block mapping → the ENTIRE #cloud-config is rejected
+  // as "empty cloud config" and runcmd never runs — so the hub boots but never `docker
+  // run`s the relay (no SRT bind, never posts /ready). Silent hub-boot failure. This
+  // fires whenever the relay image is public (imageLogin unset), which is the prod case.
   const loginCmd = imageLogin
     ? `docker login ${sq(imageLogin.server)} -u '${sq(imageLogin.username)}' -p '${sq(imageLogin.password)}'`
-    : `: # public image, no login`
+    : `echo public-image-no-login`
 
   // RELAY_ROLE is passed explicitly; the relay defaults to all-in-one if unset, so
   // we never want to rely on the default here.
