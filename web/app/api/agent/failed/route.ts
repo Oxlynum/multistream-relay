@@ -1,9 +1,50 @@
 import type { NextRequest } from 'next/server'
-import { authenticateAgent, authenticateNode, generateApiKey, hashApiKey } from '@/lib/agent-auth'
+import { authenticateAgent, authenticateNode, generateApiKey, hashApiKey, type NodeAuth } from '@/lib/agent-auth'
 import { createServerClient } from '@/lib/supabase'
 import { startProvisionRace, type RacerEntry } from '@/lib/gpu-broker'
 import { getProvider } from '@/lib/providers'
 import { teardownHub } from '@/lib/pod-teardown'
+
+// VPS-hub GPU BACKEND failure (role-aware, on the gpu_backend relay_nodes row): a GPU
+// racer reports it can't serve (self-test failed / fatal boot). Mark it failed +
+// destroy the box; if ALL racers are dead, DEGRADE the node (transcode outputs stop
+// delivering; the hub keeps serving passthrough). No direct-to-GPU fallback. (Re-race
+// on boot-failure + the mid-stream re-race land in P9.)
+async function handleGpuFailed(request: NextRequest, node: NodeAuth): Promise<Response> {
+  const body = await request.json().catch(() => ({})) as { reason?: string; provider_id?: string }
+  const supabase = createServerClient()
+
+  const { data: nodeRow } = await supabase
+    .from('relay_nodes')
+    .select('racers, phase')
+    .eq('id', node.nodeId!)
+    .maybeSingle()
+  if (!nodeRow) return Response.json({ ack: true })
+  if (nodeRow.phase === 'ready' || nodeRow.phase === 'streaming') return Response.json({ ack: true })
+
+  const racers = (nodeRow.racers ?? []) as RacerEntry[]
+  const updated: RacerEntry[] = racers.map(r => {
+    const isThis = body.provider_id ? r.provider_id === body.provider_id : r.state === 'booting'
+    return isThis ? { ...r, state: 'failed' as const } : r
+  })
+  await supabase.from('relay_nodes').update({ racers: updated }).eq('id', node.nodeId!)
+
+  if (body.provider_id) {
+    const prov = racers.find(r => r.provider_id === body.provider_id)?.provider
+    if (prov) {
+      try { await getProvider(prov).destroy(body.provider_id) }
+      catch (e) { console.error(`[agent/failed] gpu destroy ${body.provider_id} failed:`, e) }
+    }
+  }
+
+  const allDead = updated.every(r => r.state === 'failed' || r.state === 'loser')
+  const hasWinner = updated.some(r => r.state === 'ready')
+  if (allDead && !hasWinner) {
+    await supabase.from('relay_nodes').update({ phase: 'ended', status: 'error' }).eq('id', node.nodeId!)
+    console.warn(`[agent/failed] gpu node ${node.nodeId} all racers dead (${body.reason ?? '?'}) → degraded; passthrough unaffected`)
+  }
+  return Response.json({ ack: true })
+}
 
 // VPS-as-the-Hub: a hub reports a fatal startup error. The box is confirmed dead, so
 // tear it down immediately (destroy server + release primary IP + error its tenants)
@@ -29,6 +70,9 @@ export async function POST(request: NextRequest) {
   const node = await authenticateNode(request)
   if (node?.role === 'vps' && node.hubId) {
     return handleVpsFailed(request, node.hubId)
+  }
+  if (node?.role === 'gpu' && node.nodeId) {
+    return handleGpuFailed(request, node)
   }
 
   const userId = await authenticateAgent(request)

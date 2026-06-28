@@ -13,11 +13,11 @@
 
 import { createServerClient } from '@/lib/supabase'
 import { generateApiKey, hashApiKey } from '@/lib/agent-auth'
-import { getVpsProvider, ACTIVE_VPS_PROVIDERS } from '@/lib/providers'
+import { getVpsProvider, ACTIVE_VPS_PROVIDERS, ACTIVE_BACKEND_PROVIDERS } from '@/lib/providers'
 import { buildCloudInit } from '@/lib/cloud-init'
-import { haversineKm } from '@/lib/gpu-broker'
+import { haversineKm, startProvisionRace, type RacerEntry, type UserOutputConfig } from '@/lib/gpu-broker'
 import { teardownHub } from '@/lib/pod-teardown'
-import { VPS_PRICE_CEILING, HUB_MAX_SESSIONS, VPS_READINESS_TIMEOUT_MS } from '@/lib/datacenters'
+import { VPS_PRICE_CEILING, HUB_MAX_SESSIONS, VPS_READINESS_TIMEOUT_MS, BACKEND_PRICE_CEILING, FALLBACK_LAT, FALLBACK_LON } from '@/lib/datacenters'
 import type { VpsCandidate } from '@/lib/providers/types'
 
 type Supa = ReturnType<typeof createServerClient>
@@ -33,6 +33,8 @@ interface HubRow {
   ip_address: string | null
   srt_passphrase: string | null
   region: string | null
+  lat: number | null
+  lon: number | null
 }
 
 export interface AcquireHubArgs {
@@ -52,6 +54,8 @@ export interface AcquireHubResult {
   srtPort?: number
   status?: 'live' | 'spawning'
   region?: string
+  lat?: number | null             // hub coords — the GPU race anchors on these
+  lon?: number | null
   error?: string
 }
 
@@ -101,6 +105,7 @@ async function attach(supabase: Supa, userId: string, region: string): Promise<A
   return {
     ok: true, attached: true, hubId: hub.id, ip: hub.ip_address,
     srtPort: HUB_SRT_PORT, status: live ? 'live' : 'spawning', region: hub.region ?? region,
+    lat: hub.lat, lon: hub.lon,
   }
 }
 
@@ -259,4 +264,102 @@ export async function acquireHubOrSpawn(args: AcquireHubArgs): Promise<AcquireHu
     await teardownHub(spawn.hubId, 'attach_failed_after_spawn')
   }
   return { ok: false, error: 'no hub available after spawn' }
+}
+
+export interface GpuBackendResult { ok: boolean; nodeId?: string; racerCount?: number; error?: string }
+
+/**
+ * Race a GPU BACKEND for a transcode tenant, anchored on the HUB's region (the bridge
+ * return leg is loss-intolerant TCP, so the GPU must be near the VPS). Mints the 'gpu'
+ * key + bridge_secret, inserts the per-session gpu_backend relay_nodes row, links it
+ * onto gpu_instances (topology='vps_gpu', gpu_node_id, bridge_secret), and fans out the
+ * race over ALL backend providers (Vast backend-mode + RunPod) — N=1 (the hub already
+ * serves passthrough, so a slow GPU boot only delays transcode, never the stream).
+ * On no-capacity: DEGRADE (mark the node ended/error) — NEVER fall back to direct-to-GPU.
+ */
+export async function startGpuBackendRace(args: {
+  userId: string
+  instanceId: string            // gpu_instances.id (relay_nodes.instance_id FK)
+  hubLat: number | null
+  hubLon: number | null
+  imageTag: string
+  callbackUrl: string
+  userOutputs: UserOutputConfig[]
+  supabase: Supa
+}): Promise<GpuBackendResult> {
+  const { userId, instanceId, hubLat, hubLon, imageTag, callbackUrl, userOutputs, supabase } = args
+
+  const gpuRawKey = generateApiKey()
+  const gpuKeyHash = hashApiKey(gpuRawKey)
+  const bridgeSecret = generateApiKey().slice(0, 32)
+
+  const { data: node, error: nodeErr } = await supabase
+    .from('relay_nodes')
+    .insert({
+      instance_id: instanceId,
+      user_id: userId,
+      role: 'gpu_backend',
+      provider: '',
+      node_key_hash: gpuKeyHash,
+      racers: [],
+      race_round: 0,
+      phase: 'requested',
+      status: 'provisioning',
+    })
+    .select('id')
+    .maybeSingle()
+  if (nodeErr || !node?.id) {
+    console.error('[vps-broker] gpu_backend relay_nodes insert failed:', nodeErr?.message)
+    return { ok: false, error: 'gpu node insert failed' }
+  }
+  const nodeId = node.id as string
+
+  await supabase.from('agent_api_keys').insert({
+    user_id: userId, key_hash: gpuKeyHash, label: 'gpu', node_role: 'gpu', instance_id: nodeId,
+  })
+  await supabase.from('gpu_instances').update({
+    topology: 'vps_gpu', needs_transcode: true, gpu_node_id: nodeId, bridge_secret: bridgeSecret,
+  }).eq('user_id', userId)
+
+  // The GPU learns its source dims + return URLs from /api/agent/gpu-config (per-tenant),
+  // NOT env — so the boot env is minimal.
+  const gpuEnv = [
+    { key: 'SLIMCAST_API_KEY', value: gpuRawKey },
+    { key: 'SLIMCAST_VERCEL_URL', value: callbackUrl },
+    { key: 'RELAY_ROLE', value: 'gpu' },
+    { key: 'SLIMCAST_BRIDGE_SECRET', value: bridgeSecret },
+  ]
+
+  // Serialize racer writes onto relay_nodes.racers (the documented concurrent-write fix).
+  let racerWriteLock = Promise.resolve()
+  const race = await startProvisionRace({
+    lat: hubLat ?? FALLBACK_LAT,
+    lon: hubLon ?? FALLBACK_LON,
+    name: `slimcast-${userId.slice(0, 8)}`,
+    imageTag,
+    env: gpuEnv,
+    userOutputs,
+    providers: ACTIVE_BACKEND_PROVIDERS,
+    mode: 'backend',
+    maxPricePerHr: BACKEND_PRICE_CEILING,
+    racersN: 1,
+    onRacerCreated: async (racer: RacerEntry) => {
+      await (racerWriteLock = racerWriteLock.then(async () => {
+        const { data: row } = await supabase.from('relay_nodes').select('racers').eq('id', nodeId).maybeSingle()
+        const current = (row?.racers ?? []) as RacerEntry[]
+        current.push(racer)
+        await supabase.from('relay_nodes')
+          .update({ racers: current, phase: 'racing', status: 'provisioning' })
+          .eq('id', nodeId)
+      }))
+    },
+  })
+
+  if (!race.started) {
+    console.error(`[vps-broker] gpu backend race found no capacity for ${userId}: ${race.error}`)
+    await supabase.from('relay_nodes').update({ phase: 'ended', status: 'error' }).eq('id', nodeId)
+    return { ok: false, nodeId, error: race.error }
+  }
+  console.log(`[vps-broker] gpu backend race started for ${userId}: node=${nodeId} racers=${race.racerCount}`)
+  return { ok: true, nodeId, racerCount: race.racerCount }
 }

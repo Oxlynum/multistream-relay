@@ -1,7 +1,7 @@
 import { createServerClient } from '@/lib/supabase'
 import { generateApiKey, hashApiKey, authenticateUserOrAgent } from '@/lib/agent-auth'
 import { provisionGpu, startProvisionRace, type UserOutputConfig, type RacerEntry } from '@/lib/gpu-broker'
-import { acquireHubOrSpawn } from '@/lib/vps-broker'
+import { acquireHubOrSpawn, startGpuBackendRace } from '@/lib/vps-broker'
 import { classifyMode, needsTranscode } from '@/lib/agent-config'
 import { teardownInstance, sweepStalePods } from '@/lib/pod-teardown'
 import { checkRateLimit } from '@/lib/rate-limit'
@@ -224,19 +224,33 @@ export async function POST(request: Request) {
   }).eq('user_id', userId)
 
   // ── VPS-as-the-Hub path (behind flag) ──────────────────────────────────────
-  // A stream whose every enabled output is GPU-free (passthrough/ertmp) runs on a
-  // shared, card-less Hetzner hub — no GPU rented. Inert until SLIMCAST_VPS_HUB.
-  if (process.env.SLIMCAST_VPS_HUB === 'true' && !needsGpu) {
-    // The hub authenticates with its OWN 'vps' key; the per-user pod key minted
-    // above is unused for hub sessions, so drop it.
+  // EVERY stream ingests to the VPS hub first — passthrough (YouTube/eligible-Twitch)
+  // delivers VPS-direct; transcode (Kick/TikTok/non-eligible-Twitch) bridges to a GPU
+  // backend behind the hub. No user ever goes straight to a GPU. Inert until the flag.
+  if (process.env.SLIMCAST_VPS_HUB === 'true') {
+    // The hub authenticates with its OWN 'vps' key; the per-user pod key minted above
+    // is unused for hub sessions, so drop it.
     await supabase.from('agent_api_keys').delete().eq('user_id', userId).eq('label', 'pod')
     const hub = await acquireHubOrSpawn({ userId, lat, lon, imageTag, callbackUrl, supabase })
     if (!hub.ok) {
       await releaseClaim()
       return Response.json({ error: 'No VPS capacity available right now.', detail: hub.error }, { status: 503 })
     }
-    console.log(`[provision] VPS hub ${hub.attached ? 'attached' : 'spawned'} for ${userId}: hub=${hub.hubId} status=${hub.status} region=${hub.region}`)
-    return Response.json({ ok: true, vps_hub: true, attached: hub.attached, status: hub.status })
+
+    if (needsGpu) {
+      // Transcode tenant: race a GPU backend anchored on the HUB's region (across all
+      // backend providers). acquireHubOrSpawn's attach() set topology='passthrough_only';
+      // startGpuBackendRace overrides it to 'vps_gpu' + links the gpu_backend node.
+      // On no-capacity it DEGRADES (passthrough keeps serving) — never direct-to-GPU.
+      const gpu = await startGpuBackendRace({
+        userId, instanceId: claim.id, hubLat: hub.lat ?? null, hubLon: hub.lon ?? null,
+        imageTag, callbackUrl, userOutputs, supabase,
+      })
+      console.log(`[provision] VPS hub + GPU bridge for ${userId}: hub=${hub.hubId} status=${hub.status} gpu=${gpu.ok ? gpu.nodeId : 'NO-CAPACITY(' + gpu.error + ')'}`)
+    } else {
+      console.log(`[provision] VPS hub ${hub.attached ? 'attached' : 'spawned'} for ${userId}: hub=${hub.hubId} status=${hub.status} region=${hub.region}`)
+    }
+    return Response.json({ ok: true, vps_hub: true, attached: hub.attached, status: hub.status, needs_gpu: needsGpu })
   }
 
   // ── Broker path selection ──────────────────────────────────────────────────

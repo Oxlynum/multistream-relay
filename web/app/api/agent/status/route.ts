@@ -1,5 +1,5 @@
 import type { NextRequest } from 'next/server'
-import { authenticateAgentDetailed, authenticateNode } from '@/lib/agent-auth'
+import { authenticateAgentDetailed, authenticateNode, type NodeAuth } from '@/lib/agent-auth'
 import { createServerClient } from '@/lib/supabase'
 import { triggerAutoRefill } from '@/app/api/credits/auto-refill/route'
 import { teardownInstance, teardownHub, sweepStalePods } from '@/lib/pod-teardown'
@@ -24,6 +24,16 @@ const IDLE_GRACE_S = 5 * 60 // 5m
 // self-destruct safety is NOT gated (rogue-cost protection always stays on).
 // Reversible: set SLIMCAST_BILLING_ACTIVE=true to re-enable.
 const BILLING_ACTIVE = process.env.SLIMCAST_BILLING_ACTIVE === 'true'
+
+// VPS-hub GPU BACKEND heartbeat: just refresh relay_nodes.last_seen_at so the reaper
+// can detect a mid-stream GPU death (stale heartbeat while the parent session is live)
+// and re-race. Billing is off → return a large credits_seconds so the relay never
+// self-stops. Operates ONLY on relay_nodes (never the per-user gpu_instances path).
+async function handleGpuStatus(node: NodeAuth): Promise<Response> {
+  const supabase = createServerClient()
+  await supabase.from('relay_nodes').update({ last_seen_at: new Date().toISOString() }).eq('id', node.nodeId!)
+  return Response.json({ ok: true, credits_seconds: 999999 })
+}
 
 // ── VPS-as-the-Hub heartbeat (Clock A) ───────────────────────────────────────
 // A shared hub posts ONE heartbeat for all its tenants (authenticated by its 'vps'
@@ -114,6 +124,9 @@ export async function POST(request: NextRequest) {
   const node = await authenticateNode(request)
   if (node?.role === 'vps' && node.hubId) {
     return handleVpsStatus(request, node.hubId)
+  }
+  if (node?.role === 'gpu' && node.nodeId) {
+    return handleGpuStatus(node)
   }
 
   const authed = await authenticateAgentDetailed(request)

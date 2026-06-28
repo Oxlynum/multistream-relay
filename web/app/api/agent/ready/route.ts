@@ -1,8 +1,58 @@
 import type { NextRequest } from 'next/server'
-import { authenticateAgent, authenticateNode, hashApiKey } from '@/lib/agent-auth'
+import { authenticateAgent, authenticateNode, hashApiKey, type NodeAuth } from '@/lib/agent-auth'
 import { createServerClient } from '@/lib/supabase'
 import { getProvider } from '@/lib/providers'
 import type { RacerEntry } from '@/lib/gpu-broker'
+
+// VPS-hub GPU BACKEND readiness (role-aware): the GPU self-reports its bridge-in
+// address. Winner-CAS on the gpu_backend relay_nodes row (NEVER gpu_instances — that
+// would clobber the VPS tenant's session). The losing racers self-destruct. Checked
+// before the per-user pod path so a 'gpu' key never falls into authenticateAgent.
+async function handleGpuReady(request: NextRequest, node: NodeAuth): Promise<Response> {
+  const body = await request.json().catch(() => ({})) as { ip?: string; bridge_port?: number; provider_id?: string }
+  const { ip, bridge_port, provider_id } = body
+  if (!ip || !bridge_port) {
+    return Response.json({ error: 'ip and bridge_port are required' }, { status: 400 })
+  }
+  const supabase = createServerClient()
+  const nowIso = new Date().toISOString()
+
+  // CAS: first racer to report ready wins this node; others see 0 rows updated.
+  const { data: won } = await supabase
+    .from('relay_nodes')
+    .update({
+      ip_address: ip,
+      bridge_in_port: Number(bridge_port),
+      phase: 'ready',
+      status: 'running',
+      last_seen_at: nowIso,
+    })
+    .eq('id', node.nodeId!)
+    .or('phase.is.null,phase.eq.requested,phase.eq.racing')
+    .select('id, provider_id, racers')
+    .maybeSingle()
+
+  if (!won) {
+    console.log(`[agent/ready] gpu node ${node.nodeId} lost CAS — self-destruct`)
+    return Response.json({ winner: false, action: 'self_destruct' })
+  }
+
+  const racers = (won.racers ?? []) as RacerEntry[]
+  const winnerProviderId = provider_id || won.provider_id || ''
+  const updated: RacerEntry[] = racers.map(r => ({
+    ...r, state: r.provider_id === winnerProviderId ? 'ready' : 'loser',
+  }))
+  await supabase.from('relay_nodes')
+    .update({ provider_id: winnerProviderId || won.provider_id, racers: updated })
+    .eq('id', node.nodeId!)
+
+  for (const loser of updated.filter(r => r.state === 'loser' && r.provider_id)) {
+    getProvider(loser.provider).destroy(loser.provider_id).catch(e =>
+      console.warn(`[agent/ready] gpu loser destroy ${loser.provider_id} failed:`, e))
+  }
+  console.log(`[agent/ready] gpu node ${node.nodeId} winner=${winnerProviderId} ip=${ip} bridge=${bridge_port}`)
+  return Response.json({ winner: true })
+}
 
 // VPS-as-the-Hub readiness (role-aware): a hub reports healthy at the BOX level —
 // flip vps_hubs to 'live' and promote its attached provisioning tenants to running
@@ -49,6 +99,9 @@ export async function POST(request: NextRequest) {
   const node = await authenticateNode(request)
   if (node?.role === 'vps' && node.hubId) {
     return handleVpsReady(request, node.hubId)
+  }
+  if (node?.role === 'gpu' && node.nodeId) {
+    return handleGpuReady(request, node)
   }
 
   const userId = await authenticateAgent(request)
