@@ -231,12 +231,29 @@ def _resolve_ertmp_url(out: dict) -> str:
     return resolved
 
 
-def _register_secrets(cfg: dict) -> None:
-    """Collect every stream key from the live config so _redact can scrub them."""
-    # The per-pod ingest key appears in the SRT loopback source URL on the cmd.
+def _register_secrets(cfg: dict, source: str = "") -> None:
+    """Collect every secret from the live config + source so _redact can scrub them."""
+    # The ingest key AND the SRT passphrase both appear verbatim in the loopback
+    # source URL embedded in each runner cmd. Parse them from the per-tenant source
+    # (multi-tenant: the env SLIMCAST_INGEST_KEY is only tenant-zero) so every
+    # tenant's key + the SRT passphrase are redacted, not just one (review #6/#7).
+    if source:
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(source).query)
+        sid = (q.get("streamid", [""])[0] or "")
+        if ":" in sid:
+            k = sid.split(":", 1)[1].strip()
+            if len(k) >= 4:
+                _SECRETS.add(k)
+        pp = (q.get("passphrase", [""])[0] or "").strip()
+        if len(pp) >= 4:
+            _SECRETS.add(pp)
+    # Backward-compat: the env ingest key (all-in-one) + the SRT passphrase env.
     ingest = os.environ.get("SLIMCAST_INGEST_KEY", "").strip()
     if len(ingest) >= 4:
         _SECRETS.add(ingest)
+    srt_pp = os.environ.get("SLIMCAST_SRT_PASSPHRASE", "").strip()
+    if len(srt_pp) >= 4:
+        _SECRETS.add(srt_pp)
     for o in cfg.get("outputs", []):
         key = (o.get("key") or "").strip()
         if len(key) >= 4:
@@ -250,7 +267,10 @@ def _register_secrets(cfg: dict) -> None:
 
 
 def _redact(msg: str) -> str:
-    for s in _SECRETS:
+    # Snapshot the set: it's a module global mutated by apply()/_resolve_ertmp_url on
+    # other threads while N runner threads call _redact, and iterating a set being
+    # mutated raises "Set changed size during iteration" (review: _SECRETS race).
+    for s in tuple(_SECRETS):
         msg = msg.replace(s, "***")
     return msg
 
@@ -571,6 +591,10 @@ class OutputRunner:
         self.platforms = platforms or []
         self.mode = mode
         self._proc: subprocess.Popen | None = None
+        # Serializes _run_loop's spawn (read _stop → Popen → assign _proc) against
+        # stop()/_kill_proc reading _proc, so a stop landing in the spawn window can't
+        # miss the just-created process and leak an orphan ffmpeg (review: stop/Popen race).
+        self._proc_lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._logs: collections.deque[str] = collections.deque(maxlen=LOG_LINES)
@@ -592,7 +616,11 @@ class OutputRunner:
         self._kill_proc()
 
     def _kill_proc(self) -> None:
-        p = self._proc
+        # Read _proc under the lock so we observe a spawn that _run_loop may be doing
+        # right now (the lock pairs with the spawn block in _run_loop). The slow kill
+        # itself runs outside the lock so we don't block the spawn for ~5s.
+        with self._proc_lock:
+            p = self._proc
         if not p or p.poll() is not None:
             return
         # Each runner starts in its own session/process group (start_new_session),
@@ -623,19 +651,33 @@ class OutputRunner:
         backoff = RESTART_MIN
         while not self._stop.is_set():
             self._log(f"$ {' '.join(self.cmd)}")
-            try:
-                self._proc = subprocess.Popen(
-                    self.cmd,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    bufsize=1,
-                    start_new_session=True,   # own process group → clean group kill
-                )
-            except FileNotFoundError:
-                self.state = "error"
-                self._log("ERROR: ffmpeg not found on PATH")
-                return
+            # Spawn under the lock with a final _stop check: if stop() already fired,
+            # do NOT spawn (else we'd leak an orphan the kill already missed). _proc is
+            # assigned under the lock so a concurrent _kill_proc sees this process.
+            with self._proc_lock:
+                if self._stop.is_set():
+                    break
+                try:
+                    self._proc = subprocess.Popen(
+                        self.cmd,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        errors="replace",   # a non-UTF-8 stderr byte must not kill the thread
+                        bufsize=1,
+                        start_new_session=True,   # own process group → clean group kill
+                    )
+                except FileNotFoundError:
+                    self.state = "error"
+                    self._log("ERROR: ffmpeg not found on PATH")
+                    return
+
+            # A stop that landed right after the lock released still kills this proc:
+            # _kill_proc reads _proc (now set) under the lock. Re-check so we tear down
+            # immediately instead of blocking in the stderr drain on a live process.
+            if self._stop.is_set():
+                self._kill_proc()
+                break
 
             self.state = "running"
             started = time.time()
@@ -700,7 +742,7 @@ class OutputRunner:
         return list(self._logs)
 
 
-def plan_runners(cfg: dict) -> dict[str, dict]:
+def plan_runners(cfg: dict, source: str = LOCAL_SOURCE, role: str = "all-in-one") -> dict[str, dict]:
     """
     Translate a desired config into the set of runners we should have.
 
@@ -709,6 +751,15 @@ def plan_runners(cfg: dict) -> dict[str, dict]:
       passthrough:<platform>   one HEVC copy per passthrough output
       group:landscape          shared landscape H.264 encode + tee
       group:portrait           shared portrait (cropped) H.264 encode + tee
+
+    `source` is the loopback URL each runner reads (per-tenant on a multi-tenant VPS
+    hub; defaults to the module-global LOCAL_SOURCE so the all-in-one path is
+    unchanged). `role`:
+      'all-in-one' (default) — GPU pod: transcode groups + GPU preview + passthrough/ertmp.
+      'vps'                  — card-less hub: passthrough + ertmp ONLY (no NVENC). The
+                               GPU preview + transcode groups are skipped (they'd
+                               crash-loop on a CPU box); a tenant transcode output is
+                               dropped here (it belongs on the Phase-2 GPU backend).
     """
     outputs = [o for o in cfg.get("outputs", []) if o.get("enabled")]
     crop = cfg.get("crop") or {}
@@ -723,39 +774,42 @@ def plan_runners(cfg: dict) -> dict[str, dict]:
 
     for o in passthrough:
         plan[f"passthrough:{o['name']}"] = {
-            "cmd": build_passthrough_cmd(o),
+            "cmd": build_passthrough_cmd(o, source),
             "platforms": [o["name"]],
             "mode": "passthrough",
         }
 
     for o in ertmp:
         plan[f"passthrough:{o['name']}"] = {
-            "cmd": build_ertmp_cmd(o),
+            "cmd": build_ertmp_cmd(o, source),
             "platforms": [o["name"]],
             "mode": "ertmp",
         }
 
-    if landscape:
-        plan["group:landscape"] = {
-            "cmd": build_group_cmd(landscape, "landscape", crop),
-            "platforms": [o["name"] for o in landscape],
-            "mode": "landscape",
-        }
+    # GPU work (transcode tee groups + the H.264 preview) only on GPU roles. A
+    # card-less VPS hub has no NVENC/CUDA, so these are skipped entirely there.
+    if role != "vps":
+        if landscape:
+            plan["group:landscape"] = {
+                "cmd": build_group_cmd(landscape, "landscape", crop, source),
+                "platforms": [o["name"] for o in landscape],
+                "mode": "landscape",
+            }
 
-    if portrait:
-        plan["group:portrait"] = {
-            "cmd": build_group_cmd(portrait, "portrait", crop),
-            "platforms": [o["name"] for o in portrait],
-            "mode": "portrait",
-        }
+        if portrait:
+            plan["group:portrait"] = {
+                "cmd": build_group_cmd(portrait, "portrait", crop, source),
+                "platforms": [o["name"] for o in portrait],
+                "mode": "portrait",
+            }
 
-    # Always run a preview transcode so the dashboard HLS player gets H.264
-    # (HEVC is what OBS sends, but browsers can't decode it in HLS.js).
-    plan["preview"] = {
-        "cmd": build_preview_cmd(),
-        "platforms": [],
-        "mode": "preview",
-    }
+        # Preview transcode so the dashboard HLS player gets H.264 (browsers can't
+        # decode the HEVC OBS sends). GPU-only (h264_nvenc + scale_cuda) → GPU roles only.
+        plan["preview"] = {
+            "cmd": build_preview_cmd(source),
+            "platforms": [],
+            "mode": "preview",
+        }
 
     return plan
 
@@ -763,7 +817,12 @@ def plan_runners(cfg: dict) -> dict[str, dict]:
 class Supervisor:
     """Owns all OutputRunners and applies config changes."""
 
-    def __init__(self):
+    def __init__(self, source: str = LOCAL_SOURCE, role: str = "all-in-one"):
+        # Per-instance loopback source + role. On a multi-tenant VPS hub each tenant
+        # gets its own Supervisor(source=<its read URL>, role='vps'); the all-in-one
+        # pod uses the defaults so its behavior is byte-for-byte unchanged.
+        self.source = source
+        self.role = role
         self.runners: dict[str, OutputRunner] = {}
         self.lock = threading.Lock()
         # Grace-period stop: a brief OBS disconnect shouldn't tear everything
@@ -806,8 +865,8 @@ class Supervisor:
     def apply(self, cfg: dict) -> None:
         """Reconcile running processes with the desired (grouped) config."""
         with self.lock:
-            _register_secrets(cfg)
-            desired = plan_runners(cfg)
+            _register_secrets(cfg, self.source)
+            desired = plan_runners(cfg, self.source, self.role)
 
             # stop & remove runners no longer wanted
             for key in list(self.runners):

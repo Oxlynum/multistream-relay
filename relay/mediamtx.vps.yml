@@ -1,0 +1,42 @@
+# MediaMTX config for the VPS HUB role (multi-tenant passthrough).
+#
+# ONE SRT server on :8890 accepts MANY tenants, routed by streamid: OBS publishes
+# streamid=publish:<ingest_key> and each tenant's encoder reads streamid=read:<ingest_key>.
+# A single WILDCARD path (all_others + pathDefaults) matches every tenant — so a new
+# tenant joining needs NO config reload (which would drop other tenants' live SRT
+# sessions). All tenants share ONE SRT passphrase; isolation rests on the unguessable
+# 24-char streamid (the resolved Phase-1 decision). No GPU preview path here — the hub
+# is card-less; the dashboard preview is off for the passthrough tier.
+
+logLevel: info
+logDestinations: [stdout]
+
+# RTMP readiness beacon only (nothing publishes to it). Kept so the cloud can TCP-probe
+# the box if needed; the hub also self-reports readiness via POST /api/agent/ready.
+rtmp: yes
+rtmpAddress: :1935
+
+# SRT ingest + loopback (:8890/udp). OBS publishes from outside; encoders read back.
+srt: yes
+srtAddress: :8890
+
+rtsp: no
+hls: no
+webrtc: no
+
+# Defaults applied to every (wildcard) path: shared SRT passphrase + per-tenant
+# connect/disconnect hooks. MediaMTX exports MTX_PATH (= the tenant's ingest key) into
+# the hook's environment, which hook.sh uses to write a per-tenant flag. agent.py strips
+# the two passphrase lines when no passphrase is set (local/dev).
+pathDefaults:
+  source: publisher
+  srtReadPassphrase: __SRT_PASSPHRASE__
+  srtPublishPassphrase: __SRT_PASSPHRASE__
+  runOnReady: bash hook.sh start
+  runOnReadyRestart: no
+  runOnNotReady: bash hook.sh stop
+
+paths:
+  # Catch-all: accept any tenant streamid as its own path (per-tenant isolation by
+  # the secret streamid; settings come from pathDefaults above).
+  all_others:

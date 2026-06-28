@@ -81,6 +81,12 @@ if RELAY_ROLE not in ("all-in-one", "vps", "gpu"):
     RELAY_ROLE = "all-in-one"
 log.info("RELAY_ROLE=%s", RELAY_ROLE)
 
+# VPS hub identity + config (RELAY_ROLE=vps; set by cloud-init). The hub authenticates
+# to /api/agent/{hub-config,ready,status} with its own SLIMCAST_API_KEY ('vps' key);
+# HUB_ID lets the cloud resolve which hub is reporting.
+HUB_ID = os.environ.get("SLIMCAST_HUB_ID", "").strip()
+MEDIAMTX_VPS_CONFIG = os.environ.get("MEDIAMTX_VPS_CONFIG", "mediamtx.vps.yml")
+
 # Vast-injected env vars (confirmed available at container start — 2026-06-26).
 # The pod uses these to self-report its own public URL without waiting for the
 # cloud to probe it (push-readiness model, v2 broker).
@@ -417,7 +423,151 @@ def _gpu_self_test(attempts: int = 2) -> tuple[bool, str]:
     return False, reason
 
 
+# ── VPS hub role (RELAY_ROLE=vps) ───────────────────────────────────────────────
+
+def _render_mediamtx_vps_config() -> str:
+    """Render the VPS hub MediaMTX config: substitute the shared SRT passphrase into
+    the wildcard-path template (or strip the encryption lines if none is set)."""
+    with open(MEDIAMTX_VPS_CONFIG) as f:
+        cfg = f.read()
+    if SRT_PASSPHRASE:
+        cfg = cfg.replace("__SRT_PASSPHRASE__", SRT_PASSPHRASE)
+    else:
+        cfg = "\n".join(l for l in cfg.splitlines() if "__SRT_PASSPHRASE__" not in l)
+    runtime_path = "/tmp/mediamtx.runtime.yml"
+    with open(runtime_path, "w") as f:
+        f.write(cfg)
+    return runtime_path
+
+
+def start_mediamtx_vps() -> subprocess.Popen:
+    config = _render_mediamtx_vps_config()
+    log.info("Starting MediaMTX (VPS hub, wildcard path)…")
+    proc = subprocess.Popen(["mediamtx", config])
+    time.sleep(2)
+    if proc.poll() is not None:
+        log.error("MediaMTX exited immediately (code %s)", proc.returncode)
+        sys.exit(1)
+    log.info("MediaMTX running (pid %d)", proc.pid)
+    return proc
+
+
+def _post_ready_vps(ip: str) -> None:
+    """Hub self-reports healthy → cloud flips vps_hubs.status to 'live' and promotes
+    attached tenants. Deterministic (no winner/CAS race like the GPU pod path)."""
+    body = {"role": "vps", "hub_id": HUB_ID, "ip": ip, "srt_port": 8890, "rtmp_port": 1935}
+    log.info("Reporting hub ready: hub_id=%s ip=%s", HUB_ID or "?", ip)
+    for attempt in range(5):
+        if _api("POST", "/api/agent/ready", body) is not None:
+            return
+        log.warning("POST /api/agent/ready (vps) attempt %d failed, retrying in 3s…", attempt + 1)
+        time.sleep(3)
+    log.warning("POST /api/agent/ready (vps) all retries exhausted — continuing")
+
+
+def main_vps() -> None:
+    """RELAY_ROLE=vps: a card-less Hetzner hub serving N tenants' passthrough streams.
+
+    No GPU self-test. One MediaMTX (wildcard path). Polls /api/agent/hub-config and
+    reconciles one Supervisor per tenant (dict[ingest_key -> Supervisor]); per-tenant
+    OBS connect/disconnect comes from the per-path hook flags (/tmp/obs_connected.<key>).
+    Reports per-tenant streaming to /api/agent/status (role='vps'). It NEVER calls
+    /api/agent/terminate — that would kill the whole shared box; tenant teardown is the
+    cloud's Clock A (a torn-down tenant simply drops out of hub-config and we stop it).
+    """
+    if not HUB_ID:
+        log.error("RELAY_ROLE=vps but SLIMCAST_HUB_ID is not set — cannot run as a hub.")
+        sys.exit(1)
+
+    ip = PUBLIC_IPADDR or _get_external_ip()
+    log.info("VPS hub %s starting. External IP: %s", HUB_ID, ip or "(unknown)")
+
+    mediamtx_proc = start_mediamtx_vps()
+    _post_ready_vps(ip)
+
+    with open(PID_FILE, "w") as f:
+        f.write(str(os.getpid()))
+    wake_event = threading.Event()
+    signal.signal(signal.SIGUSR1, lambda *_: wake_event.set())
+
+    # ingest_key -> {"sup": Supervisor, "applied_hash": str | None}
+    tenants: dict[str, dict] = {}
+
+    def shutdown(sig: int, _frame: object) -> None:
+        log.info("Received signal %d — shutting down hub…", sig)
+        for t in tenants.values():
+            t["sup"].stop_all()
+        mediamtx_proc.terminate()
+        try:
+            os.unlink(PID_FILE)
+        except FileNotFoundError:
+            pass
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, shutdown)
+    signal.signal(signal.SIGINT, shutdown)
+
+    while True:
+        if mediamtx_proc.poll() is not None:
+            log.warning("MediaMTX exited — restarting…")
+            mediamtx_proc = start_mediamtx_vps()
+
+        resp = _api("GET", "/api/agent/hub-config")
+        streams = (resp or {}).get("streams", []) if resp else []
+        wanted = {s["ingest_key"]: s for s in streams if s.get("ingest_key")}
+
+        # Drop tenants the cloud no longer assigns (detached / torn down by Clock A).
+        for key in list(tenants):
+            if key not in wanted:
+                log.info("Tenant %s… detached — stopping its pipeline.", key[:8])
+                tenants.pop(key)["sup"].stop_all()
+
+        report: list[dict] = []
+        for key, s in wanted.items():
+            t = tenants.get(key)
+            if t is None:
+                pp = (s.get("srt_passphrase") or "").strip()
+                src = f"srt://127.0.0.1:8890?streamid=read:{key}&latency=120&timeout=5000000"
+                if pp:
+                    src += f"&passphrase={pp}&pbkeylen=16"
+                t = {"sup": Supervisor(source=src, role="vps"), "applied_hash": None}
+                tenants[key] = t
+                log.info("Tenant %s… attached — pipeline ready (waiting for OBS).", key[:8])
+
+            connected = os.path.exists(f"{OBS_FLAG}.{key}")
+            cfg = {"outputs": s.get("outputs", []), "crop": s.get("crop", {})}
+            cfg_hash = json.dumps(cfg, sort_keys=True)
+
+            if connected:
+                t["sup"].cancel_pending_stop()
+                if cfg_hash != t["applied_hash"]:
+                    log.info("Tenant %s… OBS publishing — applying %d output(s).", key[:8], len(cfg["outputs"]))
+                    t["sup"].apply(cfg)
+                    t["applied_hash"] = cfg_hash
+            elif t["applied_hash"] is not None:
+                log.info("Tenant %s… OBS dropped — grace-stopping its pipeline.", key[:8])
+                t["sup"].schedule_stop()
+                t["applied_hash"] = None
+
+            report.append({"ingest_key": key, "streaming": connected})
+
+        hb = _api("POST", "/api/agent/status", {"role": "vps", "hub_id": HUB_ID, "streams": report})
+        if hb and hb.get("command") == "stop" and hb.get("reason") == "scale_to_zero":
+            log.info("Cloud scaled this hub to zero — shutting down.")
+            for t in tenants.values():
+                t["sup"].stop_all()
+            mediamtx_proc.terminate()
+            sys.exit(0)
+
+        wake_event.wait(timeout=POLL_INTERVAL)
+        wake_event.clear()
+
+
 def main() -> None:
+    if RELAY_ROLE == "vps":
+        main_vps()
+        return
+
     ip = _get_external_ip()
     log.info("External IP: %s", ip or "(unknown)")
 
