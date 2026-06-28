@@ -22,6 +22,14 @@ import type { VpsCandidate } from '@/lib/providers/types'
 
 type Supa = ReturnType<typeof createServerClient>
 
+// DEBUG-ONLY: attach registered SSH key id(s) to spawned hubs so an operator can SSH in
+// and read `docker logs slimcast-relay` (the hub has no remote log surface — no :8080
+// panel, no published debug port). Comma-separated registered Hetzner key ids. Passing
+// ssh_keys at create also avoids Hetzner's expired-root-password PAM block. UNSET in
+// normal prod (hubs get no key); set HETZNER_HUB_SSH_KEY_ID only while debugging.
+const HUB_SSH_KEY_IDS = (process.env.HETZNER_HUB_SSH_KEY_ID || '')
+  .split(',').map(s => s.trim()).filter(Boolean)
+
 // Fixed on Hetzner (container port == host == public, no remap). The relay binds
 // SRT on 8890; we publish 8890/udp in the hub's cloud-init.
 const HUB_SRT_PORT = 8890
@@ -202,6 +210,7 @@ async function spawnHub(args: {
       candidate,
       name: `slimcast-hub-${region}-${hubId.slice(0, 8)}`,
       cloudInit,
+      ...(HUB_SSH_KEY_IDS.length ? { sshKeyIds: HUB_SSH_KEY_IDS } : {}),
     })
   } catch (e) {
     console.error('[vps-broker] hub create failed:', e instanceof Error ? e.message : e)
