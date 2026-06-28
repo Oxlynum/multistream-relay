@@ -1,9 +1,10 @@
 import type { NextRequest } from 'next/server'
+import { after } from 'next/server'
 import { authenticateAgentDetailed, authenticateNode, type NodeAuth } from '@/lib/agent-auth'
 import { createServerClient } from '@/lib/supabase'
 import { triggerAutoRefill } from '@/app/api/credits/auto-refill/route'
 import { teardownInstance, teardownHub, sweepExpiredLeases } from '@/lib/pod-teardown'
-import { HUB_IDLE_GRACE_MS, BOX_LEASE_MS, RECONNECT_GRACE_MS } from '@/lib/datacenters'
+import { HUB_IDLE_GRACE_MS, BOX_LEASE_MS, RECONNECT_GRACE_MS, PROVISION_LEASE_MS } from '@/lib/datacenters'
 import { spendableTokens, type OutputStatus, type BillingPlatformRow } from '@/lib/billing'
 import { billStreamInterval } from '@/lib/billing-clock'
 
@@ -90,8 +91,11 @@ async function handleGpuStatus(request: NextRequest, node: NodeAuth): Promise<Re
     })
   }
   // Heartbeat-driven universal sweep: any live box reaps stale ones within ~1 beat
-  // (drops the old isPodAgent gate — a GPU backend beat now drives reaping too).
-  sweepExpiredLeases().catch(e => console.error('[sweep] gpu-beat error:', e))
+  // (drops the old isPodAgent gate — a GPU backend beat now drives reaping too). Run it
+  // via after() so it completes AFTER the response on Vercel Fluid Compute rather than
+  // being frozen mid-scan as a bare floating promise (review #7 — this is now the PRIMARY
+  // reaper, so its completion must be guaranteed, not best-effort).
+  after(() => sweepExpiredLeases().catch(e => console.error('[sweep] gpu-beat error:', e)))
   return Response.json({ ok: true, credits_seconds: 999999 })
 }
 
@@ -129,9 +133,16 @@ async function handleVpsStatus(request: NextRequest, hubId: string): Promise<Res
 
   // The hub is heartbeating → it's live. Promote any tenant still 'provisioning'
   // (attached while the hub was spawning). This self-heals a lost/partial /ready,
-  // which is otherwise the ONLY promoter (review #13).
+  // which is otherwise the ONLY promoter (review #13). REFRESH the tenant lease on
+  // promotion: attach seeded a boot lease covering hub spawn; now that the hub is
+  // serveable, give a fresh first-connect window so a slow OBS start is governed by the
+  // 5-min idle grace, not reaped mid-bringup (review #2/#3/#8/#12). Streaming renewals
+  // (RECONNECT_GRACE_MS) take over once the tenant actually publishes.
   await supabase.from('gpu_instances')
-    .update({ status: 'running', phase: 'ready' })
+    .update({
+      status: 'running', phase: 'ready',
+      renew_deadline: new Date(now + PROVISION_LEASE_MS).toISOString(),
+    })
     .eq('vps_hub_id', hubId).eq('status', 'provisioning')
 
   const reported = body.streams ?? []
@@ -242,8 +253,9 @@ async function handleVpsStatus(request: NextRequest, hubId: string): Promise<Res
   }
 
   // Heartbeat-driven universal sweep (drops the old isPodAgent gate): a hub beat
-  // reaps any stale pod / hub / gpu-backend across the fleet within ~1 beat.
-  sweepExpiredLeases().catch(e => console.error('[sweep] hub-beat error:', e))
+  // reaps any stale pod / hub / gpu-backend across the fleet within ~1 beat. after() so
+  // it completes post-response (review #7), not as a freezable floating promise.
+  after(() => sweepExpiredLeases().catch(e => console.error('[sweep] hub-beat error:', e)))
 
   // The relay learns the live stream set from /api/agent/hub-config; per-tenant
   // stops happen implicitly when a torn-down tenant drops out of that set. So the
@@ -466,7 +478,8 @@ export async function POST(request: NextRequest) {
 
   // Heartbeat-driven universal sweep — runs on EVERY agent beat (the old isPodAgent
   // gate is gone; the hub + gpu roles also drive it from their own handlers above).
-  sweepExpiredLeases().catch(e => console.error('[sweep] pod-beat error:', e))
+  // after() guarantees post-response completion on Vercel (review #7).
+  after(() => sweepExpiredLeases().catch(e => console.error('[sweep] pod-beat error:', e)))
 
   const { data: cmd } = await supabase
     .from('agent_commands')

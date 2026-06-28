@@ -1,6 +1,6 @@
 import { createServerClient } from '@/lib/supabase'
 import { getProvider, getVpsProvider } from '@/lib/providers'
-import { HUB_IDLE_GRACE_MS, MAX_SESSION_GRACE_S } from '@/lib/datacenters'
+import { HUB_IDLE_GRACE_MS, MAX_SESSION_GRACE_S, SWEEP_GRACE_MS, PROVISION_LEASE_MS } from '@/lib/datacenters'
 import type { RacerEntry } from '@/lib/gpu-broker'
 
 // The single, idempotent way to destroy a user's SESSION. Used by manual stop
@@ -14,7 +14,19 @@ import type { RacerEntry } from '@/lib/gpu-broker'
 // refcount to decrement: hub occupancy is DERIVED from live leases (the deleted
 // row simply stops counting). Only the legacy per-user GPU pod path destroys an
 // actual instance here.
-export async function teardownInstance(userId: string, reason: string): Promise<boolean> {
+// Atomic lease re-validate for sweep callers (a row that changed its lease between the
+// sweep's snapshot read and this delete is spared — the delete matches 0 rows):
+//   opts.expectLeaseBefore (ISO) — lease-expiry reap: require renew_deadline < x, so a
+//     box/tenant that RE-HEARTBEATED past the threshold survives (review #14).
+//   opts.expectLeaseNull — never-paired reap: require renew_deadline IS NULL, so a box
+//     that stamped its FIRST lease mid-sweep is not false-reaped (hardening-review #3).
+// Manual stop / Clock-A-idle / max-session callers omit both (unconditional delete —
+// those reaps are not lease-based).
+export async function teardownInstance(
+  userId: string,
+  reason: string,
+  opts?: { expectLeaseBefore?: string; expectLeaseNull?: boolean },
+): Promise<boolean> {
   const supabase = createServerClient()
 
   // Capture this session's GPU BACKEND node(s) BEFORE the row-delete below. The
@@ -34,14 +46,20 @@ export async function teardownInstance(userId: string, reason: string): Promise<
   // so the hub refcount decrement below runs EXACTLY ONCE even under concurrent
   // teardown triggers (Clock A / manual stop / agent terminate / reaper). A losing
   // concurrent caller's delete returns no row → bail (idempotent). (review #1/#6/#8)
-  const { data: instance } = await supabase
+  let claimQuery = supabase
     .from('gpu_instances')
     .delete()
     .eq('user_id', userId)
+  // Atomic lease re-validate for sweep callers: a row whose lease changed after the
+  // sweep flagged it (the post-outage heartbeat herd, or a never-paired box's first
+  // beat) no longer matches → spared.
+  if (opts?.expectLeaseBefore) claimQuery = claimQuery.lt('renew_deadline', opts.expectLeaseBefore)
+  else if (opts?.expectLeaseNull) claimQuery = claimQuery.is('renew_deadline', null)
+  const { data: instance } = await claimQuery
     .select('provider_id, pod_key_hash, provider, session_id, racers, vps_hub_id')
     .maybeSingle()
 
-  if (!instance) return false   // already torn down by a concurrent caller
+  if (!instance) return false   // already torn down, or its lease was renewed mid-sweep
 
   // Close any session still open on this pod.
   if (instance.session_id) {
@@ -127,7 +145,16 @@ export async function teardownInstance(userId: string, reason: string): Promise<
 // revoke its key, and error-out any tenants still pointed at it. Called by the
 // reaper (scale-to-zero / stale / never-paired) and by /api/agent/failed when a hub
 // reports a fatal startup error. Idempotent + best-effort.
-export async function teardownHub(hubId: string, reason: string, opts?: { onlyIfEmpty?: boolean }): Promise<void> {
+// opts.requireLeaseExpired: the box-lease HARD-destroy path (sweep:box_lease_expired)
+// passes true so the claim RPC re-reads renew_deadline under its row lock and ABORTS if
+// the hub recovered after the sweep's snapshot — so a transient hub→Vercel partition
+// can't nuke a recovered multi-tenant box and all its tenants (review #9). Fatal-error /
+// reclaim callers omit it (unconditional force).
+export async function teardownHub(
+  hubId: string,
+  reason: string,
+  opts?: { onlyIfEmpty?: boolean; requireLeaseExpired?: boolean },
+): Promise<void> {
   const supabase = createServerClient()
 
   // Atomic CLAIM (drain barrier) via RPC: flip status→'ended' so no new attach can
@@ -141,6 +168,7 @@ export async function teardownHub(hubId: string, reason: string, opts?: { onlyIf
   const { data: claimed } = await supabase.rpc('claim_hub_for_teardown', {
     p_hub_id: hubId,
     p_only_if_empty: !!opts?.onlyIfEmpty,
+    p_require_lease_expired: !!opts?.requireLeaseExpired,
   })
   const hub = (claimed as Array<{ provider: string; provider_id: string | null; primary_ip_id: string | null; hub_key_hash: string | null }> | null)?.[0]
   if (!hub) return   // already ended, or (onlyIfEmpty) a tenant raced in — leave it live
@@ -236,17 +264,41 @@ export async function sweepExpiredLeases(): Promise<void> {
   // No vps_hub_id skip: a hub tenant whose OBS source has been absent past its
   // reconnect lease is reaped here (logical detach + its GPU backend), and the
   // derived hub-emptiness picks up the drop automatically on the next reconcile.
+  // Settle margin: a lease must be expired for an EXTRA SWEEP_GRACE_MS before reaping,
+  // so a heartbeat herd recovering from a >120s control-plane outage re-renews before
+  // anything is destroyed (review #1). expectLeaseBefore re-validates atomically at the
+  // DELETE so a laggard that re-beats mid-sweep is spared.
+  const sweepThresholdIso = new Date(now - SWEEP_GRACE_MS).toISOString()
   const { data: insts } = await supabase
     .from('gpu_instances')
-    .select('user_id, renew_deadline, max_session_at')
+    .select('user_id, renew_deadline, max_session_at, created_at')
     .neq('status', 'stopped')
   for (const i of insts ?? []) {
-    const leaseExpired = i.renew_deadline != null && new Date(i.renew_deadline).getTime() < now
+    const leaseExpired = i.renew_deadline != null &&
+      new Date(i.renew_deadline).getTime() + SWEEP_GRACE_MS < now
     const capExpired = i.max_session_at != null &&
       new Date(i.max_session_at).getTime() + MAX_SESSION_GRACE_S * 1000 < now
-    if (leaseExpired || capExpired) {
-      console.log(`[sweep] lease expired for ${i.user_id}: ${capExpired ? 'max_session' : 'lease'}`)
-      await teardownInstance(i.user_id, `sweep:${capExpired ? 'max_session' : 'lease_expired'}`)
+    // Never-paired backstop (review #4/#5): a row that NEVER got a lease stamped (NULL)
+    // and is older than the boot window booted a box but never heartbeated → reap it
+    // instead of leaking until the 12h max_session cap (the deleted sweepStalePods
+    // never_paired path). New rows are stamped at provision/ready, so this is defense.
+    const neverPaired = i.renew_deadline == null && i.created_at != null &&
+      new Date(i.created_at).getTime() + PROVISION_LEASE_MS < now
+    // The 12h hard cap reaps UNCONDITIONALLY — its only reprieve is a confirm-to-extend
+    // that bumps max_session_at, never a heartbeat, so re-validating the lease here would
+    // be wrong. The never-paired and lease-expiry reaps BOTH atomically re-validate at the
+    // DELETE so a row that stamped its first lease (expectLeaseNull) or re-heartbeated past
+    // the threshold (expectLeaseBefore) between this snapshot and the claim is spared —
+    // the sweeper never destroys a box that recovered mid-sweep (review #1/#3/#14).
+    if (capExpired) {
+      console.log(`[sweep] max_session for ${i.user_id}`)
+      await teardownInstance(i.user_id, 'sweep:max_session')
+    } else if (neverPaired) {
+      console.log(`[sweep] never_paired for ${i.user_id}`)
+      await teardownInstance(i.user_id, 'sweep:never_paired', { expectLeaseNull: true })
+    } else if (leaseExpired) {
+      console.log(`[sweep] lease expired for ${i.user_id}`)
+      await teardownInstance(i.user_id, 'sweep:lease_expired', { expectLeaseBefore: sweepThresholdIso })
     }
   }
 
@@ -259,10 +311,14 @@ export async function sweepExpiredLeases(): Promise<void> {
     .neq('status', 'ended')
   for (const h of hubs ?? []) {
     const hubId = h.id as string
-    const boxDead = h.renew_deadline != null && new Date(h.renew_deadline).getTime() < now
+    const boxDead = h.renew_deadline != null &&
+      new Date(h.renew_deadline).getTime() + SWEEP_GRACE_MS < now
     if (boxDead) {
       console.log(`[sweep] hub ${hubId} box lease expired — hard destroy`)
-      await teardownHub(hubId, 'sweep:box_lease_expired')   // hard — relay heartbeat gone
+      // requireLeaseExpired: the claim re-checks renew_deadline under its row lock and
+      // aborts if the hub recovered after this snapshot — so a transient partition can't
+      // nuke a recovered multi-tenant box and all its tenants (review #9).
+      await teardownHub(hubId, 'sweep:box_lease_expired', { requireLeaseExpired: true })
       continue
     }
     // Reconcile empty_since from the DERIVED live-lease count (never a stored
@@ -280,13 +336,20 @@ export async function sweepExpiredLeases(): Promise<void> {
   // destroy. A still-live parent's stale node is left to the cron floor's richer
   // re-race path (geo re-anchor / key rotation), so this sweeper never churns a
   // GPU mid-stream.
+  // provider/provider_id/racers/node_key_hash are re-read via the atomic claim-delete's
+  // returning clause below (not here) so the destroy acts on the row we actually won.
   const { data: nodes } = await supabase
     .from('relay_nodes')
-    .select('id, provider, provider_id, racers, node_key_hash, instance_id, renew_deadline')
+    .select('id, instance_id, renew_deadline, created_at')
     .eq('role', 'gpu_backend')
   for (const n of nodes ?? []) {
-    const boxDead = n.renew_deadline != null && new Date(n.renew_deadline).getTime() < now
-    if (!boxDead) continue
+    const boxDead = n.renew_deadline != null &&
+      new Date(n.renew_deadline).getTime() + SWEEP_GRACE_MS < now
+    // Never-paired backstop: a gpu-backend box that booted but never heartbeated (NULL
+    // lease) past the boot window, whose parent is gone, is reaped below too (review #4).
+    const neverPaired = n.renew_deadline == null && n.created_at != null &&
+      new Date(n.created_at).getTime() + PROVISION_LEASE_MS < now
+    if (!boxDead && !neverPaired) continue
     let parentLive = false
     if (n.instance_id) {
       const { data: parent } = await supabase
@@ -294,16 +357,27 @@ export async function sweepExpiredLeases(): Promise<void> {
       parentLive = !!parent && parent.status === 'running'
     }
     if (parentLive) continue   // cron floor re-races a live-parent stale node
+    // Atomic claim-by-delete: re-validate the lease IN the DELETE predicate and only
+    // destroy the box if the row is STILL stale (boxDead → renew_deadline < threshold) or
+    // STILL never-paired (NULL lease). A node that re-beat — renewing its lease or stamping
+    // its first one — between this snapshot and the claim matches 0 rows and is spared, so
+    // the sweeper never churns a recovered GPU (mirrors the teardownInstance/gpu_instances
+    // atomic re-validate; review #1/#3/#14). A throw after the row-delete leaks the box only
+    // to the daily prefix orphan-reconcile — the same trade-off teardownInstance accepts.
+    let nodeClaim = supabase.from('relay_nodes').delete().eq('id', n.id)
+    nodeClaim = boxDead ? nodeClaim.lt('renew_deadline', sweepThresholdIso) : nodeClaim.is('renew_deadline', null)
+    const { data: claimedNode } = await nodeClaim
+      .select('provider, provider_id, racers, node_key_hash').maybeSingle()
+    if (!claimedNode) continue   // re-beat mid-sweep → spared
     try {
-      if (n.provider_id) await getProvider(n.provider).destroy(n.provider_id)
-      for (const r of (n.racers ?? []) as RacerEntry[]) {
-        if (r.provider_id && r.provider_id !== n.provider_id) {
+      if (claimedNode.provider_id) await getProvider(claimedNode.provider).destroy(claimedNode.provider_id)
+      for (const r of (claimedNode.racers ?? []) as RacerEntry[]) {
+        if (r.provider_id && r.provider_id !== claimedNode.provider_id) {
           try { await getProvider(r.provider).destroy(r.provider_id) } catch { /* best effort */ }
         }
       }
-      if (n.node_key_hash) await supabase.from('agent_api_keys').delete().eq('key_hash', n.node_key_hash)
-      await supabase.from('relay_nodes').delete().eq('id', n.id)
-      console.log(`[sweep] gpu backend ${n.id} lease expired (parent gone) — destroyed`)
+      if (claimedNode.node_key_hash) await supabase.from('agent_api_keys').delete().eq('key_hash', claimedNode.node_key_hash)
+      console.log(`[sweep] gpu backend ${n.id} ${boxDead ? 'lease expired' : 'never paired'} (parent gone) — destroyed`)
     } catch (e) {
       console.error(`[sweep] gpu backend destroy failed ${n.id}:`, e)
     }

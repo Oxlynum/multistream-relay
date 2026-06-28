@@ -383,11 +383,25 @@ export async function startGpuBackendRace(args: {
     onRacerCreated: async (racer: RacerEntry) => {
       await (racerWriteLock = racerWriteLock.then(async () => {
         const { data: row } = await supabase.from('relay_nodes').select('racers').eq('id', nodeId).maybeSingle()
-        const current = (row?.racers ?? []) as RacerEntry[]
+        if (!row) {
+          // The parent session was torn down (CASCADE dropped this relay_nodes row)
+          // between the parent re-check and this write. The freshly-created box can no
+          // longer be tracked in any row → destroy it now rather than leak it (review #15).
+          try { await getProvider(racer.provider).destroy(racer.provider_id) } catch { /* best effort */ }
+          console.warn(`[vps-broker] race node ${nodeId} gone — destroyed orphan racer ${racer.provider_id}`)
+          return
+        }
+        const current = (row.racers ?? []) as RacerEntry[]
         current.push(racer)
-        await supabase.from('relay_nodes')
+        const { data: updated } = await supabase.from('relay_nodes')
           .update({ racers: current, phase: 'racing', status: 'provisioning' })
-          .eq('id', nodeId)
+          .eq('id', nodeId).select('id').maybeSingle()
+        if (!updated) {
+          // Node vanished between the read and this write (same CASCADE race) → the box id
+          // is now untracked → destroy it so it can't bill invisibly (review #15).
+          try { await getProvider(racer.provider).destroy(racer.provider_id) } catch { /* best effort */ }
+          console.warn(`[vps-broker] race node ${nodeId} vanished on write — destroyed orphan racer ${racer.provider_id}`)
+        }
       }))
     },
   })
@@ -516,11 +530,25 @@ export async function reraceGpuBackend(nodeId: string, supabase: Supa): Promise<
     onRacerCreated: async (racer: RacerEntry) => {
       await (racerWriteLock = racerWriteLock.then(async () => {
         const { data: row } = await supabase.from('relay_nodes').select('racers').eq('id', nodeId).maybeSingle()
-        const current = (row?.racers ?? []) as RacerEntry[]
+        if (!row) {
+          // The parent session was torn down (CASCADE dropped this relay_nodes row)
+          // between the parent re-check and this write. The freshly-created box can no
+          // longer be tracked in any row → destroy it now rather than leak it (review #15).
+          try { await getProvider(racer.provider).destroy(racer.provider_id) } catch { /* best effort */ }
+          console.warn(`[vps-broker] race node ${nodeId} gone — destroyed orphan racer ${racer.provider_id}`)
+          return
+        }
+        const current = (row.racers ?? []) as RacerEntry[]
         current.push(racer)
-        await supabase.from('relay_nodes')
+        const { data: updated } = await supabase.from('relay_nodes')
           .update({ racers: current, phase: 'racing', status: 'provisioning' })
-          .eq('id', nodeId)
+          .eq('id', nodeId).select('id').maybeSingle()
+        if (!updated) {
+          // Node vanished between the read and this write (same CASCADE race) → the box id
+          // is now untracked → destroy it so it can't bill invisibly (review #15).
+          try { await getProvider(racer.provider).destroy(racer.provider_id) } catch { /* best effort */ }
+          console.warn(`[vps-broker] race node ${nodeId} vanished on write — destroyed orphan racer ${racer.provider_id}`)
+        }
       }))
     },
   })

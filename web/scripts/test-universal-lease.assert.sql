@@ -42,10 +42,12 @@ begin
   select vps_hub_id, renew_deadline into v_hub2, v_dl
     from public.gpu_instances where user_id='00000000-0000-0000-0000-000000000001';
   if v_hub2 is distinct from v_hub then raise exception 'FAIL: attach did not link tenant to the hub'; end if;
-  if v_dl is null or v_dl < now() + interval '170 seconds' or v_dl > now() + interval '190 seconds' then
-    raise exception 'FAIL: attach did not set a ~180s reconnect lease (got %)', v_dl;
+  -- HARDENING (000010 review #2/#3): attach seeds a 300s BOOT/first-connect lease (was
+  -- 180s) so the first tenant of a slow-spawning hub is not reaped before its hub boots.
+  if v_dl is null or v_dl < now() + interval '290 seconds' or v_dl > now() + interval '310 seconds' then
+    raise exception 'FAIL: attach did not set a ~300s boot lease (got %)', v_dl;
   end if;
-  raise notice 'PASS: attach links tenant + starts 180s reconnect lease';
+  raise notice 'PASS: attach links tenant + starts 300s boot lease (covers hub spawn window)';
 
   if public.hub_active_tenant_count(v_hub) <> 1 then
     raise exception 'FAIL: derived tenant count should be 1 (got %)', public.hub_active_tenant_count(v_hub);
@@ -128,6 +130,38 @@ begin
     raise exception 'FAIL: over-capacity tenant must not be linked';
   end if;
   raise notice 'PASS: attach enforces max_sessions via derived count';
+
+  -- ── 10. HARDENING (000010 review #9): claim_hub_for_teardown(requireLeaseExpired) ──
+  -- The box-lease HARD-destroy path must re-check renew_deadline under the row lock and
+  -- ABORT if the hub recovered (renewed) after the sweep's snapshot — so a transient
+  -- partition can't nuke a recovered multi-tenant box.
+  insert into public.vps_hubs (region, status, max_sessions, last_seen_at, provider, provider_id, hub_key_hash, renew_deadline)
+    values ('eu', 'live', 10, now(), 'hetzner', 'srv-hard', 'hash-hard', now() + interval '120 seconds')
+    returning id into v_hub;
+  -- lease in the FUTURE (box recovered) → requireLeaseExpired must ABORT
+  if (select count(*) from public.claim_hub_for_teardown(v_hub, false, true)) <> 0 then
+    raise exception 'FAIL: claim(requireLeaseExpired) must ABORT a hub whose lease is still valid (recovered)';
+  end if;
+  select status into v_status from public.vps_hubs where id=v_hub;
+  if v_status <> 'live' then raise exception 'FAIL: aborted box-lease claim must leave hub live (got %)', v_status; end if;
+  raise notice 'PASS: claim(requireLeaseExpired) aborts a recovered hub (TOCTOU fix)';
+  -- lease in the PAST (box truly dead) → requireLeaseExpired proceeds
+  update public.vps_hubs set renew_deadline = now() - interval '1 second' where id = v_hub;
+  if (select count(*) from public.claim_hub_for_teardown(v_hub, false, true)) <> 1 then
+    raise exception 'FAIL: claim(requireLeaseExpired) must SUCCEED when the lease is genuinely expired';
+  end if;
+  select status into v_status from public.vps_hubs where id=v_hub;
+  if v_status <> 'ended' then raise exception 'FAIL: expired-lease box claim must end the hub (got %)', v_status; end if;
+  raise notice 'PASS: claim(requireLeaseExpired) destroys a truly-dead hub';
+
+  -- ── 11. HARDENING: the 2-arg claim call shape still works (3rd arg defaults false) ──
+  insert into public.vps_hubs (region, status, max_sessions, last_seen_at, provider, provider_id, hub_key_hash, renew_deadline)
+    values ('eu', 'live', 10, now(), 'hetzner', 'srv-def', 'hash-def', now() + interval '120 seconds')
+    returning id into v_hub;
+  if (select count(*) from public.claim_hub_for_teardown(v_hub, false)) <> 1 then
+    raise exception 'FAIL: 2-arg claim (force, default requireLeaseExpired=false) must still destroy unconditionally';
+  end if;
+  raise notice 'PASS: 2-arg claim_hub_for_teardown still forces (back-compat default)';
 
   raise notice '======================================================';
   raise notice 'ALL UNIVERSAL-LEASE ASSERTS PASSED';

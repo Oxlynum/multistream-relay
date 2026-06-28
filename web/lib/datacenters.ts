@@ -76,3 +76,31 @@ export const RECONNECT_GRACE_MS = 180_000
 //   Backstop grace past the confirmable 12h max_session_at hard cap before a
 //   forced kill (mirrors architecture #12).
 export const MAX_SESSION_GRACE_S = 60
+//
+//   SWEEP SETTLE MARGIN (termination review #1/#9/#10/#13/#14). The box lease alone
+//   (120s) reaps with a STRICT renew_deadline<now test, which races the relay's own
+//   missed-heartbeat auto-resume and can mass-reap a recovering fleet on a >120s
+//   control-plane (Vercel) outage: every relay freezes its lease during the outage,
+//   then the first to recover sweeps the laggards before they re-heartbeat. The
+//   sweeper therefore reaps only when the lease has been expired for an ADDITIONAL
+//   settle margin, so the post-recovery heartbeat herd (each box re-beats within
+//   ~1 POLL_INTERVAL) renews before anything is destroyed. Effective box-dead
+//   threshold = BOX_LEASE_MS + SWEEP_GRACE_MS (~210s). A 3-min control-plane blip
+//   (the review's scenario) never even flags a box. Paired with an atomic lease
+//   re-validate at the destroy itself (teardownInstance conditional DELETE +
+//   claim_hub_for_teardown re-check) so a laggard that re-beats mid-sweep is spared.
+export const SWEEP_GRACE_MS = 90_000
+//
+//   PROVISION BOOT LEASE (termination review #4/#5). A freshly-claimed gpu_instances
+//   row (legacy all-in-one pod) carries NO renew_deadline until its FIRST heartbeat,
+//   and the sweeper treats a NULL lease as not-expired — so a pod that boots a real
+//   box but whose agent dies before its first beat (GPU-injection crash, OOM, OBS/
+//   laptop crash, both v2 racers silently dying) used to leak until the 12h
+//   max_session cap. We stamp this boot-window lease at the claim INSERT and at the
+//   /ready CAS (mirroring how vps-broker stamps hub/gpu-backend inserts), so a
+//   never-heartbeating box is swept in ~PROVISION_LEASE_MS+grace instead of ~12h.
+//   Sized to cover the worst-case boot+pair+first-beat (MAX_BOOT_ATTEMPTS × readiness
+//   ≈ 220s) so a slow-but-valid boot is never false-reaped. Also the age threshold
+//   for the NULL-lease backstop in the sweeper (defense-in-depth for any insert path
+//   that forgets to stamp).
+export const PROVISION_LEASE_MS = 300_000

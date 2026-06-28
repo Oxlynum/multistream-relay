@@ -2,6 +2,7 @@ import type { NextRequest } from 'next/server'
 import { authenticateAgent, authenticateNode, hashApiKey, type NodeAuth } from '@/lib/agent-auth'
 import { createServerClient } from '@/lib/supabase'
 import { getProvider } from '@/lib/providers'
+import { PROVISION_LEASE_MS } from '@/lib/datacenters'
 import type { RacerEntry } from '@/lib/gpu-broker'
 
 // VPS-hub GPU BACKEND readiness (role-aware): the GPU self-reports its bridge-in
@@ -92,8 +93,15 @@ async function handleVpsReady(request: NextRequest, hubId: string): Promise<Resp
 
   // Promote tenants that attached while the hub was spawning. (Attaches to an
   // already-live hub were set 'running' at attach time — this is for the spawner +
-  // early joiners.)
-  const sessionUpdate: Record<string, unknown> = { status: 'running', phase: 'ready', last_seen_at: nowIso }
+  // early joiners.) REFRESH the tenant lease here too: /ready is the PRIMARY promoter
+  // (the hub POSTs /ready before its first heartbeat), so without this the spawner's
+  // boot lease is never extended once the hub becomes serveable and a slow first OBS
+  // connect on a near-timeout boot is reaped ~90s after ready (hardening-review #1 —
+  // the handleVpsStatus refresh only catches the rare lost-/ready self-heal path).
+  const sessionUpdate: Record<string, unknown> = {
+    status: 'running', phase: 'ready', last_seen_at: nowIso,
+    renew_deadline: new Date(Date.now() + PROVISION_LEASE_MS).toISOString(),
+  }
   if (hubIp) sessionUpdate.ip_address = hubIp
   await supabase.from('gpu_instances').update(sessionUpdate).eq('vps_hub_id', hubId).eq('status', 'provisioning')
 
@@ -158,6 +166,10 @@ export async function POST(request: NextRequest) {
       phase: 'ready',
       status: 'running',
       last_seen_at: new Date().toISOString(),
+      // Refresh the boot lease from the ready moment so a pod that wins /ready then dies
+      // before its first /status heartbeat is still swept in ~PROVISION_LEASE_MS, not at
+      // the 12h cap (review #4). The 10s heartbeat then renews it to BOX_LEASE_MS.
+      renew_deadline: new Date(Date.now() + PROVISION_LEASE_MS).toISOString(),
     })
     .eq('user_id', userId)
     // CAS guard: only win if no one has already claimed ready.

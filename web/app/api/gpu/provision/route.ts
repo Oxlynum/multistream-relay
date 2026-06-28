@@ -6,7 +6,7 @@ import { classifyMode, needsTranscode } from '@/lib/agent-config'
 import { teardownInstance, sweepExpiredLeases } from '@/lib/pod-teardown'
 import { checkRateLimit } from '@/lib/rate-limit'
 import { spendableTokens } from '@/lib/billing'
-import { FALLBACK_LAT, FALLBACK_LON, VPS_READINESS_TIMEOUT_MS } from '@/lib/datacenters'
+import { FALLBACK_LAT, FALLBACK_LON, VPS_READINESS_TIMEOUT_MS, PROVISION_LEASE_MS } from '@/lib/datacenters'
 
 // Billing master switch (shared with the heartbeat clock). When off, streaming is free
 // in dev — the payment gate below is skipped entirely.
@@ -127,6 +127,11 @@ export async function POST(request: Request) {
       provider_id: '',
       status: 'provisioning',
       max_session_at: new Date(Date.now() + MAX_SESSION_MS).toISOString(),
+      // Boot-window lease so a pod that boots a real box but dies before its first
+      // heartbeat is swept in ~PROVISION_LEASE_MS+grace instead of leaking until the 12h
+      // max_session cap (review #4/#5). The 10s heartbeat renews it to BOX_LEASE_MS once
+      // the agent is alive; attach_session_to_hub overwrites it for a hub tenant.
+      renew_deadline: new Date(Date.now() + PROVISION_LEASE_MS).toISOString(),
     })
     .select('id')
     .maybeSingle()
