@@ -91,7 +91,13 @@ async function attach(supabase: Supa, userId: string, region: string): Promise<A
   const { data, error } = await supabase.rpc('attach_session_to_hub', { p_user_id: userId, p_region: region })
   if (error) { console.error('[vps-broker] attach rpc error:', error.message); return null }
   const hub = data as HubRow | null
-  if (!hub) return null
+  // The PL/pgSQL function RETURNS vps_hubs, so on a no-match it returns an all-NULL
+  // composite ({id:null, region:null, …}) — NOT SQL NULL. That object is truthy, so a
+  // bare `if (!hub)` lets a PHANTOM hub through: acquireHubOrSpawn's attach loop then
+  // does `if (r) return r` and short-circuits, never reaching spawnHub → no box is ever
+  // created and the session "attaches" to nothing (hubId/lat/lon all null → Kansas
+  // fallback). A real hub always has an id, so gate on it.
+  if (!hub || !hub.id) return null
 
   const live = hub.status === 'live'
   await supabase.from('gpu_instances').update({
