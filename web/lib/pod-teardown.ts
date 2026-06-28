@@ -15,6 +15,18 @@ import type { RacerEntry } from '@/lib/gpu-broker'
 export async function teardownInstance(userId: string, reason: string): Promise<boolean> {
   const supabase = createServerClient()
 
+  // Capture this session's GPU BACKEND node(s) BEFORE the row-delete below. The
+  // relay_nodes FK is instance_id → gpu_instances ON DELETE CASCADE, so deleting
+  // the session row drops the relay_nodes rows but NEVER calls provider.destroy()
+  // on the rented GPU box → it bills FOREVER (VPS-hub landmine #4). We read the box
+  // ids here, then destroy them explicitly after we win the delete. Legacy
+  // all-in-one rows have no gpu_backend nodes → this returns [] and is a no-op.
+  const { data: gpuNodes } = await supabase
+    .from('relay_nodes')
+    .select('provider, provider_id, racers, node_key_hash')
+    .eq('user_id', userId)
+    .eq('role', 'gpu_backend')
+
   // Atomically CLAIM the teardown by DELETING the session row and reading it back.
   // The delete is the gate: only the caller that actually removed the row proceeds,
   // so the hub refcount decrement below runs EXACTLY ONCE even under concurrent
@@ -73,7 +85,37 @@ export async function teardownInstance(userId: string, reason: string): Promise<
     await supabase.from('agent_api_keys').delete().eq('key_hash', instance.pod_key_hash)
   }
 
-  console.log(`[teardown] destroyed ${instance.vps_hub_id ? 'hub-session' : 'pod'} for ${userId}: ${reason}`)
+  // Destroy the GPU BACKEND box(es) captured before the cascade. This runs for BOTH
+  // the vps_hub_id transcode tenant (vps_gpu topology) and any legacy row (which has
+  // no gpu_backend nodes → gpuNodes is empty → no-op). Without this the FK cascade
+  // silently leaks the rented GPU (landmine #4). Best-effort; the reaper backstops.
+  for (const node of gpuNodes ?? []) {
+    if (node.provider_id) {
+      try {
+        await getProvider(node.provider).destroy(node.provider_id)
+      } catch (e) {
+        console.error(`[teardown] gpu backend destroy failed for ${userId} (${reason}):`, e)
+      }
+    }
+    // Destroy any racer boxes still alive (losers/booting racers from the GPU race).
+    // The winner was promoted to node.provider_id (destroyed above); skip it here.
+    const gpuRacers = (node.racers ?? []) as RacerEntry[]
+    for (const racer of gpuRacers) {
+      if (racer.provider_id && racer.provider_id !== node.provider_id) {
+        try {
+          await getProvider(racer.provider).destroy(racer.provider_id)
+        } catch {
+          // Best-effort; the reaper backstops any that survive.
+        }
+      }
+    }
+    // Revoke this node's 'gpu' key so a zombie GPU container can't re-authenticate.
+    if (node.node_key_hash) {
+      await supabase.from('agent_api_keys').delete().eq('key_hash', node.node_key_hash)
+    }
+  }
+
+  console.log(`[teardown] destroyed ${instance.vps_hub_id ? 'hub-session' : 'pod'}${(gpuNodes?.length ?? 0) > 0 ? ' + gpu backend' : ''} for ${userId}: ${reason}`)
   return true
 }
 
@@ -97,12 +139,53 @@ export async function teardownHub(hubId: string, reason: string, opts?: { onlyIf
     .maybeSingle()
   if (!hub) return   // already ended, or (onlyIfEmpty) a tenant raced in — leave it live
 
+  // Capture this hub's transcode tenants' GPU backend nodes BEFORE we unlink them.
+  // The unlink below nulls vps_hub_id (no FK cascade — the gpu_instances rows
+  // survive), so a hub death would otherwise ORPHAN the rented GPU boxes that bridge
+  // to it. We destroy them explicitly here.
+  const { data: hubTenants } = await supabase
+    .from('gpu_instances')
+    .select('id')
+    .eq('vps_hub_id', hubId)
+  const tenantInstanceIds = (hubTenants ?? []).map(t => t.id as string)
+
   // Any tenants still attached lose their stream with the box → error them + unlink
   // (a restart re-provisions onto a fresh hub).
   await supabase
     .from('gpu_instances')
     .update({ status: 'error', vps_hub_id: null })
     .eq('vps_hub_id', hubId)
+
+  // Destroy the GPU backend boxes that bridged to this hub (+ racers + revoke keys),
+  // then drop their relay_nodes rows so the sweep doesn't re-process them. Best-effort.
+  if (tenantInstanceIds.length > 0) {
+    const { data: gpuNodes } = await supabase
+      .from('relay_nodes')
+      .select('id, provider, provider_id, racers, node_key_hash')
+      .eq('role', 'gpu_backend')
+      .in('instance_id', tenantInstanceIds)
+    for (const node of gpuNodes ?? []) {
+      if (node.provider_id) {
+        try {
+          await getProvider(node.provider).destroy(node.provider_id)
+        } catch (e) {
+          console.error(`[teardownHub] gpu backend destroy failed for hub ${hubId} (${reason}):`, e)
+        }
+      }
+      const gpuRacers = (node.racers ?? []) as RacerEntry[]
+      for (const racer of gpuRacers) {
+        if (racer.provider_id && racer.provider_id !== node.provider_id) {
+          try {
+            await getProvider(racer.provider).destroy(racer.provider_id)
+          } catch { /* best effort */ }
+        }
+      }
+      if (node.node_key_hash) {
+        await supabase.from('agent_api_keys').delete().eq('key_hash', node.node_key_hash)
+      }
+      await supabase.from('relay_nodes').delete().eq('id', node.id)
+    }
+  }
 
   // Destroy the server AND release the primary IPv4 (the ~€0.50/mo leak guard).
   try {

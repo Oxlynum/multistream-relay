@@ -1,6 +1,7 @@
 import { createServerClient } from '@/lib/supabase'
 import { teardownInstance, teardownHub } from '@/lib/pod-teardown'
-import { ACTIVE_PROVIDERS, ACTIVE_VPS_PROVIDERS, getProvider } from '@/lib/providers'
+import { reraceGpuBackend } from '@/lib/vps-broker'
+import { ACTIVE_PROVIDERS, ACTIVE_BACKEND_PROVIDERS, ACTIVE_VPS_PROVIDERS, getProvider } from '@/lib/providers'
 import { VPS_READINESS_TIMEOUT_MS, HUB_IDLE_GRACE_MS } from '@/lib/datacenters'
 import type { RacerEntry } from '@/lib/gpu-broker'
 
@@ -20,6 +21,9 @@ const IDLE_GRACE_S = 5 * 60
 // Backstop for the confirmable 12h deadline: kill only well past it (the live
 // heartbeat already enforces the exact deadline for healthy pods).
 const MAX_SESSION_GRACE_S = 60
+// A GPU backend races across multiple providers (Vast + RunPod) + can re-race, so
+// its never-paired window is wider than the all-in-one pod's (180s).
+const GPU_NODE_NEVER_PAIRED_S = 300
 
 export async function GET(request: Request) {
   // Protect the endpoint. Vercel cron includes `Authorization: Bearer $CRON_SECRET`
@@ -110,6 +114,13 @@ export async function GET(request: Request) {
     const { data: allRows } = await supabase
       .from('gpu_instances')
       .select('user_id, provider_id, racers')
+    // VPS-hub GPU backends live in relay_nodes (not gpu_instances) — include their
+    // provider_id + in-flight racer ids so a LIVE GPU racer mid-race is NOT seen as
+    // an orphan and destroyed (landmine #5).
+    const { data: nodeRows } = await supabase
+      .from('relay_nodes')
+      .select('provider_id, racers')
+      .eq('role', 'gpu_backend')
     // Include racer pod IDs (v2 race path) so active racers aren't orphan-destroyed.
     const knownPodIds = new Set([
       ...(allRows ?? []).map(r => r.provider_id).filter(Boolean),
@@ -118,10 +129,22 @@ export async function GET(request: Request) {
           .map(racer => racer.provider_id)
           .filter(Boolean)
       ),
+      ...(nodeRows ?? []).map(n => n.provider_id).filter(Boolean),
+      ...(nodeRows ?? []).flatMap(n =>
+        ((n.racers ?? []) as RacerEntry[])
+          .map(racer => racer.provider_id)
+          .filter(Boolean)
+      ),
     ])
     const knownUserPrefixes = new Set((allRows ?? []).map(r => r.user_id?.slice(0, 8)).filter(Boolean))
 
-    for (const provider of ACTIVE_PROVIDERS) {
+    // Sweep EVERY GPU provider that can hold a box — the all-in-one set (Vast) AND the
+    // VPS-hub backend set (Vast + RunPod). Without RunPod here, a row-less RunPod GPU
+    // backend orphan (create() succeeded but the racers write lost a race / the function
+    // died) is never listed and bills forever (landmine #4/#5). Deduped by name (Vast is
+    // in both sets); mirrors the VPS orphan loop's per-provider sweep below.
+    const gpuProviders = [...new Map([...ACTIVE_PROVIDERS, ...ACTIVE_BACKEND_PROVIDERS].map(p => [p.name, p])).values()]
+    for (const provider of gpuProviders) {
       let live: Array<{ id: string; name: string }>
       try {
         live = await provider.listInstances()
@@ -211,5 +234,116 @@ export async function GET(request: Request) {
     console.error('[reaper] hub orphan reconcile failed:', e)
   }
 
-  return Response.json({ ok: true, checked: instances?.length ?? 0, reaped, orphans, reapedHubs, orphanHubs })
+  // ── GPU-backend node sweep + MID-STREAM re-race (VPS-hub bridge) ───────────
+  // A gpu_backend relay_nodes row is a per-session GPU box that bridges to the hub.
+  // Its FK (instance_id → gpu_instances) is ON DELETE CASCADE, so a fully torn-down
+  // session removes the node automatically — what survives here is:
+  //   (a) a stale/never-paired GPU whose parent session is NO LONGER live (the
+  //       hub died / session stopped) → destroy the box + revoke key + drop the row.
+  //   (b) a stale GPU whose parent session is STILL live (the user is streaming on
+  //       the hub's passthrough) → the GPU died MID-STREAM → re-race a fresh one.
+  const reapedGpuNodes: { node_id: string; reason: string }[] = []
+  const reracedGpuNodes: { node_id: string }[] = []
+  try {
+    const { data: gpuNodes } = await supabase
+      .from('relay_nodes')
+      .select('id, provider, provider_id, racers, node_key_hash, phase, last_seen_at, created_at, instance_id')
+      .eq('role', 'gpu_backend')
+
+    // Resolve each node's parent session (one query) to decide live vs gone.
+    const instIds = [...new Set((gpuNodes ?? []).map(n => n.instance_id).filter(Boolean) as string[])]
+    const sessionById = new Map<string, { status: string | null; streaming: boolean | null; idle_since: string | null; vps_hub_id: string | null }>()
+    if (instIds.length > 0) {
+      const { data: sessions } = await supabase
+        .from('gpu_instances')
+        .select('id, status, streaming, idle_since, vps_hub_id')
+        .in('id', instIds)
+      for (const s of sessions ?? []) {
+        sessionById.set(s.id as string, { status: s.status, streaming: s.streaming, idle_since: s.idle_since, vps_hub_id: s.vps_hub_id })
+      }
+    }
+
+    // Resolve the parent hubs' freshness (a session is only "live" if its hub is too).
+    const hubIds = [...new Set([...sessionById.values()].map(s => s.vps_hub_id).filter(Boolean) as string[])]
+    const hubById = new Map<string, { status: string | null; last_seen_at: string | null }>()
+    if (hubIds.length > 0) {
+      const { data: hubRows } = await supabase
+        .from('vps_hubs')
+        .select('id, status, last_seen_at')
+        .in('id', hubIds)
+      for (const h of hubRows ?? []) hubById.set(h.id as string, { status: h.status, last_seen_at: h.last_seen_at })
+    }
+
+    for (const node of gpuNodes ?? []) {
+      const lastSeen = node.last_seen_at ? new Date(node.last_seen_at).getTime() : null
+      const createdAt = node.created_at ? new Date(node.created_at).getTime() : now
+      const stale = lastSeen !== null && (now - lastSeen) / 1000 > STALE_S
+      const neverPaired = lastSeen === null && (now - createdAt) / 1000 > GPU_NODE_NEVER_PAIRED_S
+      if (!stale && !neverPaired) continue   // fresh, or still inside its boot window
+
+      const session = node.instance_id ? sessionById.get(node.instance_id as string) : undefined
+      const hub = session?.vps_hub_id ? hubById.get(session.vps_hub_id) : undefined
+      const hubFresh = !!hub && hub.status !== 'ended' &&
+        !!hub.last_seen_at && (now - new Date(hub.last_seen_at).getTime()) / 1000 <= STALE_S
+      const idleSince = session?.idle_since ? new Date(session.idle_since).getTime() : null
+      const sessionIdleTimedOut = !!session && !session.streaming && idleSince !== null && (now - idleSince) / 1000 > IDLE_GRACE_S
+      const sessionLive = !!session && session.status === 'running' && hubFresh && !sessionIdleTimedOut
+
+      // (b) MID-STREAM GPU death: parent still live + this GPU was up (phase ready/
+      // streaming) but went stale → re-pair a fresh GPU. reraceGpuBackend flips the
+      // phase to 'racing', so this fires once per death (won't re-trigger next run).
+      if (sessionLive && stale && (node.phase === 'ready' || node.phase === 'streaming')) {
+        try {
+          await reraceGpuBackend(node.id as string, supabase)
+          reracedGpuNodes.push({ node_id: node.id as string })
+        } catch (e) {
+          console.error(`[reaper] gpu re-race failed for node ${node.id}:`, e)
+        }
+        continue
+      }
+
+      // (b2) NEVER-PAIRED while live: the racer was created but never POSTed /ready|
+      // /failed (phase still requested/racing, last_seen null) AND the parent is still
+      // streaming passthrough. This falls through BOTH (b) [needs stale, i.e. a non-null
+      // last_seen] and (a) [needs !sessionLive] — so without this branch the stuck box
+      // bills for the whole session. Re-race a fresh GPU (reraceGpuBackend rotates the
+      // key so the stuck box can't pair AND destroys it). (landmine #5)
+      if (sessionLive && neverPaired && node.phase !== 'ready' && node.phase !== 'streaming') {
+        try {
+          await reraceGpuBackend(node.id as string, supabase)
+          reracedGpuNodes.push({ node_id: node.id as string })
+        } catch (e) {
+          console.error(`[reaper] gpu never-paired re-race failed for node ${node.id}:`, e)
+        }
+        continue
+      }
+
+      // (a) Parent session gone/stopped → destroy the orphaned GPU box.
+      if (!sessionLive) {
+        const reason = neverPaired ? 'never_paired' : 'stale_heartbeat'
+        try {
+          if (node.provider_id) {
+            await getProvider(node.provider).destroy(node.provider_id)
+          }
+          const racers = (node.racers ?? []) as RacerEntry[]
+          for (const racer of racers) {
+            if (racer.provider_id && racer.provider_id !== node.provider_id) {
+              try { await getProvider(racer.provider).destroy(racer.provider_id) } catch { /* best effort */ }
+            }
+          }
+          if (node.node_key_hash) {
+            await supabase.from('agent_api_keys').delete().eq('key_hash', node.node_key_hash)
+          }
+          await supabase.from('relay_nodes').delete().eq('id', node.id)
+          reapedGpuNodes.push({ node_id: node.id as string, reason })
+        } catch (e) {
+          console.error(`[reaper] gpu node sweep failed for ${node.id}:`, e)
+        }
+      }
+    }
+  } catch (e) {
+    console.error('[reaper] gpu node sweep failed:', e)
+  }
+
+  return Response.json({ ok: true, checked: instances?.length ?? 0, reaped, orphans, reapedHubs, orphanHubs, reapedGpuNodes, reracedGpuNodes })
 }

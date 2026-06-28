@@ -13,7 +13,7 @@
 
 import { createServerClient } from '@/lib/supabase'
 import { generateApiKey, hashApiKey } from '@/lib/agent-auth'
-import { getVpsProvider, ACTIVE_VPS_PROVIDERS, ACTIVE_BACKEND_PROVIDERS } from '@/lib/providers'
+import { getVpsProvider, getProvider, ACTIVE_VPS_PROVIDERS, ACTIVE_BACKEND_PROVIDERS } from '@/lib/providers'
 import { buildCloudInit } from '@/lib/cloud-init'
 import { haversineKm, startProvisionRace, type RacerEntry, type UserOutputConfig } from '@/lib/gpu-broker'
 import { teardownHub } from '@/lib/pod-teardown'
@@ -25,6 +25,10 @@ type Supa = ReturnType<typeof createServerClient>
 // Fixed on Hetzner (container port == host == public, no remap). The relay binds
 // SRT on 8890; we publish 8890/udp in the hub's cloud-init.
 const HUB_SRT_PORT = 8890
+// The VPS-hub return-ingest port: the GPU backend pushes its transcoded RTMPS/H.264
+// back to the hub here (rtmps://hub:1936/return/<key>/<orient>). No DB column — a
+// fixed constant per the locked decision; published as 1936/tcp in hub cloud-init.
+const HUB_RETURN_PORT = 1936
 
 // vps_hubs row shape returned by attach_session_to_hub (the columns we read).
 interface HubRow {
@@ -171,8 +175,9 @@ async function spawnHub(args: {
       RELAY_ROLE: 'vps',
     },
     ports: [
-      { host: HUB_SRT_PORT, container: HUB_SRT_PORT, proto: 'udp' }, // SRT ingest (OBS → hub)
-      { host: 1935, container: 1935, proto: 'tcp' },                 // RTMP readiness beacon
+      { host: HUB_SRT_PORT, container: HUB_SRT_PORT, proto: 'udp' },       // SRT ingest (OBS → hub)
+      { host: 1935, container: 1935, proto: 'tcp' },                       // RTMP readiness beacon
+      { host: HUB_RETURN_PORT, container: HUB_RETURN_PORT, proto: 'tcp' }, // GPU → hub RTMPS return ingest
     ],
   })
 
@@ -361,5 +366,135 @@ export async function startGpuBackendRace(args: {
     return { ok: false, nodeId, error: race.error }
   }
   console.log(`[vps-broker] gpu backend race started for ${userId}: node=${nodeId} racers=${race.racerCount}`)
+  return { ok: true, nodeId, racerCount: race.racerCount }
+}
+
+/**
+ * Re-race a GPU BACKEND for an EXISTING gpu_backend relay_nodes row — used by the
+ * reaper when a GPU dies MID-STREAM (last_seen_at stale) while the user is still
+ * live on the hub (passthrough keeps serving). Rotates the node's 'gpu' key (so the
+ * dead box can't re-auth), resets the node for a fresh race, and fans out a new N=1
+ * backend race anchored on the hub's region. The session's bridge_secret is REUSED
+ * (the hub already trusts it; the return URLs are unchanged). On no-capacity the node
+ * DEGRADES (phase='ended') — the hub passthrough outputs keep serving.
+ *
+ * Single-caller (the reaper) so no CAS is needed on race_round — we just bump it.
+ */
+export async function reraceGpuBackend(nodeId: string, supabase: Supa): Promise<GpuBackendResult> {
+  // node → its session → the hub it bridges to (for the geo anchor). Also read the
+  // dead box's provider/provider_id + racers so we can destroy them BEFORE the reset
+  // below discards their ids (otherwise the rented GPU bills until the daily orphan
+  // reconcile on Vast, or FOREVER on RunPod — landmine #4).
+  const { data: node } = await supabase
+    .from('relay_nodes')
+    .select('instance_id, node_key_hash, race_round, provider, provider_id, racers')
+    .eq('id', nodeId)
+    .maybeSingle()
+  if (!node?.instance_id) return { ok: false, error: 'gpu node not found' }
+
+  // Destroy the dead box(es) before we discard their ids. Route each by its OWN racer
+  // provider — the top-level node.provider can be '' if the box died before /ready
+  // persisted the winner. Best-effort; the reaper orphan-reconcile backstops survivors.
+  const killed = new Set<string>()
+  for (const r of (node.racers ?? []) as RacerEntry[]) {
+    if (r.provider_id && !killed.has(r.provider_id)) {
+      killed.add(r.provider_id)
+      try { await getProvider(r.provider).destroy(r.provider_id) }
+      catch (e) { console.warn(`[vps-broker] re-race dead box destroy ${r.provider_id} failed:`, e) }
+    }
+  }
+  if (node.provider_id && !killed.has(node.provider_id as string)) {
+    try { await getProvider((node.provider as string) || 'vast').destroy(node.provider_id as string) }
+    catch (e) { console.warn(`[vps-broker] re-race dead winner destroy ${node.provider_id} failed:`, e) }
+  }
+
+  const { data: inst } = await supabase
+    .from('gpu_instances')
+    .select('user_id, vps_hub_id, bridge_secret')
+    .eq('id', node.instance_id)
+    .maybeSingle()
+  if (!inst?.user_id) return { ok: false, error: 'parent session not found' }
+  const userId = inst.user_id as string
+
+  let hubLat: number | null = null
+  let hubLon: number | null = null
+  if (inst.vps_hub_id) {
+    const { data: hub } = await supabase
+      .from('vps_hubs')
+      .select('lat, lon')
+      .eq('id', inst.vps_hub_id)
+      .maybeSingle()
+    hubLat = hub?.lat ?? null
+    hubLon = hub?.lon ?? null
+  }
+
+  // Rotate the gpu key: mint a NEW one, revoke the OLD (a zombie GPU can't re-auth).
+  const newRawKey = generateApiKey()
+  const newKeyHash = hashApiKey(newRawKey)
+  if (node.node_key_hash) {
+    await supabase.from('agent_api_keys').delete().eq('key_hash', node.node_key_hash)
+  }
+  await supabase.from('agent_api_keys').insert({
+    user_id: userId, key_hash: newKeyHash, label: 'gpu', node_role: 'gpu', instance_id: nodeId,
+  })
+
+  // Reset the node for a fresh race (new key, clear racers + addr, bump the round).
+  // last_seen_at MUST be nulled too: otherwise a re-race off the mid-stream-death
+  // lineage inherits the dead box's stale timestamp, so if the REPLACEMENT box is
+  // created (billing) but never POSTs /ready|/failed, the node sits at
+  // stale && phase='racing' && sessionLive — matching NO reaper branch (b needs
+  // ready/streaming, b2 needs neverPaired, a needs !sessionLive) and bills for the
+  // rest of the session. Nulling it re-presents a failed re-race as 'never paired'
+  // so (b2)/(a) re-catch it next sweep (neverPaired is anchored on created_at).
+  await supabase.from('relay_nodes').update({
+    node_key_hash: newKeyHash,
+    racers: [],
+    race_round: (node.race_round ?? 0) + 1,
+    phase: 'racing',
+    status: 'provisioning',
+    ip_address: null,
+    bridge_in_port: null,
+    last_seen_at: null,
+  }).eq('id', nodeId)
+
+  const imageTag = process.env.SLIMCAST_RELAY_IMAGE || 'ghcr.io/oxlynum/multistream-relay:latest'
+  const callbackUrl = process.env.SLIMCAST_AGENT_CALLBACK_URL ?? 'https://slimcast-oxlynum.vercel.app'
+  const gpuEnv = [
+    { key: 'SLIMCAST_API_KEY', value: newRawKey },
+    { key: 'SLIMCAST_VERCEL_URL', value: callbackUrl },
+    { key: 'RELAY_ROLE', value: 'gpu' },
+    { key: 'SLIMCAST_BRIDGE_SECRET', value: (inst.bridge_secret as string | null) ?? '' },
+  ]
+
+  // Serialize racer writes onto relay_nodes.racers (same lock pattern as the race).
+  let racerWriteLock = Promise.resolve()
+  const race = await startProvisionRace({
+    lat: hubLat ?? FALLBACK_LAT,
+    lon: hubLon ?? FALLBACK_LON,
+    name: `slimcast-${userId.slice(0, 8)}`,
+    imageTag,
+    env: gpuEnv,
+    providers: ACTIVE_BACKEND_PROVIDERS,
+    mode: 'backend',
+    maxPricePerHr: BACKEND_PRICE_CEILING,
+    racersN: 1,
+    onRacerCreated: async (racer: RacerEntry) => {
+      await (racerWriteLock = racerWriteLock.then(async () => {
+        const { data: row } = await supabase.from('relay_nodes').select('racers').eq('id', nodeId).maybeSingle()
+        const current = (row?.racers ?? []) as RacerEntry[]
+        current.push(racer)
+        await supabase.from('relay_nodes')
+          .update({ racers: current, phase: 'racing', status: 'provisioning' })
+          .eq('id', nodeId)
+      }))
+    },
+  })
+
+  if (!race.started) {
+    console.error(`[vps-broker] gpu re-race found no capacity for ${userId}: ${race.error}`)
+    await supabase.from('relay_nodes').update({ phase: 'ended', status: 'error' }).eq('id', nodeId)
+    return { ok: false, nodeId, error: race.error }
+  }
+  console.log(`[vps-broker] gpu re-race started for ${userId}: node=${nodeId} racers=${race.racerCount}`)
   return { ok: true, nodeId, racerCount: race.racerCount }
 }

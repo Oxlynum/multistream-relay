@@ -29,7 +29,7 @@ async function handleGpuReady(request: NextRequest, node: NodeAuth): Promise<Res
     })
     .eq('id', node.nodeId!)
     .or('phase.is.null,phase.eq.requested,phase.eq.racing')
-    .select('id, provider_id, racers')
+    .select('id, provider, provider_id, racers')
     .maybeSingle()
 
   if (!won) {
@@ -37,20 +37,37 @@ async function handleGpuReady(request: NextRequest, node: NodeAuth): Promise<Res
     return Response.json({ winner: false, action: 'self_destruct' })
   }
 
+  // Resolve THIS box's racer entry. The relay reports provider_id from VAST_INSTANCE_ID,
+  // which is EMPTY on non-Vast providers (RunPod) — so we cannot trust the body's
+  // provider_id alone. Fall back to the sole 'booting' racer (the backend race is N=1,
+  // so there is exactly one): otherwise the real winner matches no racer, gets tagged
+  // 'loser', and the loser-destroy loop tears down the box that just won the CAS
+  // (landmine #1/#8). Mirrors the pod /ready path's sole-booting-racer promotion.
   const racers = (won.racers ?? []) as RacerEntry[]
-  const winnerProviderId = provider_id || won.provider_id || ''
+  let winnerRacer = (provider_id ? racers.find(r => r.provider_id === provider_id) : undefined)
+  if (!winnerRacer) {
+    const booting = racers.filter(r => r.state === 'booting')
+    if (booting.length === 1) winnerRacer = booting[0]
+  }
+  const winnerProviderId = winnerRacer?.provider_id || provider_id || won.provider_id || ''
+  const winnerProvider = winnerRacer?.provider || won.provider || ''
+
   const updated: RacerEntry[] = racers.map(r => ({
     ...r, state: r.provider_id === winnerProviderId ? 'ready' : 'loser',
   }))
-  await supabase.from('relay_nodes')
-    .update({ provider_id: winnerProviderId || won.provider_id, racers: updated })
-    .eq('id', node.nodeId!)
+  // Persist BOTH provider and provider_id. node.provider was inserted as '' (the
+  // winner is unknown until now); without writing it here every teardown/reaper
+  // destroy site does getProvider('') → silent Vast fallback → a RunPod winner box
+  // bills forever (landmine #4). Only write provider when we actually resolved it.
+  const patch: Record<string, unknown> = { provider_id: winnerProviderId || won.provider_id, racers: updated }
+  if (winnerProvider) patch.provider = winnerProvider
+  await supabase.from('relay_nodes').update(patch).eq('id', node.nodeId!)
 
   for (const loser of updated.filter(r => r.state === 'loser' && r.provider_id)) {
     getProvider(loser.provider).destroy(loser.provider_id).catch(e =>
       console.warn(`[agent/ready] gpu loser destroy ${loser.provider_id} failed:`, e))
   }
-  console.log(`[agent/ready] gpu node ${node.nodeId} winner=${winnerProviderId} ip=${ip} bridge=${bridge_port}`)
+  console.log(`[agent/ready] gpu node ${node.nodeId} winner=${winnerProvider || '?'}:${winnerProviderId} ip=${ip} bridge=${bridge_port}`)
   return Response.json({ winner: true })
 }
 

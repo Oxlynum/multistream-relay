@@ -333,7 +333,13 @@ export interface RaceResult {
 export async function startProvisionRace(args: RaceArgs): Promise<RaceResult> {
   const { racersN = 2, skipN = 0, userOutputs, providers = ACTIVE_PROVIDERS, mode = 'all-in-one', maxPricePerHr } = args
   const nvencSessions = userOutputs ? requiredNvencSessions(userOutputs) : 0
-  const needsProfessionalGpu = nvencSessions > 3
+  // In 'backend' (bridge) mode the GPU does ONE NVENC encode per ORIENTATION (≤2 total) —
+  // buildGpuConfig collapses every platform in an orientation into a single spec — so the
+  // per-platform session count must NOT demand a professional card here. Counting raw
+  // outputs (e.g. a 4-platform combo with distinct bitrates) would falsely set
+  // needsProfessionalGpu, exclude every consumer GPU, and degrade an ordinary stream to
+  // passthrough-only on a perfectly capable card. (reraceGpuBackend already omits userOutputs.)
+  const needsProfessionalGpu = mode === 'backend' ? false : nvencSessions > 3
 
   const candidates = await rankedCandidates(args.lat, args.lon, needsProfessionalGpu, { providers, mode, maxPricePerHr })
   if (candidates.length === 0) {

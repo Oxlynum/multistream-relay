@@ -482,6 +482,9 @@ def main_vps() -> None:
     ip = PUBLIC_IPADDR or _get_external_ip()
     log.info("VPS hub %s starting. External IP: %s", HUB_ID, ip or "(unknown)")
 
+    # MediaMTX binds the RTMPS :1936 GPU-return server at startup and needs the TLS
+    # cert present on disk — generate it before the server comes up (idempotent).
+    _gen_self_signed_cert()
     mediamtx_proc = start_mediamtx_vps()
     _post_ready_vps(ip)
 
@@ -535,7 +538,11 @@ def main_vps() -> None:
                 log.info("Tenant %s… attached — pipeline ready (waiting for OBS).", key[:8])
 
             connected = os.path.exists(f"{OBS_FLAG}.{key}")
-            cfg = {"outputs": s.get("outputs", []), "crop": s.get("crop", {})}
+            # `bridge` (present only when this tenant has a 'ready' GPU backend, set by
+            # hub-config) drives the source_forward → GPU + deliver ← GPU runners. Folded
+            # into the cfg hash so a GPU coming up / going down re-applies the pipeline
+            # (degrade gracefully: no bridge → passthrough/ertmp only, never direct-to-GPU).
+            cfg = {"outputs": s.get("outputs", []), "crop": s.get("crop", {}), "bridge": s.get("bridge")}
             cfg_hash = json.dumps(cfg, sort_keys=True)
 
             if connected:
@@ -563,9 +570,122 @@ def main_vps() -> None:
         wake_event.clear()
 
 
+# ── GPU backend role (RELAY_ROLE=gpu) ───────────────────────────────────────────
+
+def _gen_self_signed_cert() -> None:
+    """Generate /app/relay.{crt,key} for the TLS legs (mpegts-TLS listener on the GPU,
+    RTMPS return on the VPS). start.sh isn't run in prod (agent.py is the entrypoint),
+    so the cert must be made here. Idempotent."""
+    if os.path.exists("/app/relay.crt") and os.path.exists("/app/relay.key"):
+        return
+    try:
+        subprocess.run(
+            ["openssl", "req", "-x509", "-newkey", "rsa:2048",
+             "-keyout", "/app/relay.key", "-out", "/app/relay.crt",
+             "-days", "3650", "-nodes", "-subj", "/CN=relay"],
+            check=True, capture_output=True, timeout=30,
+        )
+        log.info("Generated self-signed TLS cert (/app/relay.crt).")
+    except Exception as exc:
+        log.error("TLS cert generation failed: %s", exc)
+
+
+def _post_ready_gpu(ip: str, bridge_port: "int | None") -> "dict | None":
+    """GPU backend self-reports its bridge-in address. Winner-CAS on the cloud side;
+    a loser is told to self-destruct."""
+    body = {"role": "gpu", "ip": ip, "bridge_port": bridge_port, "provider_id": VAST_INSTANCE_ID}
+    log.info("Reporting gpu ready: ip=%s bridge_port=%s instance=%s", ip, bridge_port, VAST_INSTANCE_ID or "?")
+    for attempt in range(5):
+        resp = _api("POST", "/api/agent/ready", body)
+        if resp is not None:
+            return resp
+        log.warning("POST /api/agent/ready (gpu) attempt %d failed, retrying in 3s…", attempt + 1)
+        time.sleep(3)
+    log.warning("POST /api/agent/ready (gpu) all retries exhausted — assuming winner")
+    return None
+
+
+def main_gpu() -> None:
+    """RELAY_ROLE=gpu: a GPU backend behind a VPS hub. Receives the tenant's source
+    HEVC as mpegts-over-TLS on a raw listener, NVDEC→NVENC transcodes per orientation,
+    and returns RTMPS H.264 to the VPS. No MediaMTX, no OBS-flag lifecycle — driven by
+    /api/agent/gpu-config. KEEPS the GPU self-test (the one role that needs NVENC)."""
+    ip = PUBLIC_IPADDR or _get_external_ip()
+    # The provider maps our EXPOSE'd 8899/tcp to a public port and injects it as env.
+    bridge_port_s = os.environ.get("VAST_TCP_PORT_8899", "") or os.environ.get("RUNPOD_TCP_PORT_8899", "")
+    bridge_port = int(bridge_port_s) if bridge_port_s else None
+    log.info("GPU backend starting. ip=%s bridge_port=%s instance=%s", ip or "?", bridge_port or "?", VAST_INSTANCE_ID or "?")
+
+    # GPU sanity gate — a GPU-blind host must fail fast so the broker re-races across
+    # providers (this is the role that genuinely needs NVENC/NVDEC; vps skips it).
+    ok, reason = _gpu_self_test()
+    if not ok:
+        drv = _driver_version()
+        log.error("GPU self-test FAILED (driver %s): %s. Reporting failed.", drv, reason)
+        _post_failed(f"{reason} (driver {drv})")
+        sys.exit(1)
+
+    _gen_self_signed_cert()
+
+    # Report readiness early (the bridge address is known from env at boot). If we lost
+    # the race, exit; the winner serves this session.
+    ready = _post_ready_gpu(ip, bridge_port)
+    if ready is not None and not ready.get("winner", True):
+        log.info("Lost gpu race (another GPU won) — exiting.")
+        sys.exit(0)
+
+    # The transcode reads the source from a raw mpegts-over-TLS listener (the VPS
+    # source_forward connects in). One Supervisor; one transcode runner (build_group
+    # for the GPU does one decode → N orientation encodes → N RTMPS returns).
+    listen = "tls://0.0.0.0:8899?listen=1&cert_file=/app/relay.crt&key_file=/app/relay.key"
+    sup = Supervisor(source=listen, role="gpu")
+
+    def shutdown(sig: int, _frame: object) -> None:
+        log.info("Received signal %d — gpu shutting down…", sig)
+        sup.stop_all()
+        sys.exit(0)
+    signal.signal(signal.SIGTERM, shutdown)
+    signal.signal(signal.SIGINT, shutdown)
+
+    last_hash: "str | None" = None
+    hb_failures = 0
+    while True:
+        cfg_resp = _api("GET", "/api/agent/gpu-config") or {}
+        groups = cfg_resp.get("groups", [])
+        returns = cfg_resp.get("return")
+        cfg = {
+            "groups": groups,
+            "return": returns,
+            "crop": cfg_resp.get("crop", {}),
+            "source_width": cfg_resp.get("source_width"),
+            "source_height": cfg_resp.get("source_height"),
+        }
+        new_hash = json.dumps(cfg, sort_keys=True)
+        if groups and returns:
+            if new_hash != last_hash:
+                log.info("gpu-config: %d group(s) — (re)applying transcode.", len(groups))
+                sup.apply(cfg)
+                last_hash = new_hash
+        elif last_hash is not None:
+            log.info("gpu-config empty — stopping transcode.")
+            sup.stop_all()
+            last_hash = None
+
+        hb = _api("POST", "/api/agent/status", {"role": "gpu"})
+        hb_failures = 0 if hb is not None else hb_failures + 1
+        if hb_failures >= HEARTBEAT_FAIL_LIMIT:
+            log.error("No control-plane contact (%d beats) — gpu stopping outputs (safety).", hb_failures)
+            sup.stop_all()
+            last_hash = None
+        time.sleep(POLL_INTERVAL)
+
+
 def main() -> None:
     if RELAY_ROLE == "vps":
         main_vps()
+        return
+    if RELAY_ROLE == "gpu":
+        main_gpu()
         return
 
     ip = _get_external_ip()

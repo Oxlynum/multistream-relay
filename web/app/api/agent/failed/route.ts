@@ -23,18 +23,22 @@ async function handleGpuFailed(request: NextRequest, node: NodeAuth): Promise<Re
   if (nodeRow.phase === 'ready' || nodeRow.phase === 'streaming') return Response.json({ ack: true })
 
   const racers = (nodeRow.racers ?? []) as RacerEntry[]
-  const updated: RacerEntry[] = racers.map(r => {
-    const isThis = body.provider_id ? r.provider_id === body.provider_id : r.state === 'booting'
-    return isThis ? { ...r, state: 'failed' as const } : r
-  })
+  // Resolve THIS racer. The relay reports provider_id from VAST_INSTANCE_ID, which is
+  // EMPTY on RunPod — so fall back to the sole 'booting' racer (N=1), the same way
+  // handleGpuReady resolves the winner. Without this the failing box is only marked,
+  // never destroyed (its real id lives in the racers entry, not the empty body field).
+  const thisRacer = (body.provider_id ? racers.find(r => r.provider_id === body.provider_id) : undefined)
+    ?? racers.find(r => r.state === 'booting')
+  const updated: RacerEntry[] = racers.map(r =>
+    (thisRacer && r.provider_id === thisRacer.provider_id) ? { ...r, state: 'failed' as const } : r,
+  )
   await supabase.from('relay_nodes').update({ racers: updated }).eq('id', node.nodeId!)
 
-  if (body.provider_id) {
-    const prov = racers.find(r => r.provider_id === body.provider_id)?.provider
-    if (prov) {
-      try { await getProvider(prov).destroy(body.provider_id) }
-      catch (e) { console.error(`[agent/failed] gpu destroy ${body.provider_id} failed:`, e) }
-    }
+  // Destroy the failing box NOW (route by the racer's own provider) instead of leaving
+  // it to the daily reaper — a RunPod box whose process exited still bills until destroyed.
+  if (thisRacer?.provider_id) {
+    try { await getProvider(thisRacer.provider).destroy(thisRacer.provider_id) }
+    catch (e) { console.error(`[agent/failed] gpu destroy ${thisRacer.provider_id} failed:`, e) }
   }
 
   const allDead = updated.every(r => r.state === 'failed' || r.state === 'loser')

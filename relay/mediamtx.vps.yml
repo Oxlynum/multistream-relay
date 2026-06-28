@@ -11,10 +11,16 @@
 logLevel: info
 logDestinations: [stdout]
 
-# RTMP readiness beacon only (nothing publishes to it). Kept so the cloud can TCP-probe
-# the box if needed; the hub also self-reports readiness via POST /api/agent/ready.
+# RTMP :1935 = plaintext loopback the deliver runners read the GPU return from. RTMPS
+# :1936 = the GPU bridge return-ingest: the GPU pushes its transcoded H.264 here over
+# TLS (self-signed cert, generated at boot by agent.py). 'optional' encryption keeps
+# :1935 plaintext for the in-process deliver read while requiring TLS on the public :1936.
 rtmp: yes
 rtmpAddress: :1935
+rtmpEncryption: optional
+rtmpsAddress: :1936
+rtmpServerCert: /app/relay.crt
+rtmpServerKey: /app/relay.key
 
 # SRT ingest + loopback (:8890/udp). OBS publishes from outside; encoders read back.
 srt: yes
@@ -37,6 +43,15 @@ pathDefaults:
   runOnNotReady: bash hook.sh stop
 
 paths:
+  # GPU bridge return: the GPU publishes its transcoded H.264 to return/<key>/<orient>
+  # over RTMPS :1936; the deliver runners read it from the :1935 loopback. NOT an OBS
+  # source — override pathDefaults' hooks to empty so a return publish never trips the
+  # per-tenant OBS-connected flag (landmine #6). Matched before all_others.
+  "~^return/.*$":
+    source: publisher
+    runOnReady: ""
+    runOnNotReady: ""
+
   # Catch-all: accept any tenant streamid as its own path (per-tenant isolation by
   # the secret streamid; settings come from pathDefaults above).
   all_others:

@@ -254,7 +254,7 @@ def _register_secrets(cfg: dict, source: str = "") -> None:
     srt_pp = os.environ.get("SLIMCAST_SRT_PASSPHRASE", "").strip()
     if len(srt_pp) >= 4:
         _SECRETS.add(srt_pp)
-    for o in cfg.get("outputs", []):
+    def _add_output_secrets(o: dict) -> None:
         key = (o.get("key") or "").strip()
         if len(key) >= 4:
             _SECRETS.add(key)
@@ -264,6 +264,18 @@ def _register_secrets(cfg: dict, source: str = "") -> None:
             cid = urllib.parse.parse_qs(urllib.parse.urlparse(url).query).get("cid", [""])[0]
             if len(cid) >= 4:
                 _SECRETS.add(cid)
+
+    for o in cfg.get("outputs", []):
+        _add_output_secrets(o)
+    # VPS-hub transcode tenant: the DECRYPTED platform keys (Kick/TikTok/non-eligible
+    # Twitch H.264) ride in bridge.return_outputs[].targets[], NOT cfg["outputs"] (which
+    # holds only passthrough/ertmp on the hub). Without scrubbing these, build_deliver_cmd
+    # embeds them in the runner argv that OutputRunner logs verbatim → plaintext key leak
+    # the moment the :8080 debug panel is enabled on a hub.
+    bridge = cfg.get("bridge") or {}
+    for ro in bridge.get("return_outputs", []):
+        for t in ro.get("targets", []):
+            _add_output_secrets(t)
 
 
 def _redact(msg: str) -> str:
@@ -281,6 +293,12 @@ def _input_args(source: str) -> list[str]:
         return ["-rtsp_transport", "tcp"]
     if source.startswith("srt"):
         return ["-fflags", "+genpts"]
+    if source.startswith("tls"):
+        # VPS-hub GPU bridge: the VPS pushes mpegts-over-TLS to the GPU's raw listener.
+        # Declare mpegts explicitly (a raw TLS byte stream has no container hint), and
+        # +igndts because DTS is unreliable after the VPS's `-c copy` mpegts re-mux
+        # (see bpm_inject.py); the bumped probe lets NVDEC see the HEVC SPS/PPS first.
+        return ["-f", "mpegts", "-fflags", "+genpts+igndts", "-analyzeduration", "10M", "-probesize", "10M"]
     return []
 
 
@@ -326,7 +344,7 @@ def _even(n: int) -> int:
     return n - (n % 2)
 
 
-def portrait_crop_rect(crop: dict | None) -> tuple[int, int, int, int]:
+def portrait_crop_rect(crop: dict | None, src_w: int = SOURCE_WIDTH, src_h: int = SOURCE_HEIGHT) -> tuple[int, int, int, int]:
     """
     Translate the user's framing controls into an FFmpeg crop rectangle.
 
@@ -334,6 +352,10 @@ def portrait_crop_rect(crop: dict | None) -> tuple[int, int, int, int]:
       zoom  >= 1.0  : 1.0 uses the full source height; higher zooms in (tighter).
       pos_x 0..1    : horizontal position of the crop window (0 left, .5 center, 1 right).
       pos_y 0..1    : vertical position of the crop window (0 top, .5 center, 1 bottom).
+
+    src_w/src_h default to the module SOURCE_WIDTH/HEIGHT (all-in-one path) but are
+    passed explicitly by the GPU bridge role, where the source res is per-tenant (from
+    gpu-config) rather than a process-wide env.
 
     Returns (w, h, x, y) for FFmpeg `crop=w:h:x:y`, clamped to the source frame and
     snapped to even pixels. The window is always 9:16 so it scales cleanly to 1080×1920.
@@ -344,17 +366,17 @@ def portrait_crop_rect(crop: dict | None) -> tuple[int, int, int, int]:
     pos_y = min(1.0, max(0.0, float(crop.get("pos_y", 0.5))))
 
     # Tallest possible 9:16 window at this zoom, bounded by source height.
-    ch = SOURCE_HEIGHT / zoom
+    ch = src_h / zoom
     cw = ch * PORTRAIT_WIDTH / PORTRAIT_HEIGHT  # ch * 9/16
 
     # If the window is wider than the source, clamp width and re-derive height.
-    if cw > SOURCE_WIDTH:
-        cw = SOURCE_WIDTH
+    if cw > src_w:
+        cw = src_w
         ch = cw * PORTRAIT_HEIGHT / PORTRAIT_WIDTH  # cw * 16/9
 
     cw, ch = _even(cw), _even(ch)
-    cx = _even((SOURCE_WIDTH - cw) * pos_x)
-    cy = _even((SOURCE_HEIGHT - ch) * pos_y)
+    cx = _even((src_w - cw) * pos_x)
+    cy = _even((src_h - ch) * pos_y)
     return cw, ch, cx, cy
 
 
@@ -580,6 +602,76 @@ def build_group_cmd(
     return cmd
 
 
+def build_gpu_transcode_cmd(
+    source: str,
+    groups: list[dict],
+    returns: dict,
+    crop: dict | None = None,
+    src_w: int = SOURCE_WIDTH,
+    src_h: int = SOURCE_HEIGHT,
+) -> list[str]:
+    """GPU BACKEND (RELAY_ROLE=gpu): one mpegts-over-TLS input → NVDEC decode → one
+    NVENC H.264 encode PER ORIENTATION → one RTMPS return per orientation to the VPS.
+
+    A SINGLE ffmpeg (one decode, N encodes), NOT one process per orientation: the
+    source arrives once on the TLS listener, which only one process can bind. The VPS
+    fans each return out to its platforms (the `tee` lives on the VPS deliver runner,
+    not here). `returns` = { '<orientation>_url': 'rtmps://<vps>:1936/return/<key>/<o>' }
+    (the protocol is whatever gpu-config provides, so an RTMPS→RTMP fallback is config-
+    only). Reuses the proven _encode_flags ladder unchanged; AAC audio rides each return
+    so the VPS deliver can `-c copy`.
+    """
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "warning",
+        "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
+        *_input_args(source),
+        "-i", source,
+    ]
+    for g in groups:
+        orientation = g.get("orientation", "landscape")
+        url = returns.get(f"{orientation}_url")
+        if not url:
+            continue
+        bv = int(g.get("bitrate_kbps", 6000))
+        fps = int(g.get("fps", 60))
+        max_h = _RES_HEIGHT.get(g.get("resolution") or "", src_h)
+        cmd += ["-map", "0:v", "-map", "0:a"]
+        if orientation == "portrait":
+            cw, ch, cx, cy = portrait_crop_rect(crop, src_w, src_h)
+            pw, ph = (720, 1280) if max_h <= 720 else (PORTRAIT_WIDTH, PORTRAIT_HEIGHT)
+            cmd += ["-vf", f"hwdownload,format=nv12,crop={cw}:{ch}:{cx}:{cy},scale={pw}:{ph}"]
+        elif max_h < src_h:
+            cmd += ["-vf", f"scale_cuda=-2:{max_h}"]
+        cmd += _encode_flags(bv, fps)
+        cmd += ["-flush_packets", "1", "-f", "flv", url]
+    return cmd
+
+
+def build_source_forward_cmd(source: str, dest: str) -> list[str]:
+    """VPS → GPU bridge (RELAY_ROLE=vps, transcode tenant): read the tenant's SRT
+    loopback HEVC and push it to the GPU's mpegts-over-TLS listener with `-c copy` (no
+    re-encode → temporal HEVC preserved). The card-less hub does no NVENC; the GPU does."""
+    return [
+        "ffmpeg", "-hide_banner", "-loglevel", "warning",
+        *_input_args(source),
+        "-i", source,
+        "-c", "copy", "-f", "mpegts", dest,
+    ]
+
+
+def build_deliver_cmd(return_url: str, targets: list[dict]) -> list[str]:
+    """VPS deliver (RELAY_ROLE=vps, transcode tenant): read the GPU's H.264 return from
+    the LOCAL MediaMTX and tee (`-c copy`, the GPU already encoded) to every transcode
+    platform for this orientation. The tee + use_fifo backpressure decoupling lives HERE
+    (the GPU returned ONE stream; the platform fan-out is the VPS's job)."""
+    return [
+        "ffmpeg", "-hide_banner", "-loglevel", "warning",
+        "-i", return_url,
+        "-map", "0:v", "-map", "0:a", "-c", "copy",
+        "-flush_packets", "1", "-f", "tee", _tee_targets(targets),
+    ]
+
+
 class OutputRunner:
     """Supervises a single FFmpeg process (one passthrough output or one group)."""
 
@@ -761,6 +853,26 @@ def plan_runners(cfg: dict, source: str = LOCAL_SOURCE, role: str = "all-in-one"
                                crash-loop on a CPU box); a tenant transcode output is
                                dropped here (it belongs on the Phase-2 GPU backend).
     """
+    # GPU BACKEND role: a single transcode runner driven by gpu-config (per-orientation
+    # `groups` + `return` URLs), NOT the per-platform `outputs` set. One decode → N
+    # encodes → N RTMPS returns to the VPS. No passthrough/ertmp/preview here.
+    if role == "gpu":
+        groups = cfg.get("groups") or []
+        returns = cfg.get("return") or {}
+        if not groups or not returns:
+            return {}
+        return {
+            "gpu:transcode": {
+                "cmd": build_gpu_transcode_cmd(
+                    source, groups, returns, cfg.get("crop") or {},
+                    int(cfg.get("source_width") or SOURCE_WIDTH),
+                    int(cfg.get("source_height") or SOURCE_HEIGHT),
+                ),
+                "platforms": [],
+                "mode": "gpu",
+            },
+        }
+
     outputs = [o for o in cfg.get("outputs", []) if o.get("enabled")]
     crop = cfg.get("crop") or {}
 
@@ -810,6 +922,31 @@ def plan_runners(cfg: dict, source: str = LOCAL_SOURCE, role: str = "all-in-one"
             "platforms": [],
             "mode": "preview",
         }
+
+    # VPS transcode bridge: when this tenant has a GPU backend (cfg.bridge present, set
+    # by main_vps from hub-config), forward the source HEVC to the GPU's listener and
+    # fan its H.264 return out to the transcode platforms. The bridge only appears in
+    # hub-config once the gpu node is 'ready'; until then the transcode silently doesn't
+    # deliver and passthrough/ertmp keep serving (the "degrade, never direct-to-GPU" rule).
+    if role == "vps":
+        bridge = cfg.get("bridge")
+        sf = bridge.get("source_forward") if bridge else None
+        if bridge and sf:
+            plan["source_forward"] = {
+                "cmd": build_source_forward_cmd(source, sf),
+                "platforms": [],
+                "mode": "source_forward",
+            }
+            for ro in bridge.get("return_outputs", []):
+                orient = ro.get("orientation", "landscape")
+                targets = ro.get("targets", [])
+                frm = ro.get("from", "")
+                if targets and frm:
+                    plan[f"deliver:{orient}"] = {
+                        "cmd": build_deliver_cmd(f"rtmp://127.0.0.1:1935/{frm}", targets),
+                        "platforms": [t.get("name") for t in targets],
+                        "mode": f"deliver:{orient}",
+                    }
 
     return plan
 

@@ -1,8 +1,10 @@
 # VPS-Hub Phase 2 — GPU Bridge + Multi-Provider Catalog (implementation doc)
 
-> Status: IN PROGRESS. From a code-grounded design pass (4 subsystem maps → synthesis). Builds the
-> GPU bridge so TRANSCODE streams (Kick, TikTok, non-eligible Twitch) work through the hub. Read with
-> `vps-hub-plan.md` + `vps-hub-phase1.md`. Flag `SLIMCAST_VPS_HUB` is OFF during the build.
+> Status: BUILD COMPLETE (2026-06-28) — P2–P9 done, adversarially reviewed (8 defects fixed), tsc +
+> py_compile + relay unit tests green. REMAINING before flag-on: set `RUNPOD_API_KEY` in Vercel; the
+> P1 bridge spike folds into the consolidated end-to-end live debug. Builds the GPU bridge so TRANSCODE
+> streams (Kick, TikTok, non-eligible Twitch) work through the hub. Read with `vps-hub-plan.md` +
+> `vps-hub-phase1.md`. Flag `SLIMCAST_VPS_HUB` is OFF until the live debug.
 
 ## Hard constraints (from the user)
 - **No Vast-only** — broad multi-provider GPU catalog is the point. Bridge is TCP (works any provider).
@@ -35,14 +37,24 @@ only on the VPS via hub-config `bridge.return_outputs`).
 
 ## Sub-steps (checklist; deps in parens)
 - [ ] **P1** SPIKE: temporal Apple-VT HEVC over mpegts/TLS-TCP → NVDEC clean (REAL OBS source, not lavfi). **Folded into the final debug** per "no testing now" — but it's THE risk; if it fails, only the bridge transport changes (P7/P8), the rest is transport-agnostic.
-- [ ] **P2** schema index `relay_nodes_node_key_hash_idx` + `authenticateNode('gpu')` resolves relay_nodes → {nodeId, instanceId}. (—)
+- [x] **P2** schema index `relay_nodes_node_key_hash_idx` (migration `20260628000006_gpu_bridge_index.sql`) + `authenticateNode('gpu')` resolves relay_nodes → {nodeId, instanceId} (`lib/agent-auth.ts`). (—)
 - [x] **P3** Multi-provider backend catalog: `lib/runpod.ts` (API, bridge port 8899) + `lib/providers/runpod.ts` (provider + inline DC/GPU catalog, backend-only); `ACTIVE_BACKEND_PROVIDERS=[vast,runpod]` (kept separate from Vast-only `ACTIVE_PROVIDERS`); `mode`+`providers`+`maxPricePerHr` threaded through rankedCandidates/startProvisionRace; Vast backend-mode (drop UDP -p, MIN_DIRECT_PORTS 3→2); Dockerfile EXPOSE 8899; `BACKEND_PRICE_CEILING=$1.00`. `RUNPOD_API_KEY` env needed in prod (set before flag-on). tsc green.
 - [x] **P4** Provision restructure: `SLIMCAST_VPS_HUB` ALWAYS acquires hub; `needsGpu` → `startGpuBackendRace` (mints 'gpu' key + bridge_secret, inserts relay_nodes gpu_backend, sets gpu_instances topology='vps_gpu'/gpu_node_id/bridge_secret, races ACTIVE_BACKEND_PROVIDERS anchored on HUB lat/lon, N=1, onRacerCreated→relay_nodes.racers). AcquireHubResult now returns hub lat/lon. tsc green.
 - [x] **P5** GPU `/ready` winner-CAS (relay_nodes.phase guard, persist ip+bridge_in_port, destroy losers) + `/failed` (mark+destroy+DEGRADE on all-dead) + `/status` (relay_nodes.last_seen_at) — all role-aware (`role==='gpu'` checked FIRST, before authenticateAgent → fixes the auth-bypass landmine). **Re-race-on-boot-failure deferred to P9** (with the mid-stream re-race, shared helper).
 - [x] **P6** `buildGpuConfig` (key-free, grouped by orientation; never decrypts) + GET `/api/agent/gpu-config` (returns source.listen_port 8899, return URLs rtmps://hub:1936/return/<key>/<orient>, groups, crop, source_w/h, bridge_secret) + hub-config `bridge` block (JOIN relay_nodes; source_forward + return_outputs with decrypted keys → VPS only, emitted only when gpu node phase='ready'). tsc green. **← WEB CONTROL PLANE FOR THE BRIDGE COMPLETE (P2–P6).**
-- [ ] **P7** Relay GPU role: `main_gpu()` (keep self-test, drop MediaMTX/OBS-flag, cert gen, gpu-config poll); `_input_args` tls/mpegts branch; `build_group_cmd(return_url)`; `plan_runners(role=='gpu')`. (P1,P6)
-- [ ] **P8** Relay VPS transcode branch: `source_forward` + `deliver:{landscape,portrait}` runners; mediamtx.vps.yml RTMPS :1936 + dedicated return path (NO runOnReady); main_vps threads `bridge`; cloud-init publishes 1936/tcp. (P1,P6,P7)
-- [ ] **P9** Teardown + reaper: `teardownInstance`/`teardownHub` destroy the gpu_backend box (FK CASCADE does NOT call provider.destroy → leak); reaper sees relay_nodes (orphan + stale gpu sweep) + the mid-stream re-race trigger. (P4,P5)
+- [x] **P7** Relay GPU role: `main_gpu()` (keeps self-test, no MediaMTX/OBS-flag, `_gen_self_signed_cert`, gpu-config poll + heartbeat, `tls://0.0.0.0:8899` listener); `_input_args` tls/mpegts branch (+igndts); `build_gpu_transcode_cmd` (ONE decode → N orientation encodes → N flv returns, key-free); `plan_runners(role=='gpu')`; `_post_ready_gpu`; bridge_port from `VAST_TCP_PORT_8899`/`RUNPOD_TCP_PORT_8899`. (P6)
+- [x] **P8** Relay VPS transcode branch: `build_source_forward_cmd` (`-c copy -f mpegts`) + `build_deliver_cmd` (`-c copy -f tee`, use_fifo) → `deliver:{landscape,portrait}` runners; `mediamtx.vps.yml` RTMPS :1936 (`rtmpEncryption: optional`, cert/key) + dedicated hook-free `~^return/.*$` path; `main_vps` cert-gen before MediaMTX + threads per-tenant `bridge` into cfg; cloud-init publishes 1936/tcp (P9 agent). (P6,P7)
+- [x] **P9** Teardown + reaper: `teardownInstance`/`teardownHub` capture+destroy the gpu_backend box BEFORE the FK CASCADE delete (+revoke key); reaper folds relay_nodes provider_id/racers into knownPodIds, gpu_backend stale sweep, mid-stream + never-paired re-race (`reraceGpuBackend`). (P4,P5)
+
+### Post-build adversarial review (2026-06-28) — 8 defects found + fixed, then re-verified
+Two Workflow passes (5-slice review→verify→synthesize, then a 6-fix re-verify). 7 confirmed defects (3 refuted false-alarms dropped) + 1 adjacent issue, all fixed; internal tests added (relay `test_bridge_cmds.py`, 63 checks). The cluster was: **the contract-mandated RunPod backend was entirely non-functional** (relay reports only `VAST_INSTANCE_ID`, empty on RunPod). Fixes:
+- **H1/H2** `agent/ready` `handleGpuReady`: promote the sole `booting` racer when the reported provider_id is empty (else the RunPod winner is mis-tagged loser + destroyed); persist `provider` so teardown/reaper don't `getProvider('')`→Vast-leak the box.
+- **H3** reaper orphan reconcile sweeps the deduped union of `ACTIVE_PROVIDERS ∪ ACTIVE_BACKEND_PROVIDERS` (RunPod orphans were never listed → billed forever).
+- **M1** `reraceGpuBackend` destroys the dead box (via each racer's own provider) BEFORE the reset discards its id.
+- **M2** new reaper `(b2)` branch for never-paired-while-live + `reraceGpuBackend` now nulls `last_seen_at` (a failed re-race re-presents as never-paired and is re-caught).
+- **M3** `startProvisionRace` sets `needsProfessionalGpu=false` in `mode:'backend'` (GPU does ≤2 encodes; raw per-platform count falsely demanded a pro card → degrade-to-passthrough on a fine consumer GPU).
+- **L1** `_register_secrets` now scrubs `bridge.return_outputs[].targets[].key` (decrypted deliver keys were unredacted in runner argv logs).
+- **adjacent** `agent/failed` `handleGpuFailed` destroys the failing box via the racer's own provider (was gated on the empty RunPod provider_id).
 
 ## Landmines (keep visible)
 1. **GPU-key auth bypass** — ready/failed/status branch on `role==='vps'` then fall to authenticateAgent; a 'gpu' key has a user_id → would clobber the VPS tenant's gpu_instances row. MUST check `role==='gpu'` FIRST in all three.
