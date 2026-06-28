@@ -287,6 +287,14 @@ def _redact(msg: str) -> str:
     return msg
 
 
+# GPU backend pods have NO remote log surface (no SSH host exposed, no :8080 panel —
+# only the all-in-one role runs it), so an ffmpeg that fails to bind/transcode is
+# invisible: its stderr is buffered in the runner, never reaching `vastai logs`. On the
+# GPU role, mirror ffmpeg stderr to stdout (redacted) so the bridge is debuggable. Safe:
+# the GPU's outputs are RTMPS returns to the hub, never platform stream keys.
+_FFMPEG_STDERR_TO_STDOUT = os.environ.get("RELAY_ROLE", "") == "gpu"
+
+
 def _input_args(source: str) -> list[str]:
     """Per-protocol input flags."""
     if source.startswith("rtsp"):
@@ -784,7 +792,10 @@ class OutputRunner:
             started = time.time()
             assert self._proc.stderr is not None
             for line in self._proc.stderr:
-                self._log(line.rstrip())
+                txt = line.rstrip()
+                self._log(txt)
+                if _FFMPEG_STDERR_TO_STDOUT:
+                    print(f"[ffmpeg:{self.name}] {_redact(txt)}", flush=True)
 
             self.last_exit = self._proc.wait()
             ran_for = time.time() - started
