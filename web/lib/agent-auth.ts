@@ -56,7 +56,9 @@ export async function authenticateAgentDetailed(
 export interface NodeAuth {
   nodeKeyHash: string
   role: 'vps' | 'gpu'
-  hubId?: string   // set for role==='vps'
+  hubId?: string        // set for role==='vps' (vps_hubs.id)
+  nodeId?: string       // set for role==='gpu' (relay_nodes.id)
+  instanceId?: string   // set for role==='gpu' (relay_nodes.instance_id → gpu_instances.id)
 }
 
 export async function authenticateNode(request: Request): Promise<NodeAuth | null> {
@@ -85,7 +87,15 @@ export async function authenticateNode(request: Request): Promise<NodeAuth | nul
     return { nodeKeyHash: keyHash, role: 'vps', hubId: hub.id }
   }
   if (keyRow.label === 'gpu') {
-    return { nodeKeyHash: keyHash, role: 'gpu' }
+    // Resolve the gpu_backend relay_nodes row this key owns (→ its parent session).
+    const { data: node } = await supabase
+      .from('relay_nodes')
+      .select('id, instance_id')
+      .eq('node_key_hash', keyHash)
+      .eq('role', 'gpu_backend')
+      .maybeSingle()
+    if (!node?.id) return null
+    return { nodeKeyHash: keyHash, role: 'gpu', nodeId: node.id, instanceId: node.instance_id }
   }
   return null   // user/pod/device keys are not node keys
 }
