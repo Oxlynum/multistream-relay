@@ -115,17 +115,30 @@ export const hetznerProvider: VpsProvider = {
     try {
       // Pull the live catalog: server types (with per-location pricing) + locations
       // (for real lat/lon). Both are small, single-page responses.
-      const [stRes, locRes] = await Promise.all([
+      const [stRes, locRes, dcRes] = await Promise.all([
         hzFetch('/server_types?per_page=50'),
         hzFetch('/locations'),
+        hzFetch('/datacenters'),
       ])
-      if (!stRes.ok || !locRes.ok) {
-        console.error(`[hetzner] catalog fetch → server_types ${stRes.status}, locations ${locRes.status}`)
+      if (!stRes.ok || !locRes.ok || !dcRes.ok) {
+        console.error(`[hetzner] catalog fetch → server_types ${stRes.status}, locations ${locRes.status}, datacenters ${dcRes.status}`)
         return []
       }
       const serverTypes = ((await stRes.json()).server_types ?? []) as HzServerType[]
       const locations = ((await locRes.json()).locations ?? []) as HzLocation[]
       const locByName = new Map(locations.map(l => [l.name, l]))
+      // A type's PRICE list includes locations where it currently has NO capacity — retired
+      // lines (e.g. cpx11) and drained locations (e.g. fsn1) still appear. Ordering one 422s
+      // with "unsupported location for server type" → spawnHub deletes its row and the hub
+      // never comes up. The authoritative "orderable right now" signal is each datacenter's
+      // server_types.available list; intersect against it.
+      const datacenters = ((await dcRes.json()).datacenters ?? []) as Array<{ location?: { name?: string }; server_types?: { available?: number[] } }>
+      const orderable = new Set<string>()   // `${typeId}@${locationName}`
+      for (const dc of datacenters) {
+        const ln = dc.location?.name
+        if (!ln) continue
+        for (const tid of dc.server_types?.available ?? []) orderable.add(`${tid}@${ln}`)
+      }
 
       const candidates: VpsCandidate[] = []
       for (const st of serverTypes) {
@@ -142,6 +155,7 @@ export const hetznerProvider: VpsProvider = {
           // Drop 1 TB US/SG locations + old low-bundle lines: only 20 TB-bundle (EU) hubs.
           if (includedTrafficTb < MIN_INCLUDED_TRAFFIC_TB) continue
           if (ALLOWED_REGIONS.length && !ALLOWED_REGIONS.includes(pr.location)) continue
+          if (!orderable.has(`${st.id}@${pr.location}`)) continue   // skip price-only / drained combos
           candidates.push({
             provider: 'hetzner',
             serverType: st.name,
