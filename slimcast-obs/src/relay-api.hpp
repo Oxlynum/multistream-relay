@@ -31,6 +31,9 @@ struct GpuInfo {
     bool    throttleActive = false;
     int     throttleTier   = 0;
     double  costUsdHr      = 0;   // live infra cost shown in the dock banner
+    // True when this stream transcodes via a GPU backend behind the VPS hub — enables
+    // the health graph's "GPU bridge" (VPS↔GPU) series. False for all-in-one/passthrough.
+    bool    hasBridge      = false;
 };
 
 // A user's connected channel. Stream keys/URLs never leave the server — the dock

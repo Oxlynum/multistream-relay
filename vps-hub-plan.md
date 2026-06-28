@@ -341,6 +341,28 @@ Until the overhaul: `profiles.plan` etc. are unused; no deduction occurs.
 | **3 — Two-tier billing** | Flat sub (passthrough) vs metered (transcode); VPS = single clock | Stripe test mode: one subscribed passthrough acct + one payg transcode acct |
 | **4 — Geo + hardening + Vultr** | VPS↔GPU co-location, bridge telemetry in dock, warm-pool (if chosen), Vultr provider | Provision in US, confirm GPU near VPS; add Vultr region |
 
+**Phase 4 BUILT 2026-06-28** (code-complete; pending the consolidated live debug):
+- ✅ **GPU↔VPS co-location** — already wired in Phase 2 (`startGpuBackendRace` anchors the
+  backend race on the hub's `lat/lon`; mid-stream re-race reuses it). No new work needed.
+- ✅ **Hetzner = EU-only-by-economics** (NEW, user-locked): `hetzner.ts` filters by per-location
+  `included_traffic` ≥ `HETZNER_MIN_INCLUDED_TRAFFIC_TB` (default 18) → keeps the 20 TB-bundle
+  EU locations, drops the 1 TB US/SG + old low-bundle lines. SRT's 5000ms buffer absorbs the
+  transatlantic first-leg RTT (sub-second latency cost, quality-safe). Optional hard pin
+  `HETZNER_ALLOWED_REGIONS`. Co-location then resolves GPUs to EU automatically. The
+  "coarse regional hubs" idea becomes a **per-provider region policy** (Hetzner=EU; US comes
+  via a future provider).
+- ✅ **Bridge telemetry in dock** — GPU backend measures the VPS↔GPU leg (`CostMeter`, single-tenant
+  box = pure bridge traffic) and reports it in its heartbeat; `handleGpuStatus` writes a
+  `direction='bridge'` row; `handleVpsStatus` writes coarse `inbound`; dock shows a gated
+  "→ GPU bridge" series (`has_bridge` from `/api/gpu/status`). Hub-mode per-platform `outbound`
+  deferred (needs richer VPS reporting). No migration (the `bridge` direction already exists).
+- ✅ **Fast boot = pre-baked snapshot** (warm-pool NOT chosen — keeps scale-to-zero economics):
+  `scripts/build-hetzner-snapshot.mjs` bakes Docker + the relay image into a snapshot; set
+  `HETZNER_SNAPSHOT_ID` → `cloud-init.ts` emits a minimal "just docker run" config (boots in
+  seconds). Unset = full apt+pull (prod-unchanged). Rebuild on relay-image change.
+- ⏸️ **Vultr DEFERRED** (user, 2026-06-28): leave Hetzner-only until live testing is complete;
+  THEN do a comprehensive best-host search for **both** VPS and GPU and add Vultr for both.
+
 Each phase is independently shippable; rollback = `SLIMCAST_VPS_HUB=false` (instant return to
 Vast-direct). Migrations are additive (no down-migration needed). The reaper runs in **both**
 modes so test-provisioned VPSes are always cleaned up.
@@ -379,21 +401,33 @@ modes so test-provisioned VPSes are always cleaned up.
 - ✅ VPS lifecycle = long-lived multi-tenant autoscaling pool, scale-to-zero, join-or-spawn.
 - ✅ Geo = coarse regional hubs (SRT 5000ms absorbs distance — quality safe).
 - ✅ GPU catalog = all providers (TCP bridge); broker anchors GPU ranking on the VPS.
-- ✅ Bridge source transport = mpegts-over-TCP (raw ffmpeg listener); spike to confirm temporal
-  HEVC; return leg = RTMP. (Supersedes the SRT-only call in §2.1.)
+- ✅ Bridge source transport = mpegts-over-TCP (raw ffmpeg listener); return leg = RTMP.
+  (Supersedes the SRT-only call in §2.1.) **P1 spike CONFIRMED 2026-06-28** (local, real Apple
+  VideoToolbox HEVC + a hierarchical `b-pyramid` temporal-layered HEVC both survive the exact
+  `build_source_forward_cmd` `-c copy` → mpegts-over-TLS → `_input_args("tls")` decode chain:
+  600/600 frames, zero errors; FLV `-c copy` negative control rejected the same stream, exit 183
+  — proving the test was sensitive and *why* mpegts beats RTMP). Only NVDEC-specific decode is
+  unverified (no local NVIDIA card) — covered for free on the first live GPU. No relay change.
+- ✅ Bridge security (decided 2026-06-28) = **encrypt-only** (self-signed TLS, `tls_verify=0`); NO
+  firewall IP-lock for now. Rationale: IP-lock doesn't shrink the GPU pool but adds failure modes
+  (timing race before bridge connect + must re-update firewall on every mid-stream GPU re-race).
+  ⚠️ **RE-ASK THE USER before production** — when the box is long-lived, revisit IP-lock vs AES.
+- ✅ Hetzner boot (decided 2026-06-28) = **pre-baked snapshot** (boots in seconds, well under the
+  110s readiness window; rebuild snapshot when the relay image changes). Not cloud-init docker-pull.
+- ✅ GPU race width = **N=1** (locked in Phase 2 — VPS already serves passthrough, slow GPU boot
+  only delays transcode outputs, halves spend).
+- ✅ Hetzner account layout (decided 2026-06-28) = **one project, all regions** (single token, one
+  3600/hr rate limit shared by broker+reaper; fine at our scale).
 - ✅ No-in-region-GPU fallback = all-in-one Vast-direct for that stream (big catalog makes this
   rare).
 - ✅ Billing = DEACTIVATED now; reconcile (§2.3) + two-tier + subscription/token model = one
   future overhaul (§7).
 - ✅ eligible-Twitch eRTMP = provisional until the user is a Twitch Affiliate.
 
-**Still open — decide by Phase 2:**
-1. Bridge security: post-pairing firewall IP-lock vs SRT-AES return leg vs open port.
-2. Hetzner boot: prebuilt snapshot vs cloud-init docker-pull (vs the readiness timeout).
-3. GPU race width: N=2 (boot-speed) vs N=1 (cost — a bad backend GPU no longer risks viewer egress).
-4. Multi-tenant per-box CAPACITY (concurrent streams) — load-test per Hetzner server type
-   (real ID from live `GET /v1/server_types`); preview optional/on-demand to raise density.
-5. Single Hetzner project vs per-region projects (one 3600/hr rate limit shared by broker+reaper).
+**Still open (Phase-2 decisions 1,2,3,5 now LOCKED above — 2026-06-28):**
+4. Multi-tenant per-box CAPACITY (concurrent streams) — **empirical, not a preference**: load-test
+   per Hetzner server type (real ID from live `GET /v1/server_types`) during the end-to-end live
+   test; preview optional/on-demand to raise density. Not blocking the build.
 
 **Still open — billing overhaul (later):**
 6. Subscription price + monthly token allotment + buy-more pricing + inclusions (bitrate cap,

@@ -30,6 +30,10 @@ export interface CloudInitOpts {
   //   vps: SRT ingest (udp), RTMP beacon (tcp), bridge-return (tcp), HLS (tcp, off by default)
   //   gpu: bridge-in (tcp), return-out is an OUTBOUND push (no inbound port)
   ports: Array<{ host: number; container: number; proto: 'tcp' | 'udp' }>
+  // Booting from a PRE-BAKED snapshot (Docker already enabled + relay image already
+  // pulled). Skips apt-install + docker pull + login → just `docker run` (boots in
+  // seconds, Phase 4). When false (prod default) the full install path runs.
+  prebaked?: boolean
 }
 
 // Shell-quote a value for safe inclusion in a docker `-e KEY=VALUE` arg inside a
@@ -41,7 +45,7 @@ function sq(v: string): string {
 }
 
 export function buildCloudInit(opts: CloudInitOpts): string {
-  const { imageTag, role, env, imageLogin, ports } = opts
+  const { imageTag, role, env, imageLogin, ports, prebaked } = opts
 
   const envFlags = Object.entries(env)
     .map(([k, v]) => `-e '${sq(k)}=${sq(v)}'`)
@@ -63,9 +67,33 @@ export function buildCloudInit(opts: CloudInitOpts): string {
     `-e 'RELAY_ROLE=${sq(role)}' ${envFlags} ` +
     `${sq(imageTag)}`
 
+  // PRE-BAKED snapshot path (Phase 4): Docker is already installed+enabled and the
+  // relay image is already pulled into the snapshot, so first boot just runs the
+  // container with this box's per-server env → ready in seconds (no apt). The login
+  // line is REQUIRED for correctness, not just the matching-tag fast path: relay CI
+  // auto-pins SLIMCAST_RELAY_IMAGE to each new SHA, but the snapshot is rebuilt
+  // manually, so `imageTag` WILL drift from the baked tag between a relay change and
+  // the next `build-hetzner-snapshot.mjs` run. When it matches, `docker run`'s default
+  // `--pull missing` finds the image locally and skips the pull (still seconds); when
+  // it has drifted, the image is absent → docker pulls it, which 401s on the private
+  // ghcr image WITHOUT this login. So: fast when current, correct (authenticated pull
+  // of the live SHA) when stale — never a silent 401 boot failure. (rm -f guards
+  // against a baked container colliding on --name; we don't bake one, but be defensive.)
+  if (prebaked) {
+    return [
+      `#cloud-config`,
+      `runcmd:`,
+      `  - systemctl start docker`,
+      `  - ${loginCmd}`,
+      `  - docker rm -f slimcast-relay 2>/dev/null || true`,
+      `  - ${runRelay}`,
+      ``,
+    ].join('\n')
+  }
+
   // YAML #cloud-config. runcmd executes after package install. We install Docker
-  // from Ubuntu's repo (fast, no external script) — adequate for Phase 0; a
-  // prebuilt snapshot (Phase 4) removes this latency entirely.
+  // from Ubuntu's repo (fast, no external script) — the fallback when no snapshot is
+  // configured; the pre-baked path above removes this latency entirely.
   return [
     `#cloud-config`,
     `package_update: true`,

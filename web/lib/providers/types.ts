@@ -110,6 +110,12 @@ export interface VpsCandidate {
   lat: number             // region centroid — for nearest-region ranking + GPU anchoring
   lon: number
   label: string           // human-readable, e.g. 'hetzner:cpx31 Ashburn'
+  // True when this candidate boots from a PRE-BAKED image (a snapshot that already has
+  // Docker + the relay image) → the broker hands cloud-init a minimal "just docker run"
+  // user_data (boots in seconds) instead of the full apt-install + pull. Set by the
+  // provider (Hetzner: when HETZNER_SNAPSHOT_ID is configured). Top-level (not in the
+  // opaque `placement`) so the broker can pick the cloud-init mode without inspecting it.
+  prebaked?: boolean
   // Opaque provider payload handed back to create(). Hetzner: { serverType, location,
   // image, datacenter? }. The broker never inspects it.
   placement: Record<string, unknown>

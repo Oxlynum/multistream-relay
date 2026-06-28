@@ -944,7 +944,11 @@ void RelayDock::render(const GpuInfo &info)
     renderServiceBanner();
     renderChannels();
     updateTotals();
-    if (m_healthWidget) m_healthWidget->setStreaming(info.streaming);
+    if (m_healthWidget) {
+        m_healthWidget->setStreaming(info.streaming);
+        // Offer the "GPU bridge" series only for transcode-via-hub streams.
+        m_healthWidget->setBridgeAvailable(info.hasBridge);
+    }
 }
 
 void RelayDock::renderConfirm(const GpuInfo &info)

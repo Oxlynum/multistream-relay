@@ -91,6 +91,7 @@ void RelayApi::fetchGpuStatus()
         info.throttleTier   = obj["throttle_tier"].toInt(0);
         info.costUsdHr      = obj["cost_usd_hr"].toDouble(0);
         info.confirmRequired = obj["confirm_required"].toBool(false);
+        info.hasBridge       = obj["has_bridge"].toBool(false);
         const QString deadline = obj["confirm_deadline"].toString();
         info.confirmDeadlineMs = deadline.isEmpty()
             ? 0

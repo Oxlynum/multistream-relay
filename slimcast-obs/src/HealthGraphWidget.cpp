@@ -175,14 +175,29 @@ void HealthGraphWidget::setActivePlatforms(const QStringList &platforms)
 {
     if (m_platforms == platforms) return;
     m_platforms = platforms;
+    rebuildSelector();
+}
 
+void HealthGraphWidget::setBridgeAvailable(bool available)
+{
+    if (m_bridgeAvailable == available) return;
+    m_bridgeAvailable = available;
+    rebuildSelector();
+}
+
+// Rebuilds the selector to: SlimCast (index 0, fixed) + GPU bridge (if available) + one
+// entry per active platform — preserving the current selection across rebuilds.
+void HealthGraphWidget::rebuildSelector()
+{
     const QString prevKey = m_selectedKey;
 
     m_selector->blockSignals(true);
     // Always keep index 0 (SlimCast); rebuild everything after it
     while (m_selector->count() > 1)
         m_selector->removeItem(1);
-    for (const QString &plat : platforms) {
+    if (m_bridgeAvailable)
+        m_selector->addItem(QStringLiteral("→ GPU bridge"), QStringLiteral("__bridge__"));
+    for (const QString &plat : m_platforms) {
         const QString label = QStringLiteral("→ ") + plat[0].toUpper() + plat.mid(1);
         m_selector->addItem(label, plat);
     }
@@ -213,6 +228,8 @@ void HealthGraphWidget::fetchMetrics()
     QString urlStr = BASE_URL + QStringLiteral("/api/metrics/connection?window=10");
     if (m_selectedKey.isEmpty())
         urlStr += QStringLiteral("&direction=inbound");
+    else if (m_selectedKey == QStringLiteral("__bridge__"))
+        urlStr += QStringLiteral("&direction=bridge");
     else
         urlStr += QStringLiteral("&direction=outbound&platform=") + m_selectedKey;
 

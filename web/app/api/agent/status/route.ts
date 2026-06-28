@@ -43,13 +43,47 @@ async function refillAndRecheck(
   return spendableTokens(data)
 }
 
-// VPS-hub GPU BACKEND heartbeat: just refresh relay_nodes.last_seen_at so the reaper
-// can detect a mid-stream GPU death (stale heartbeat while the parent session is live)
-// and re-race. Billing is off → return a large credits_seconds so the relay never
-// self-stops. Operates ONLY on relay_nodes (never the per-user gpu_instances path).
-async function handleGpuStatus(node: NodeAuth): Promise<Response> {
+// VPS-hub GPU BACKEND heartbeat: refresh relay_nodes.last_seen_at so the reaper can
+// detect a mid-stream GPU death (stale heartbeat while the parent session is live) and
+// re-race; AND record bridge telemetry. The GPU backend is single-tenant, so its whole
+// net throughput IS the internal VPS↔GPU bridge leg — the relay measures it (CostMeter
+// on /proc/net/dev) and reports {ingress_kbps,egress_kbps,active}. We attribute it to the
+// owning session (relay_nodes → instance_id/user_id) and write a direction='bridge'
+// connection_metrics row the dock plots. Billing is off → return a large credits_seconds
+// so the relay never self-stops. Operates ONLY on relay_nodes (never the gpu_instances path).
+async function handleGpuStatus(request: NextRequest, node: NodeAuth): Promise<Response> {
   const supabase = createServerClient()
-  await supabase.from('relay_nodes').update({ last_seen_at: new Date().toISOString() }).eq('id', node.nodeId!)
+  // Bump last_seen_at AND read the owning session in one round-trip.
+  const { data: nodeRow } = await supabase
+    .from('relay_nodes')
+    .update({ last_seen_at: new Date().toISOString() })
+    .eq('id', node.nodeId!)
+    .select('instance_id, user_id')
+    .maybeSingle()
+
+  const body = await request.json().catch(() => ({})) as {
+    bridge?: { ingress_kbps?: number; egress_kbps?: number; active?: boolean }
+  }
+  if (body.bridge && nodeRow?.instance_id && nodeRow?.user_id) {
+    // Return leg (GPU→VPS) = the delivered transcode → the meaningful bridge bitrate.
+    const egressKbps = Math.max(0, Math.round(body.bridge.egress_kbps ?? 0))
+    const active = body.bridge.active ?? false
+    // Health: transcoding + return flowing = healthy; transcoding but no return bytes
+    // = degraded (bridge stalled); not transcoding = idle.
+    const health = active ? (egressKbps > 0 ? 100 : 50) : 0
+    // AWAIT (not fire-and-forget): handleGpuStatus has no trailing awaited work, so an
+    // un-awaited insert would race the Response and can be dropped on Vercel. One ~10ms
+    // round-trip on a 10s heartbeat is negligible.
+    await supabase.from('connection_metrics').insert({
+      instance_id: nodeRow.instance_id as string,
+      user_id: nodeRow.user_id as string,
+      direction: 'bridge',
+      platform: null,
+      bitrate_kbps: egressKbps,
+      health_score: health,
+      dropped_frames: 0,
+    })
+  }
   return Response.json({ ok: true, credits_seconds: 999999 })
 }
 
@@ -88,7 +122,7 @@ async function handleVpsStatus(request: NextRequest, hubId: string): Promise<Res
   const reported = body.streams ?? []
   const { data: sessions } = await supabase
     .from('gpu_instances')
-    .select('user_id, ingest_key, idle_since, max_session_at, last_seen_at')
+    .select('id, user_id, ingest_key, idle_since, max_session_at, last_seen_at')
     .eq('vps_hub_id', hubId)
 
   // Batch-load the billing inputs for every tenant on this hub (the VPS heartbeat is the
@@ -136,6 +170,17 @@ async function handleVpsStatus(request: NextRequest, hubId: string): Promise<Res
     await supabase.from('gpu_instances')
       .update({ last_seen_at: nowIso, streaming, idle_since: idleSince, burn_rate: bill.burnRate })
       .eq('user_id', userId).eq('vps_hub_id', hubId)
+
+    // Coarse inbound (OBS→hub) health for the dock graph in hub topology. `streaming`
+    // here = OBS is publishing to this tenant's SRT path (honest source-present signal).
+    // The rich per-platform OUTBOUND series needs encoder states the VPS doesn't report
+    // yet (deferred); the bridge series comes from the GPU backend's own heartbeat.
+    if (s.id) {
+      supabase.from('connection_metrics').insert({
+        instance_id: s.id as string, user_id: userId, direction: 'inbound',
+        platform: null, bitrate_kbps: null, health_score: streaming ? 100 : 0, dropped_frames: 0,
+      }).then(() => {})
+    }
 
     // Try auto-refill before any credits kill (mirrors the pod clock so the two don't diverge).
     let spendable = bill.spendableAfter
@@ -187,7 +232,7 @@ export async function POST(request: NextRequest) {
     return handleVpsStatus(request, node.hubId)
   }
   if (node?.role === 'gpu' && node.nodeId) {
-    return handleGpuStatus(node)
+    return handleGpuStatus(request, node)
   }
 
   const authed = await authenticateAgentDetailed(request)

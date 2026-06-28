@@ -27,7 +27,7 @@ export async function GET(request: Request) {
 
   const { data: instance } = await supabase
     .from('gpu_instances')
-    .select('status, ip_address, ingest_port, hls_port, srt_port, ingest_key, srt_passphrase, last_seen_at, burn_rate, outputs, streaming, max_session_at, datacenter, gpu_type, cost_usd_hr, throttle_tier, suggested_ingest_kbps')
+    .select('status, ip_address, ingest_port, hls_port, srt_port, ingest_key, srt_passphrase, last_seen_at, burn_rate, outputs, streaming, max_session_at, datacenter, gpu_type, cost_usd_hr, throttle_tier, suggested_ingest_kbps, topology')
     .eq('user_id', userId)
     .maybeSingle()
 
@@ -57,6 +57,7 @@ export async function GET(request: Request) {
       confirm_deadline: null,
       datacenter: null,
       gpu_type: null,
+      has_bridge: false,
     })
   }
 
@@ -125,5 +126,8 @@ export async function GET(request: Request) {
     throttle_active:
       effectiveStatus === 'running' && (instance.throttle_tier ?? 0) > 0,
     cost_usd_hr: effectiveStatus === 'running' ? (instance.cost_usd_hr ?? null) : null,
+    // This stream transcodes via a GPU backend behind the VPS hub → the dock offers a
+    // "GPU bridge" health series (direction='bridge'). False for all-in-one + passthrough.
+    has_bridge: effectiveStatus === 'running' && instance.topology === 'vps_gpu',
   })
 }

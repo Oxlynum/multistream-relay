@@ -23,11 +23,30 @@ const TOKEN = process.env.HETZNER_API_TOKEN
 // Default OS image for the hub. cloud-init installs Docker on top.
 const DEFAULT_IMAGE = process.env.HETZNER_IMAGE || 'ubuntu-22.04'
 
+// Pre-baked snapshot (Phase 4): a snapshot image id that already has Docker enabled +
+// the relay image pulled. When set, hubs boot from it and cloud-init skips apt+pull
+// (seconds, well under the readiness window) — see scripts/build-hetzner-snapshot.mjs.
+// Unset (prod default) → fall back to DEFAULT_IMAGE + the full install cloud-init.
+// REBUILD the snapshot whenever the relay image changes (it bakes a specific image).
+const SNAPSHOT_ID = process.env.HETZNER_SNAPSHOT_ID || ''
+
 // Soft floor for a server type to be a viable hub: it must terminate SRT + remux +
 // (for transcode) source-forward + platform fan-out. Tune after the §2.6 load-test;
 // these keep the absurdly tiny tiers (cpx11/cx22) out of the candidate set for now.
 const MIN_CORES = Number(process.env.HETZNER_MIN_CORES || 2)
 const MIN_MEMORY_GB = Number(process.env.HETZNER_MIN_MEMORY_GB || 4)
+
+// EU-only-by-economics. Hetzner ships its ~20–22 TB traffic bundle ONLY on the EU
+// locations (fsn1/nbg1/hel1); US (ash/hil) + Singapore cap at ~1 TB and bill overage,
+// as do the OLD low-bundle lines (cpx11–51) everywhere. The first leg is SRT (5000 ms
+// buffer absorbs the transatlantic RTT — quality-safe, sub-second-latency cost only),
+// so we deliberately pin hubs to the 20 TB-bundle locations to slash egress cost. This
+// resolves to EU. included_traffic is PER-LOCATION on each price, so the filter is exact:
+// cx23@fsn1 (22 TB) passes, the SAME cx23@ash (1 TB) does not. Tunable; an explicit
+// region allowlist (HETZNER_ALLOWED_REGIONS=fsn1,nbg1,hel1) can hard-pin geography on top.
+const MIN_INCLUDED_TRAFFIC_TB = Number(process.env.HETZNER_MIN_INCLUDED_TRAFFIC_TB || 18)
+const ALLOWED_REGIONS = (process.env.HETZNER_ALLOWED_REGIONS || '')
+  .split(',').map(s => s.trim()).filter(Boolean)
 
 const BYTES_PER_TB = 1_000_000_000_000
 
@@ -119,17 +138,24 @@ export const hetznerProvider: VpsProvider = {
           if (!loc || loc.latitude == null || loc.longitude == null) continue
           const hourly = num(pr.price_hourly?.gross)
           if (hourly <= 0 || hourly > maxPricePerHr) continue
+          const includedTrafficTb = (pr.included_traffic ?? 0) / BYTES_PER_TB
+          // Drop 1 TB US/SG locations + old low-bundle lines: only 20 TB-bundle (EU) hubs.
+          if (includedTrafficTb < MIN_INCLUDED_TRAFFIC_TB) continue
+          if (ALLOWED_REGIONS.length && !ALLOWED_REGIONS.includes(pr.location)) continue
           candidates.push({
             provider: 'hetzner',
             serverType: st.name,
             region: pr.location,
             pricePerHr: hourly,
-            includedTrafficTb: (pr.included_traffic ?? 0) / BYTES_PER_TB,
+            includedTrafficTb,
             pricePerTbOverage: num(pr.price_per_tb_traffic?.gross),
             lat: loc.latitude,
             lon: loc.longitude,
             label: `hetzner:${st.name} ${loc.city ?? loc.name} (${st.cores}c/${st.memory}g)`,
-            placement: { serverType: st.name, location: pr.location, image: DEFAULT_IMAGE },
+            // Boot from the pre-baked snapshot when configured (cloud-init goes minimal);
+            // else the base image + full install path. `prebaked` tells the broker which.
+            prebaked: !!SNAPSHOT_ID,
+            placement: { serverType: st.name, location: pr.location, image: SNAPSHOT_ID || DEFAULT_IMAGE },
           })
         }
       }

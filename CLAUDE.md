@@ -58,11 +58,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 cd web
 npm run dev
-npx tsc --noEmit          # pre-push gate — no test suite
-vercel --prod             # run from repo root (Vercel root dir is web/)
+npx tsc --noEmit              # pre-push gate (no Jest/Vitest in this repo)
+npm run lint                  # eslint
+npx tsx scripts/test-billing.ts   # billing-math unit tests (node:assert; exits non-zero on fail)
+vercel --prod                # run from repo root (Vercel root dir is web/)
 vercel logs --environment=production --since=10m -x
 ```
 > **Next.js 16:** before writing routing/caching/middleware/server-action code, read `web/node_modules/next/dist/docs/`. Auth gate is `web/proxy.ts`.
+>
+> **Tests:** no test framework — tests are standalone `scripts/*.ts` run with `npx tsx` (each `node:assert`s and exits non-zero on failure; run one by invoking its file). To test **SQL migrations/RPCs** without touching prod, apply them to a throwaway Postgres and assert in PL/pgSQL: `docker run -d --name pgt -e POSTGRES_HOST_AUTH_METHOD=trust postgres:17` (the image self-restarts once during initdb — wait for 3 consecutive `pg_isready`), then pipe `cat bootstrap.sql migrations/*.sql assert.sql | docker exec -i pgt psql -v ON_ERROR_STOP=1 -U postgres -d <db>`. Reconcile migrations must be idempotent + convergent on BOTH the live schema AND a fresh history replay — test both.
 
 **slimcast-obs/** (macOS arm64, needs OBS.app + CMake ≥3.26):
 ```bash
@@ -102,13 +106,15 @@ cd web && STRIPE_SECRET_KEY=sk_... node scripts/setup-stripe.mjs
 - `TWITCH_CLIENT_ID/SECRET`, `GOOGLE_CLIENT_ID/SECRET`, `FACEBOOK_APP_ID/SECRET`
 - `SLIMCAST_DEV_NO_BILLING_USER_ID` — dev billing bypass (blank in prod)
 - `SLIMCAST_BROKER_V2` — `true` (default, v2 push-readiness+race) / `false` (v1 cascade fallback)
-- `SLIMCAST_VPS_HUB` — `false` (default) / `true` enables the VPS-as-the-Hub path (Phase 0 scaffolding only so far; see `vps-hub-plan.md`)
-- `HETZNER_API_TOKEN` — Hetzner Cloud Read+Write token for the VPS hub provider (`lib/providers/hetzner.ts`) + `scripts/test-hetzner.mjs`. Not in `.env.example` git (ignored) — add manually.
+- `SLIMCAST_VPS_HUB` — `false` (default) / `true` enables the VPS-as-the-Hub path (Phases 0–4 built; pending its consolidated live debug — see `vps-hub-plan.md`)
+- `HETZNER_API_TOKEN` — Hetzner Cloud Read+Write token for the VPS hub provider (`lib/providers/hetzner.ts`) + `scripts/test-hetzner.mjs` + `scripts/build-hetzner-snapshot.mjs`. Not in `.env.example` git (ignored) — add manually.
+- `HETZNER_SNAPSHOT_ID` — (Phase 4) pre-baked snapshot image id (Docker + relay image baked) → hubs boot in seconds; cloud-init skips apt+pull. Unset (default) = full install cloud-init (prod-unchanged). Build/refresh with `node scripts/build-hetzner-snapshot.mjs` after any relay-image change. `lib/providers/hetzner.ts` + `lib/cloud-init.ts`.
+- `HETZNER_MIN_INCLUDED_TRAFFIC_TB` — (Phase 4) traffic-bundle floor (default 18) that pins hubs to Hetzner's 20 TB-bundle locations (EU). Drops the 1 TB US/SG locations + old low-bundle lines (per-location `included_traffic`). EU-only by economics; SRT's 5000ms buffer absorbs the transatlantic first-leg RTT (quality-safe). Optional hard pin: `HETZNER_ALLOWED_REGIONS=fsn1,nbg1,hel1`.
 
 ## Working conventions (standing authorization — do these on wrap-up)
 - **Update CLAUDE.md** when architecture, provider, schema, or load-bearing assumptions change.
 - **Push to GitHub** after `npx tsc --noEmit` passes. Real commit message. (`relay/**` push triggers Docker CI.)
-- **Apply Supabase migrations** (`supabase db push`) after editing SQL in `web/supabase/migrations/`.
+- **Apply Supabase migrations** (`supabase db push`) after editing SQL in `web/supabase/migrations/`. **Run the `supabase` CLI from `web/`** — the linked project (`web/supabase/.temp`) + the real migrations live there. The repo root has a stray empty `supabase/` dir, so running the CLI from root makes `migration list` look empty and won't find your migrations. `supabase db dump --schema public -f <file>` is the way to read the TRUE live schema (the migration history does NOT reproduce prod — see the §2.3 credit drift). Prefer `--dry-run` before a real `db push`.
 - **Rebuild + reinstall OBS plugin** after any `slimcast-obs/` change; restart OBS.
 
 Still confirm before destructive/irreversible actions (deleting data, force-push, live infra teardown).
@@ -220,7 +226,7 @@ Key columns:
 - `credited_invoices` (Phase 3): idempotency ledger for monthly allotment grants (keyed by Stripe invoice id; service-role-only RLS). `stream_sessions.billed_model` records the plan billed.
 - `gpu_instances`: `provider` (default `'vast'`), `burn_rate`, `srt_port`, `session_id`, `max_session_at`, `idle_since`, `outputs` (jsonb), `streaming`, `cost_usd_hr`, `egress_gb_hr`, `ingress_gb_hr`, `suggested_ingest_kbps`, `throttle_tier` (budget throttle telemetry). **Broker v2 columns:** `phase` (text — `requested|racing|ready|streaming|ended`; maps to `status` for backward compat), `racers` (jsonb — array of `{provider, provider_id, state, machine_id?}` for all in-flight racer pods), `race_round` (int — guards next-round kick against duplicate /failed POSTs), `provision_lat/lon` (numeric — stored at provision so /api/agent/failed can rank next-round candidates).
 - `agent_api_keys`: service-role only (hashes never reach browser). Labels: `user`/`pod`/`device`/`vps`/`gpu`.
-- `relay_nodes` (VPS-as-the-Hub, Phase 0 — inert until `SLIMCAST_VPS_HUB`): child of `gpu_instances` (CASCADE) so one session can own a VPS hub **and** a GPU backend (sidesteps `gpu_instances UNIQUE(user_id)`). `role` (`vps_hub`/`gpu_backend`), `provider`, ports (`srt_in_port`/`rtmp_beacon_port`/`bridge_in_port`/`bridge_return_port`/`hls_port`), `racers` jsonb, cost telemetry; `UNIQUE(instance_id, role)`, owner-read RLS. `gpu_instances` gained `topology`/`needs_transcode`/`vps_node_id`/`gpu_node_id`/`bridge_secret`; `connection_metrics.direction` adds `bridge`.
+- `relay_nodes` (VPS-as-the-Hub — inert until `SLIMCAST_VPS_HUB`): child of `gpu_instances` (CASCADE) so one session can own a VPS hub **and** a GPU backend (sidesteps `gpu_instances UNIQUE(user_id)`). `role` (`vps_hub`/`gpu_backend`), `provider`, ports (`srt_in_port`/`rtmp_beacon_port`/`bridge_in_port`/`bridge_return_port`/`hls_port`), `racers` jsonb, cost telemetry; `UNIQUE(instance_id, role)`, owner-read RLS. `gpu_instances` gained `topology`/`needs_transcode`/`vps_node_id`/`gpu_node_id`/`bridge_secret`; `connection_metrics.direction` adds `bridge`. **Bridge telemetry (Phase 4):** the single-tenant GPU backend's whole net throughput IS the VPS↔GPU bridge leg — it measures it (`CostMeter`) and reports `bridge:{ingress_kbps,egress_kbps,active}` in its `/api/agent/status` heartbeat; `handleGpuStatus` attributes it (relay_nodes → instance/user) and writes a `direction='bridge'` row; `handleVpsStatus` writes a coarse `direction='inbound'` row per tenant (OBS→hub source-present); the dock surfaces a gated "→ GPU bridge" series (`has_bridge` from `/api/gpu/status`, only for `topology='vps_gpu'`). Hub-mode per-platform `outbound` is deferred (needs richer VPS reporting). GPU co-location is already wired (Phase 2): the backend race anchors on the hub's `lat/lon`, which the EU-only floor pins to EU.
 
 Postgres fns: `credit_payment_once` (idempotent purchased-token credit, canonical `p_tokens numeric` overload), `deduct_tokens` (allotment-first atomic deduction, `FOR UPDATE`), `grant_subscription_allotment` (idempotent monthly grant, rollover-capped), `rate_limit_hit` (fixed-window).
 Latest migration: `20260628000008_two_tier_billing.sql` (Phase 3 — `profiles` plan/subscription/allotment cols, `credited_invoices`, `stream_sessions.billed_model`, `deduct_tokens` + `grant_subscription_allotment` RPCs; additive, inert until `SLIMCAST_BILLING_ACTIVE`). Prior: `20260628000007_credits_drift_reconcile.sql` (idempotent/convergent reconcile of the §2.3 credit drift — canonical `streaming_credits numeric`, drop dead `credit_payment_once(p_seconds)` overload, fix `handle_new_user`). Migration chain runs through `…000006_gpu_bridge_index.sql` (VPS-hub Phase 2).

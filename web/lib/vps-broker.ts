@@ -165,6 +165,9 @@ async function spawnHub(args: {
   const cloudInit = buildCloudInit({
     imageTag,
     role: 'vps',
+    // Minimal "just docker run" cloud-init when the candidate boots from a pre-baked
+    // snapshot (HETZNER_SNAPSHOT_ID set) — boots in seconds vs the apt+pull path.
+    prebaked: candidate.prebaked,
     imageLogin: parseImageLogin(),
     env: {
       SLIMCAST_API_KEY: hubKeyRaw,           // the hub authenticates to hub-config with this

@@ -649,6 +649,9 @@ def main_gpu() -> None:
 
     last_hash: "str | None" = None
     hb_failures = 0
+    # The GPU backend only talks to the VPS (mpegts-over-TLS source IN, RTMPS H.264 OUT),
+    # so /proc/net/dev IS the internal VPS↔GPU bridge leg. Measure it for dock telemetry.
+    cost_meter = CostMeter()
     while True:
         cfg_resp = _api("GET", "/api/agent/gpu-config") or {}
         groups = cfg_resp.get("groups", [])
@@ -671,7 +674,18 @@ def main_gpu() -> None:
             sup.stop_all()
             last_hash = None
 
-        hb = _api("POST", "/api/agent/status", {"role": "gpu"})
+        # Bridge telemetry → the dock's "GPU bridge" health series. GB/hr → kbps is
+        # *1e9*8/3600/1000 ≈ *2222.22. egress = the H.264 returned to the VPS (the
+        # meaningful delivered bitrate); active = a transcode is currently applied.
+        hb_body: dict = {"role": "gpu"}
+        cost = cost_meter.sample()
+        if cost is not None:
+            hb_body["bridge"] = {
+                "ingress_kbps": round(cost["ingress_gb_hr"] * 2222.22),
+                "egress_kbps": round(cost["egress_gb_hr"] * 2222.22),
+                "active": last_hash is not None,
+            }
+        hb = _api("POST", "/api/agent/status", hb_body)
         hb_failures = 0 if hb is not None else hb_failures + 1
         if hb_failures >= HEARTBEAT_FAIL_LIMIT:
             log.error("No control-plane contact (%d beats) — gpu stopping outputs (safety).", hb_failures)
