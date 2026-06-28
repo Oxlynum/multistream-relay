@@ -5,7 +5,12 @@ import { acquireHubOrSpawn, startGpuBackendRace } from '@/lib/vps-broker'
 import { classifyMode, needsTranscode } from '@/lib/agent-config'
 import { teardownInstance, sweepStalePods } from '@/lib/pod-teardown'
 import { checkRateLimit } from '@/lib/rate-limit'
+import { spendableTokens } from '@/lib/billing'
 import { FALLBACK_LAT, FALLBACK_LON, VPS_READINESS_TIMEOUT_MS } from '@/lib/datacenters'
+
+// Billing master switch (shared with the heartbeat clock). When off, streaming is free
+// in dev — the payment gate below is skipped entirely.
+const BILLING_ACTIVE = process.env.SLIMCAST_BILLING_ACTIVE === 'true'
 
 // Vercel function timeout. v1 path: may cascade through several Vast candidates.
 // v2 path: returns in ~5s (just creates N pods and returns); 300s is defensive.
@@ -61,28 +66,26 @@ export async function POST(request: Request) {
     return Response.json({ error: 'Too many requests. Slow down.' }, { status: 429 })
   }
 
-  // ── Payment gate ──────────────────────────────────────────────────────────
+  // ── Payment gate (Phase 3: plan-aware) ─────────────────────────────────────
+  // Skipped entirely when billing is off (free dev streaming) or for the dev-bypass
+  // user. Spendable = rolling allotment (subscribers) + purchased balance; the 2-token
+  // free trial (profiles.streaming_credits DEFAULT) lets a brand-new account stream
+  // without a card. A zero balance is allowed only if auto-refill is armed.
   const UUID_RE_GATE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
   const gateBypassId = process.env.SLIMCAST_DEV_NO_BILLING_USER_ID ?? ''
   const skipPaymentGate = !!userId && UUID_RE_GATE.test(gateBypassId) && gateBypassId === userId
   if (skipPaymentGate) console.log(`[provision] dev payment gate bypassed for ${userId}`)
-  if (!skipPaymentGate) {
+  if (BILLING_ACTIVE && !skipPaymentGate) {
     const { data: gate } = await supabase
       .from('profiles')
-      .select('stripe_payment_method_id, streaming_credits, auto_refill_enabled')
+      .select('plan, allotment_tokens, streaming_credits, auto_refill_enabled')
       .eq('id', userId)
       .single()
 
-    if (!gate?.stripe_payment_method_id) {
+    const spendable = spendableTokens(gate)
+    if (spendable <= 0 && !gate?.auto_refill_enabled) {
       return Response.json(
-        { error: 'payment_method_required', message: 'Add a payment method before streaming.' },
-        { status: 402 },
-      )
-    }
-    const credits = parseFloat(gate.streaming_credits ?? '0') || 0
-    if (credits <= 0 && !gate.auto_refill_enabled) {
-      return Response.json(
-        { error: 'out_of_credits', message: 'You are out of streaming time. Add credits or enable auto-refill.' },
+        { error: 'out_of_credits', message: 'You are out of streaming time. Add credits, enable auto-refill, or subscribe.' },
         { status: 402 },
       )
     }

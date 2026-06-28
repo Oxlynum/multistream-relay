@@ -4,16 +4,15 @@ import { createServerClient } from '@/lib/supabase'
 import { triggerAutoRefill } from '@/app/api/credits/auto-refill/route'
 import { teardownInstance, teardownHub, sweepStalePods } from '@/lib/pod-teardown'
 import { HUB_IDLE_GRACE_MS } from '@/lib/datacenters'
-import {
-  buildBillingContext,
-  computeBurnRate,
-  type OutputStatus,
-  type OutputSettingsMap,
-} from '@/lib/billing'
+import { spendableTokens, type OutputStatus, type BillingPlatformRow } from '@/lib/billing'
+import { billStreamInterval } from '@/lib/billing-clock'
 
-// Never bill more than this many seconds per heartbeat, even if the previous
-// heartbeat was long ago (missed beats / restart) — avoids surprise overcharges.
-const MAX_BILL_INTERVAL_S = 60
+// Dev billing bypass (single user id) — shared by the pod + hub clocks.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+function isDevNoBilling(userId: string): boolean {
+  const id = process.env.SLIMCAST_DEV_NO_BILLING_USER_ID ?? ''
+  return !!userId && UUID_RE.test(id) && id === userId
+}
 
 // A pod that's up but not streaming this long is abandoned → destroy it.
 const IDLE_GRACE_S = 5 * 60 // 5m
@@ -24,6 +23,25 @@ const IDLE_GRACE_S = 5 * 60 // 5m
 // self-destruct safety is NOT gated (rogue-cost protection always stays on).
 // Reversible: set SLIMCAST_BILLING_ACTIVE=true to re-enable.
 const BILLING_ACTIVE = process.env.SLIMCAST_BILLING_ACTIVE === 'true'
+
+// Shared by BOTH billing clocks (pod + hub Clock A): when a streaming user's spendable
+// balance dips below a token, try the saved-card auto-refill before any credits kill.
+// Returns the (possibly refilled) spendable total. No-op when not low or refill is off.
+async function refillAndRecheck(
+  supabase: ReturnType<typeof createServerClient>,
+  userId: string,
+  spendable: number,
+): Promise<number> {
+  if (spendable >= 1.0) return spendable
+  const refilled = await triggerAutoRefill(userId)
+  if (!refilled) return spendable
+  const { data } = await supabase
+    .from('profiles')
+    .select('allotment_tokens, streaming_credits')
+    .eq('id', userId)
+    .single()
+  return spendableTokens(data)
+}
 
 // VPS-hub GPU BACKEND heartbeat: just refresh relay_nodes.last_seen_at so the reaper
 // can detect a mid-stream GPU death (stale heartbeat while the parent session is live)
@@ -70,25 +88,68 @@ async function handleVpsStatus(request: NextRequest, hubId: string): Promise<Res
   const reported = body.streams ?? []
   const { data: sessions } = await supabase
     .from('gpu_instances')
-    .select('user_id, ingest_key, idle_since, max_session_at')
+    .select('user_id, ingest_key, idle_since, max_session_at, last_seen_at')
     .eq('vps_hub_id', hubId)
 
+  // Batch-load the billing inputs for every tenant on this hub (the VPS heartbeat is the
+  // canonical billing clock for hub tenants — vps-hub-plan §2.4). One query each, grouped
+  // in memory, so a 10-tenant hub stays at 2 reads/beat regardless of tenant count.
+  const tenantIds = (sessions ?? []).map(s => s.user_id as string)
+  const [{ data: tenantProfiles }, { data: tenantPlatforms }] = tenantIds.length
+    ? await Promise.all([
+        supabase.from('profiles')
+          .select('id, plan, allotment_tokens, streaming_credits, has_2k_addon, output_settings')
+          .in('id', tenantIds),
+        supabase.from('platform_connections')
+          .select('user_id, platform, orientation, enabled, twitch_hevc_eligible, twitch_use_passthrough')
+          .in('user_id', tenantIds),
+      ])
+    : [{ data: [] }, { data: [] }]
+  const profileById = new Map((tenantProfiles ?? []).map(p => [p.id as string, p]))
+  const platformsByUser = new Map<string, BillingPlatformRow[]>()
+  for (const row of tenantPlatforms ?? []) {
+    const uid = row.user_id as string
+    const arr = platformsByUser.get(uid) ?? []
+    arr.push(row as unknown as BillingPlatformRow)
+    platformsByUser.set(uid, arr)
+  }
+
   for (const s of sessions ?? []) {
+    const userId = s.user_id as string
     const r = reported.find(x => x.ingest_key === s.ingest_key)
     const streaming = r?.streaming ?? false
     const idleSince = streaming ? null : (s.idle_since ?? nowIso)
+    const prevSeen = s.last_seen_at ? new Date(s.last_seen_at).getTime() : now
+
+    // Plan-aware per-tenant billing (allotment-first; passthrough cheaper for subscribers).
+    const bill = await billStreamInterval({
+      userId,
+      profile: profileById.get(userId) ?? null,
+      platforms: platformsByUser.get(userId) ?? [],
+      streaming,
+      lastSeenAtMs: prevSeen,
+      nowMs: now,
+      billingActive: BILLING_ACTIVE,
+      devBypass: isDevNoBilling(userId),
+    })
 
     await supabase.from('gpu_instances')
-      .update({ last_seen_at: nowIso, streaming, idle_since: idleSince })
-      .eq('user_id', s.user_id).eq('vps_hub_id', hubId)
+      .update({ last_seen_at: nowIso, streaming, idle_since: idleSince, burn_rate: bill.burnRate })
+      .eq('user_id', userId).eq('vps_hub_id', hubId)
 
-    // Clock A — logical teardown of THIS tenant only (billing off → no credits kill).
+    // Try auto-refill before any credits kill (mirrors the pod clock so the two don't diverge).
+    let spendable = bill.spendableAfter
+    if (BILLING_ACTIVE && streaming) spendable = await refillAndRecheck(supabase, userId, spendable)
+
+    // Clock A — logical teardown of THIS tenant only (never destroys the shared box).
     const idleFor = idleSince ? (now - new Date(idleSince).getTime()) / 1000 : 0
     const maxAt = s.max_session_at ? new Date(s.max_session_at).getTime() : null
     if (maxAt && now >= maxAt) {
-      await teardownInstance(s.user_id, 'hub_clockA:session_expired')
+      await teardownInstance(userId, 'hub_clockA:session_expired')
+    } else if (BILLING_ACTIVE && spendable <= 0) {
+      await teardownInstance(userId, 'hub_clockA:credits_exhausted')
     } else if (!streaming && idleFor > IDLE_GRACE_S) {
-      await teardownInstance(s.user_id, 'hub_clockA:idle_timeout')
+      await teardownInstance(userId, 'hub_clockA:idle_timeout')
     }
   }
 
@@ -160,62 +221,45 @@ export async function POST(request: NextRequest) {
       .maybeSingle(),
     supabase
       .from('profiles')
-      .select('streaming_credits, output_settings, has_2k_addon, landscape_bitrate_kbps, portrait_bitrate_kbps')
+      .select('plan, allotment_tokens, streaming_credits, output_settings, has_2k_addon, landscape_bitrate_kbps, portrait_bitrate_kbps')
       .eq('id', userId)
       .single(),
     // Only needed by the pod agent for billing; skip for dashboard/dock polls.
     isPodAgent
       ? supabase
           .from('platform_connections')
-          .select('platform, orientation, enabled')
+          .select('platform, orientation, enabled, twitch_hevc_eligible, twitch_use_passthrough')
           .eq('user_id', userId)
       : Promise.resolve({ data: null }),
   ])
 
-  let credits = parseFloat(profile?.streaming_credits ?? '0') || 0
+  // Spendable = rolling allotment (subscribers) + purchased balance.
+  let credits = spendableTokens(profile)
   let burnRate = instance?.burn_rate ?? 0
 
   const now = Date.now()
 
   // --- Billing: only the pod agent is the billing clock ---------------------
   if (isPodAgent) {
-    const outputSettings: OutputSettingsMap = (profile?.output_settings as OutputSettingsMap) ?? {}
-    const has2kAddon = profile?.has_2k_addon ?? false
+    const devNoBilling = isDevNoBilling(userId)
 
-    // Budget tiers 0–1 keep 1440p; tier ≥2 has downscaled to ≤1080p, so a 2K user
-    // throttled there shouldn't be charged the 2K adder for this interval.
-    const THROTTLE_BELOW_1440_TIER = 2
-    const resolutionThrottledBelow1440 = (throttle?.tier ?? 0) >= THROTTLE_BELOW_1440_TIER
-
-    const ctx = buildBillingContext(
-      (platforms ?? []) as Array<{ platform: string; orientation: string; enabled: boolean }>,
-      outputSettings,
-      has2kAddon,
+    const bill = await billStreamInterval({
+      userId,
+      profile,
+      platforms: (platforms ?? []) as unknown as BillingPlatformRow[],
       streaming,
-      resolutionThrottledBelow1440,
-    )
-    burnRate = computeBurnRate(ctx, streaming)
-
-    const last = instance?.last_seen_at ? new Date(instance.last_seen_at).getTime() : now
-    const elapsed = Math.min(Math.max(0, (now - last) / 1000), MAX_BILL_INTERVAL_S)
-    const deduct = parseFloat((burnRate * elapsed / 3600).toFixed(3))
-
-    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-    const devBypassId = process.env.SLIMCAST_DEV_NO_BILLING_USER_ID ?? ''
-    const devNoBilling =
-      !!userId &&
-      UUID_RE.test(devBypassId) &&
-      devBypassId === userId
-    if (devNoBilling) console.log(`[billing] dev bypass active for ${userId} — deduction of ${deduct} tkn skipped`)
-    // Billing deactivated (default): skip the credit deduction. burnRate is still
-    // computed above as harmless telemetry.
-    if (BILLING_ACTIVE && deduct > 0 && !devNoBilling) {
-      credits = parseFloat(Math.max(0, credits - deduct).toFixed(3))
-      await supabase
-        .from('profiles')
-        .update({ streaming_credits: credits })
-        .eq('id', userId)
-    }
+      throttleTier: throttle?.tier ?? 0,
+      lastSeenAtMs: instance?.last_seen_at ? new Date(instance.last_seen_at).getTime() : now,
+      nowMs: now,
+      billingActive: BILLING_ACTIVE,
+      devBypass: devNoBilling,
+    })
+    burnRate = bill.burnRate
+    const deduct = bill.deduct
+    credits = bill.spendableAfter
+    if (devNoBilling && deduct > 0) console.log(`[billing] dev bypass active for ${userId} — deduction of ${deduct} tkn skipped`)
+    // Deduction already applied atomically (allotment-first) inside billStreamInterval
+    // when billing is active; `credits` is the post-interval spendable balance.
 
     const idleSince = streaming
       ? null
@@ -236,6 +280,7 @@ export async function POST(request: NextRequest) {
           duration_seconds: 0,
           credits_deducted: 0,
           platforms: livePlatforms,
+          billed_model: bill.plan,
         })
         .select('id')
         .single()
@@ -252,7 +297,7 @@ export async function POST(request: NextRequest) {
           .from('stream_sessions')
           .update({
             duration_seconds: Math.round((now - new Date(open.started_at).getTime()) / 1000),
-            credits_deducted: parseFloat(((open.credits_deducted ?? 0) + deduct).toFixed(3)),
+            credits_deducted: parseFloat(((open.credits_deducted ?? 0) + deduct).toFixed(6)),
             platforms: merged,
           })
           .eq('id', sessionId)
@@ -297,16 +342,8 @@ export async function POST(request: NextRequest) {
       })
       .eq('user_id', userId)
 
-    if (BILLING_ACTIVE && streaming && credits < 1.0) {
-      const refilled = await triggerAutoRefill(userId)
-      if (refilled) {
-        const { data: updated } = await supabase
-          .from('profiles')
-          .select('streaming_credits')
-          .eq('id', userId)
-          .single()
-        credits = parseFloat(updated?.streaming_credits ?? String(credits)) || credits
-      }
+    if (BILLING_ACTIVE && streaming) {
+      credits = await refillAndRecheck(supabase, userId, credits)
     }
 
     // ── Connection metrics: write one inbound + one per active platform ────────

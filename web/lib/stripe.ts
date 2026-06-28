@@ -29,3 +29,14 @@ export function hoursToSeconds(hours: number) {
 export function hoursToTokens(hours: number): number {
   return hours
 }
+
+// ── Subscription tier (Phase 3) ──────────────────────────────────────────────
+// Recurring monthly subscription: a flat fee that grants a monthly token allotment
+// (rolls over, capped) + cheaper passthrough. Price ID is created by setup-stripe.mjs.
+export const SUBSCRIPTION_PRICE_ID = process.env.STRIPE_PRICE_SUBSCRIPTION ?? ''
+export const SUBSCRIPTION_PRICE_CENTS = Number(process.env.SLIMCAST_SUB_PRICE_CENTS ?? 2000)
+
+// Buy-more tokens: 1 token = 1 hour = $2.00, so the existing hourly price IS the token
+// price. Allow a dedicated STRIPE_PRICE_TOKEN override; otherwise fall back to hourly.
+export const TOKEN_PRICE_ID = process.env.STRIPE_PRICE_TOKEN || process.env.STRIPE_PRICE_HOURLY || ''
+export const TOKEN_PRICE_CENTS = Number(process.env.SLIMCAST_TOKEN_PRICE_CENTS ?? 200)

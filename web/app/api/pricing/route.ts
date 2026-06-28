@@ -4,7 +4,10 @@ import {
   buildBillingContext,
   buildPricingBreakdown,
   secondsRemaining,
+  spendableTokens,
   type OutputSettingsMap,
+  type BillingPlatformRow,
+  type Plan,
 } from '@/lib/billing'
 
 // Returns a live pricing breakdown for the user's current platform configuration.
@@ -18,32 +21,36 @@ export async function GET(request: Request) {
   const [{ data: platforms }, { data: profile }] = await Promise.all([
     supabase
       .from('platform_connections')
-      .select('platform, orientation, enabled')
+      .select('platform, orientation, enabled, twitch_hevc_eligible, twitch_use_passthrough')
       .eq('user_id', userId),
     supabase
       .from('profiles')
-      .select('streaming_credits, output_settings, has_2k_addon')
+      .select('plan, allotment_tokens, streaming_credits, output_settings, has_2k_addon')
       .eq('id', userId)
       .single(),
   ])
 
   const outputSettings: OutputSettingsMap = (profile?.output_settings as OutputSettingsMap) ?? {}
   const has2kAddon = profile?.has_2k_addon ?? false
-  const credits = parseFloat(profile?.streaming_credits ?? '0') || 0
+  const plan: Plan = profile?.plan === 'subscription' ? 'subscription' : 'payg'
+  const credits = spendableTokens(profile)
 
   const ctx = buildBillingContext(
-    (platforms ?? []) as Array<{ platform: string; orientation: string; enabled: boolean }>,
+    (platforms ?? []) as unknown as BillingPlatformRow[],
     outputSettings,
     has2kAddon,
     true, // compute as-if streaming to show live rate
   )
 
-  const breakdown = buildPricingBreakdown(ctx)
+  const breakdown = buildPricingBreakdown(ctx, plan)
   const remaining = secondsRemaining(credits, breakdown.total_tokens_per_hr)
 
   return Response.json({
     ...breakdown,
     credits,
+    plan,
+    allotment_tokens: parseFloat(String(profile?.allotment_tokens ?? '0')) || 0,
+    purchased_tokens: parseFloat(String(profile?.streaming_credits ?? '0')) || 0,
     estimated_seconds_remaining: remaining,
     has_2k_addon: has2kAddon,
   })

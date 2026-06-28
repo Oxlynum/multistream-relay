@@ -1,5 +1,6 @@
 import { createServerClient } from '@/lib/supabase'
 import { authenticateAgent } from '@/lib/agent-auth'
+import { spendableTokens } from '@/lib/billing'
 
 // Polled by the OBS plugin (user API key) to check GPU state.
 // Also accepts a Supabase session token for the dashboard.
@@ -32,11 +33,13 @@ export async function GET(request: Request) {
 
   const { data: profile } = await supabase
     .from('profiles')
-    .select('streaming_credits')
+    .select('streaming_credits, allotment_tokens')
     .eq('id', userId)
     .single()
 
-  const credits = parseFloat(profile?.streaming_credits ?? '0') || 0
+  // Dock "time left" must reflect total spendable = allotment (subscribers) + purchased,
+  // else a streaming subscriber's remaining time understates by their allotment.
+  const credits = spendableTokens(profile)
 
   if (!instance) {
     return Response.json({

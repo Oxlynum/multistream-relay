@@ -21,6 +21,23 @@ interface StreamSession {
   platforms: string[]
 }
 
+interface SubscriptionState {
+  plan: 'payg' | 'subscription'
+  subscription_status: string | null
+  current_period_end: string | null
+  cancel_at_period_end: boolean
+  allotment_tokens: number
+  purchased_tokens: number
+  spendable_tokens: number
+  monthly_allotment: number
+  allotment_cap: number
+}
+
+function formatDate(iso: string | null) {
+  if (!iso) return '—'
+  return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
+}
+
 function formatDuration(seconds: number | null) {
   if (!seconds) return '—'
   const h = Math.floor(seconds / 3600)
@@ -36,11 +53,17 @@ function CreditsPageInner() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const success = searchParams.get('success') === '1'
+  const subscribed = searchParams.get('subscribed') === '1'
 
   const [token, setToken] = useState<string | null>(null)
   const [balance, setBalance] = useState<number>(0)
   const [sessions, setSessions] = useState<StreamSession[]>([])
   const [earnedKeys, setEarnedKeys] = useState<string[]>([])
+
+  const [sub, setSub] = useState<SubscriptionState | null>(null)
+  const [subscribing, setSubscribing] = useState(false)
+  const [subActionLoading, setSubActionLoading] = useState(false)
+  const [subError, setSubError] = useState<string | null>(null)
 
   const [buyTokens, setBuyTokens] = useState(10)
   const [checkingOut, setCheckingOut] = useState(false)
@@ -67,26 +90,29 @@ function CreditsPageInner() {
       setToken(session.access_token)
       const hdrs = { Authorization: `Bearer ${session.access_token}` }
 
-      const [balRes, refillRes, sessRes, achRes] = await Promise.all([
+      const [balRes, refillRes, subRes, sessRes, achRes] = await Promise.all([
         fetch('/api/credits/balance', { headers: hdrs }),
         fetch('/api/credits/auto-refill', { headers: hdrs }),
+        fetch('/api/subscription', { headers: hdrs }),
         supabase.from('stream_sessions').select('*').eq('user_id', session.user.id).order('started_at', { ascending: false }).limit(20),
         supabase.from('achievements').select('achievement_key').eq('user_id', session.user.id),
       ])
 
       const bal = await balRes.json().catch(() => ({ tokens: 0 }))
       const refill = await refillRes.json().catch(() => ({ enabled: false, hours: 10, has_payment_method: false, card: null }))
+      const subState = subRes.ok ? await subRes.json().catch(() => null) : null
 
       setBalance(bal.tokens ?? 0)
       setRefillEnabled(refill.enabled)
       setRefillTokens(refill.hours ?? 10)
       setHasPaymentMethod(refill.has_payment_method)
       setCard(refill.card ?? null)
+      setSub(subState)
       setSessions(sessRes.data ?? [])
       setEarnedKeys((achRes.data ?? []).map((a: { achievement_key: string }) => a.achievement_key))
     }
     load()
-  }, [router, success])
+  }, [router, success, subscribed])
 
   async function checkout() {
     if (!token) return
@@ -136,7 +162,70 @@ function CreditsPageInner() {
     else setPortalLoading(false)
   }
 
+  const refreshSub = useCallback(async () => {
+    if (!token) return
+    const res = await fetch('/api/subscription', { headers: { Authorization: `Bearer ${token}` } })
+    if (res.ok) setSub(await res.json().catch(() => null))
+  }, [token])
+
+  async function subscribeCheckout() {
+    if (!token) return
+    setSubscribing(true)
+    setSubError(null)
+    const res = await fetch('/api/subscription/checkout', {
+      method: 'POST',
+      headers: authHeaders(),
+    })
+    const body = await res.json().catch(() => ({}))
+    if (res.ok && body.url) {
+      window.location.href = body.url
+      return
+    }
+    if (res.status === 503 || body.error === 'subscription_not_configured') {
+      setSubError('Subscriptions are not available yet.')
+    } else if (res.status === 409 || body.error === 'already_subscribed') {
+      setSubError('You already have an active subscription.')
+      await refreshSub()
+    } else {
+      setSubError(body.message ?? 'Something went wrong.')
+    }
+    setSubscribing(false)
+  }
+
+  async function manageSubBilling() {
+    if (!token) return
+    setSubActionLoading(true)
+    setSubError(null)
+    const res = await fetch('/api/subscription', {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({ action: 'portal' }),
+    })
+    const body = await res.json().catch(() => ({}))
+    if (body.url) { window.location.href = body.url; return }
+    setSubError(body.message ?? body.error ?? 'Could not open billing portal.')
+    setSubActionLoading(false)
+  }
+
+  async function setSubCancel(cancel: boolean) {
+    if (!token) return
+    setSubActionLoading(true)
+    setSubError(null)
+    const res = await fetch('/api/subscription', {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({ action: cancel ? 'cancel' : 'reactivate' }),
+    })
+    const body = await res.json().catch(() => ({}))
+    if (!res.ok) setSubError(body.message ?? body.error ?? 'Something went wrong.')
+    await refreshSub()
+    setSubActionLoading(false)
+  }
+
   const totalCost = `$${(buyTokens * 2).toFixed(2)}`
+  const spendable = sub?.spendable_tokens ?? balance
+  const showSplit = !!sub && sub.allotment_tokens > 0
+  const isSubscriber = sub?.plan === 'subscription'
 
   return (
     <div className="min-h-screen">
@@ -149,12 +238,143 @@ function CreditsPageInner() {
           </div>
         )}
 
+        {subscribed && (
+          <div className="bg-accent-soft/40 border border-accent/40 rounded-xl px-5 py-4 text-accent text-sm">
+            Subscription active! Your monthly token allotment is on the way.
+          </div>
+        )}
+
         {/* Balance */}
         <div className="bg-surface border border-line rounded-2xl p-6">
           <div className="text-sm text-ink-muted mb-1">Token balance</div>
-          <div className="text-4xl font-bold font-mono">{formatTokens(balance)}</div>
-          <div className="text-xs text-ink-faint mt-1">1 token = $2 · base 1 tkn/hr while live</div>
+          <div className="text-4xl font-bold font-mono">{formatTokens(spendable)}</div>
+          {showSplit ? (
+            <div className="text-xs text-ink-faint mt-1">
+              {formatTokens(sub!.allotment_tokens)} allotment + {formatTokens(sub!.purchased_tokens)} purchased
+            </div>
+          ) : (
+            <div className="text-xs text-ink-faint mt-1">1 token = $2 · base 1 tkn/hr while live</div>
+          )}
         </div>
+
+        {/* Subscription */}
+        {sub && !isSubscriber && (
+          <div className="bg-surface border border-line rounded-2xl p-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="font-semibold">SlimCast Pro</div>
+                <div className="text-xs text-ink-faint mt-0.5">Monthly subscription</div>
+              </div>
+              <div className="text-2xl font-bold font-mono">
+                $20<span className="text-sm text-ink-faint font-normal">/mo</span>
+              </div>
+            </div>
+
+            <ul className="text-sm text-ink-muted space-y-1.5">
+              <li className="flex items-start gap-2">
+                <span className="text-accent">✓</span>
+                <span>{formatTokens(sub.monthly_allotment)} every month — unused tokens roll over, capped at {formatTokens(sub.allotment_cap)}</span>
+              </li>
+              <li className="flex items-start gap-2">
+                <span className="text-accent">✓</span>
+                <span>Cheaper passthrough — 0.05 tkn/hr (vs 0.1 on pay-as-you-go)</span>
+              </li>
+              <li className="flex items-start gap-2">
+                <span className="text-accent">✓</span>
+                <span>Top up anytime — purchased tokens stack on your allotment and never expire</span>
+              </li>
+            </ul>
+
+            {subError && (
+              <div className="text-amber-400 text-xs bg-amber-950/20 border border-amber-800/60 rounded-lg px-3 py-2">
+                {subError}
+              </div>
+            )}
+
+            <button
+              onClick={subscribeCheckout}
+              disabled={subscribing}
+              className="w-full bg-accent hover:bg-accent-strong text-base disabled:opacity-40 px-6 py-2.5 rounded-lg text-sm font-semibold transition-colors"
+            >
+              {subscribing ? 'Redirecting…' : 'Subscribe — $20/mo'}
+            </button>
+          </div>
+        )}
+
+        {sub && isSubscriber && (
+          <div className="bg-surface border border-line rounded-2xl p-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="font-semibold">SlimCast Pro</div>
+                <div className="text-xs text-ink-faint mt-0.5">$20/mo subscription</div>
+              </div>
+              <span className={`text-xs font-medium px-2.5 py-1 rounded-full ${
+                sub.subscription_status === 'active' || sub.subscription_status === 'trialing'
+                  ? 'bg-accent-soft/40 text-accent border border-accent/40'
+                  : sub.subscription_status === 'past_due'
+                  ? 'bg-amber-950/20 text-amber-400 border border-amber-800/60'
+                  : 'bg-base text-ink-faint border border-line'
+              }`}>
+                {capitalize((sub.subscription_status ?? 'unknown').replace(/_/g, ' '))}
+              </span>
+            </div>
+
+            <div className="space-y-2 text-sm">
+              <div className="flex items-center justify-between">
+                <span className="text-ink-muted">Monthly allotment</span>
+                <span className="font-mono">{formatTokens(sub.monthly_allotment)}/mo · cap {formatTokens(sub.allotment_cap)}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-ink-muted">Allotment remaining</span>
+                <span className="font-mono">{formatTokens(sub.allotment_tokens)}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-ink-muted">{sub.cancel_at_period_end ? 'Cancels on' : 'Renews on'}</span>
+                <span className="font-mono">{formatDate(sub.current_period_end)}</span>
+              </div>
+            </div>
+
+            {sub.cancel_at_period_end && (
+              <div className="text-amber-400 text-xs bg-amber-950/20 border border-amber-800/60 rounded-lg px-3 py-2">
+                Set to cancel on {formatDate(sub.current_period_end)}. You keep your allotment and can keep streaming until then.
+              </div>
+            )}
+
+            {subError && (
+              <div className="text-amber-400 text-xs bg-amber-950/20 border border-amber-800/60 rounded-lg px-3 py-2">
+                {subError}
+              </div>
+            )}
+
+            <div className="flex items-center gap-3 pt-1 text-sm">
+              <button
+                onClick={manageSubBilling}
+                disabled={subActionLoading}
+                className="text-accent hover:text-accent-strong disabled:opacity-40 transition-colors"
+              >
+                Manage billing ↗
+              </button>
+              <span className="text-line-strong">·</span>
+              {sub.cancel_at_period_end ? (
+                <button
+                  onClick={() => setSubCancel(false)}
+                  disabled={subActionLoading}
+                  className="text-accent hover:text-accent-strong disabled:opacity-40 transition-colors"
+                >
+                  {subActionLoading ? 'Working…' : 'Resume subscription'}
+                </button>
+              ) : (
+                <button
+                  onClick={() => setSubCancel(true)}
+                  disabled={subActionLoading}
+                  className="text-ink-faint hover:text-ink disabled:opacity-40 transition-colors"
+                >
+                  {subActionLoading ? 'Working…' : 'Cancel subscription'}
+                </button>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* Buy tokens */}
         <div className="bg-surface border border-line rounded-2xl p-6 space-y-5">

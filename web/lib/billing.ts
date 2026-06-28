@@ -1,17 +1,43 @@
-// Pricing model: pay-per-use streaming credits stored as tokens.
-//   1 token = 1 hour of streaming at base rate = $2.00
+// Pricing model: streaming credits stored as tokens. 1 token = 1 hour of base GPU
+// transcode = $2.00 (PAYG / buy-more base rate).
 //
-// Base 1 token/hr covers:
-//   - The first transcoded platform (any orientation) OR a passthrough
+// Two-tier (Phase 3):
+//   • PAYG          — meter everything against the purchased balance (profiles.streaming_credits).
+//   • SUBSCRIPTION  — a monthly token allotment (rolls over, capped) spent before the purchased
+//                     balance, plus cheaper passthrough.
 //
-// Adders (while streaming):
-//   +0.2 token/hr — each additional landscape platform beyond the first
-//   +0.2 token/hr — each portrait platform going to a DIFFERENT platform than landscape
-//   +0.1 token/hr — each portrait platform ALSO getting landscape ("dual format")
-//   +0.5 token/hr — any output at 1440p (requires has_2k_addon)
-//   +0.5 token/hr — Pro streaming (requiredNvencSessions > 3 → professional GPU required)
+// Burn rate (tokens/hr), single source of truth — billingLineItems():
+//   PASSTHROUGH GROUP (YouTube HLS + eligible-Twitch eRTMP + future), flat, once:
+//     +0.05 token/hr  subscriber    (cheaper — but never free: a 24/7 idle passthrough still
+//     +0.10 token/hr  PAYG           burns our VPS bandwidth, so it must cost something)
+//   TRANSCODE (NVENC), when present:
+//     +1.0  token/hr  base (first transcode output, any orientation)
+//     +0.2  token/hr  each additional landscape transcode beyond the first
+//     +0.2  token/hr  each portrait platform going to a DIFFERENT platform than landscape
+//     +0.1  token/hr  each portrait platform ALSO getting landscape ("dual format")
+//     +0.5  token/hr  any output at 1440p (requires has_2k_addon)
+//     +0.5  token/hr  Pro streaming (requiredNvencSessions > 3 → professional GPU required)
 
 import { requiredNvencSessions, type UserOutputConfig } from '@/lib/nvenc-utils'
+
+/** Billing plan. Mirrors profiles.plan. */
+export type Plan = 'payg' | 'subscription'
+
+/** Dollars per token (PAYG / buy-more base rate). */
+export const TOKEN_PRICE_USD = 2.0
+
+/** Flat passthrough-group rate (tokens/hr), by plan. Not per-platform. */
+export const PASSTHROUGH_TOKENS_PER_HR: Record<Plan, number> = {
+  subscription: 0.05,
+  payg: 0.1,
+}
+
+/** Base transcode rate (tokens/hr) — covers the first transcode output. */
+export const TRANSCODE_BASE_TOKENS_PER_HR = 1.0
+
+/** Monthly subscription allotment + rollover cap (tokens). Editable via env. */
+export const SUB_ALLOTMENT_TOKENS = Number(process.env.SLIMCAST_SUB_ALLOTMENT_TOKENS ?? 15)
+export const SUB_ALLOTMENT_CAP = Number(process.env.SLIMCAST_SUB_ALLOTMENT_CAP ?? 30)
 
 export interface OutputStatus {
   name: string
@@ -30,103 +56,26 @@ export interface OutputSettings {
 /** Platform output settings keyed by platform name. */
 export type OutputSettingsMap = Record<string, OutputSettings>
 
+/** Minimal platform row for billing classification (mirror of classifyMode inputs). */
+export interface BillingPlatformRow {
+  platform: string
+  orientation: string
+  enabled: boolean
+  twitch_hevc_eligible?: boolean | null
+  twitch_use_passthrough?: boolean | null
+}
+
 export interface BillingContext {
-  /** Platforms in a landscape transcode group (state=running). YouTube is excluded — it's passthrough. */
+  /** Platforms in a landscape TRANSCODE group (state=running). */
   landscapePlatforms: string[]
-  /** Platforms in a portrait transcode group (state=running). */
+  /** Platforms in a portrait TRANSCODE group (state=running). */
   portraitPlatforms: string[]
-  /** Platforms receiving HEVC passthrough (currently always YouTube landscape). */
+  /** Platforms on a GPU-free passthrough path: YouTube HLS + eligible-Twitch eRTMP. */
   passthroughPlatforms: string[]
   /** True if any running platform is configured for 1440p AND has_2k_addon is active. */
   has1440p: boolean
   /** True when the user's output mix requires >3 NVENC sessions (professional GPU). */
   needsProfessionalGpu: boolean
-}
-
-/**
- * Compute burn rate in tokens/hr from a billing context.
- * Returns 0 when not streaming.
- */
-export function computeBurnRate(ctx: BillingContext, streaming: boolean): number {
-  if (!streaming) return 0
-
-  const total = ctx.landscapePlatforms.length + ctx.portraitPlatforms.length + ctx.passthroughPlatforms.length
-  if (total === 0) return 0
-
-  let rate = 1.0 // base: first output covered
-
-  const landscapeSet = new Set(ctx.landscapePlatforms)
-
-  // Extra landscape transcodes beyond the first
-  rate += Math.max(0, ctx.landscapePlatforms.length - 1) * 0.2
-
-  // Portrait platforms: dual-format (+0.1) if same platform as landscape, else (+0.2)
-  for (const p of ctx.portraitPlatforms) {
-    rate += landscapeSet.has(p) ? 0.1 : 0.2
-  }
-
-  // 1440p add-on
-  if (ctx.has1440p) rate += 0.5
-
-  // Pro streaming surcharge (4+ simultaneous NVENC sessions)
-  if (ctx.needsProfessionalGpu) rate += 0.5
-
-  return Math.round(rate * 1000) / 1000
-}
-
-/**
- * Build a BillingContext from the active platform configuration.
- * Used both in the heartbeat billing route and the pricing API.
- */
-export function buildBillingContext(
-  platforms: Array<{ platform: string; orientation: string; enabled: boolean }>,
-  outputSettings: OutputSettingsMap,
-  has2kAddon: boolean,
-  streaming: boolean,
-  // Billing fairness: when the pod's budget controller has throttled the effective
-  // resolution below 1440p, the user isn't getting 2K, so we don't charge the +0.5
-  // 2K adder for that interval — even though their config still says 1440p. The
-  // status route passes true once throttle_tier crosses into the ≤1080p tiers.
-  resolutionThrottledBelow1440 = false,
-): BillingContext {
-  if (!streaming) {
-    return { landscapePlatforms: [], portraitPlatforms: [], passthroughPlatforms: [], has1440p: false, needsProfessionalGpu: false }
-  }
-
-  const enabled = platforms.filter(p => p.enabled)
-
-  const landscapePlatforms: string[] = []
-  const portraitPlatforms: string[] = []
-  const passthroughPlatforms: string[] = []
-
-  for (const p of enabled) {
-    const isPortrait = p.orientation === 'portrait'
-    // YouTube landscape → HEVC passthrough (not a transcode, doesn't count as landscape transcode)
-    if (p.platform === 'youtube' && !isPortrait) {
-      passthroughPlatforms.push(p.platform)
-    } else if (isPortrait) {
-      portraitPlatforms.push(p.platform)
-    } else {
-      landscapePlatforms.push(p.platform)
-    }
-  }
-
-  const allRunning = [...landscapePlatforms, ...portraitPlatforms, ...passthroughPlatforms]
-  const has1440p =
-    has2kAddon &&
-    !resolutionThrottledBelow1440 &&
-    allRunning.some(p => outputSettings[p]?.resolution === '1440p')
-
-  const userOutputs: UserOutputConfig[] = enabled.map(p => ({
-    orientation: p.orientation,
-    resolution: outputSettings[p.platform]?.resolution ?? '1080p',
-    bitrate_kbps: outputSettings[p.platform]?.bitrate_kbps ?? (p.orientation === 'portrait' ? 4000 : 6000),
-    mode: (p.platform === 'youtube' && p.orientation !== 'portrait') ? 'passthrough' : 'transcode',
-    enabled: true,
-  }))
-  const needsProfessionalGpu = requiredNvencSessions(userOutputs) > 3
-
-  return { landscapePlatforms, portraitPlatforms, passthroughPlatforms, has1440p, needsProfessionalGpu }
 }
 
 /** Per-line-item breakdown for the pricing UI. */
@@ -143,74 +92,151 @@ export interface PricingBreakdown {
   total_dollars_per_hr: number
 }
 
-/** Build a human-readable pricing breakdown from a billing context. */
-export function buildPricingBreakdown(ctx: BillingContext): PricingBreakdown {
+// Passthrough = GPU-free. Mirrors agent-config.classifyMode WITHOUT importing it (keeps
+// billing dependency-free + avoids a value import cycle). Keep the two in sync.
+function isPassthroughPlatform(p: BillingPlatformRow): boolean {
+  const landscape = p.orientation !== 'portrait'
+  if (p.platform === 'youtube' && landscape) return true
+  if (p.platform === 'twitch' && landscape && p.twitch_hevc_eligible && (p.twitch_use_passthrough ?? true)) return true
+  return false
+}
+
+/**
+ * Build a BillingContext from the active platform configuration.
+ * Used by the heartbeat billing routes (pod + hub) and the pricing API.
+ */
+export function buildBillingContext(
+  platforms: BillingPlatformRow[],
+  outputSettings: OutputSettingsMap,
+  has2kAddon: boolean,
+  streaming: boolean,
+  // Billing fairness: when the budget controller has throttled the effective resolution
+  // below 1440p, the user isn't getting 2K, so we don't charge the +0.5 2K adder for that
+  // interval — even though their config still says 1440p.
+  resolutionThrottledBelow1440 = false,
+): BillingContext {
+  if (!streaming) {
+    return { landscapePlatforms: [], portraitPlatforms: [], passthroughPlatforms: [], has1440p: false, needsProfessionalGpu: false }
+  }
+
+  const enabled = platforms.filter(p => p.enabled)
+
+  const landscapePlatforms: string[] = []
+  const portraitPlatforms: string[] = []
+  const passthroughPlatforms: string[] = []
+
+  for (const p of enabled) {
+    if (isPassthroughPlatform(p)) {
+      passthroughPlatforms.push(p.platform)
+    } else if (p.orientation === 'portrait') {
+      portraitPlatforms.push(p.platform)
+    } else {
+      landscapePlatforms.push(p.platform)
+    }
+  }
+
+  const allRunning = [...landscapePlatforms, ...portraitPlatforms, ...passthroughPlatforms]
+  const has1440p =
+    has2kAddon &&
+    !resolutionThrottledBelow1440 &&
+    allRunning.some(p => outputSettings[p]?.resolution === '1440p')
+
+  const userOutputs: UserOutputConfig[] = enabled.map(p => ({
+    orientation: p.orientation,
+    resolution: outputSettings[p.platform]?.resolution ?? '1080p',
+    bitrate_kbps: outputSettings[p.platform]?.bitrate_kbps ?? (p.orientation === 'portrait' ? 4000 : 6000),
+    mode: isPassthroughPlatform(p) ? 'passthrough' : 'transcode',
+    enabled: true,
+  }))
+  const needsProfessionalGpu = requiredNvencSessions(userOutputs) > 3
+
+  return { landscapePlatforms, portraitPlatforms, passthroughPlatforms, has1440p, needsProfessionalGpu }
+}
+
+/**
+ * THE single source of truth for billing math. Both computeBurnRate (deduction) and
+ * buildPricingBreakdown (UI) derive from this exact item list, so they can never drift.
+ */
+export function billingLineItems(ctx: BillingContext, plan: Plan): PricingLineItem[] {
   const items: PricingLineItem[] = []
 
-  const all = [
-    ...ctx.landscapePlatforms,
-    ...ctx.passthroughPlatforms,
-    ...ctx.portraitPlatforms,
-  ]
+  const landscape = ctx.landscapePlatforms
+  const portrait = ctx.portraitPlatforms
+  const hasTranscode = landscape.length + portrait.length > 0
+  const hasPassthrough = ctx.passthroughPlatforms.length > 0
 
-  if (all.length === 0) {
-    return { line_items: [], total_tokens_per_hr: 0, total_dollars_per_hr: 0 }
+  if (hasTranscode) {
+    const landscapeSet = new Set(landscape)
+
+    // Base covers the first transcode output (landscape preferred, else portrait).
+    if (landscape.length > 0) {
+      items.push({ platform: landscape[0], label: `${landscape[0]} — landscape (base)`, detail: 'Base transcode', tokens_per_hr: TRANSCODE_BASE_TOKENS_PER_HR })
+    } else {
+      items.push({ platform: portrait[0], label: `${portrait[0]} — portrait (base)`, detail: 'Base transcode', tokens_per_hr: TRANSCODE_BASE_TOKENS_PER_HR })
+    }
+
+    // Additional landscape transcodes beyond the first.
+    for (let i = 1; i < landscape.length; i++) {
+      items.push({ platform: landscape[i], label: `${landscape[i]} — landscape`, detail: 'Extra landscape output', tokens_per_hr: 0.2 })
+    }
+
+    // Portraits: each is additional unless it IS the base (only when there's no landscape).
+    const portraitStart = landscape.length > 0 ? 0 : 1
+    for (let i = portraitStart; i < portrait.length; i++) {
+      const p = portrait[i]
+      // Dual-format (+0.1): the SAME platform streamed in BOTH orientations. Reserved tier
+      // — today platform_connections is UNIQUE(user_id, platform) with one orientation, so
+      // a platform can't appear in both buckets and this stays 0.2. Kept so the rate is
+      // already correct if/when dual-orientation output ships (no billing change needed).
+      const isDual = landscapeSet.has(p)
+      items.push({
+        platform: p,
+        label: `${p} — ${isDual ? 'dual format' : 'portrait'}`,
+        detail: isDual ? 'Same platform, dual format' : 'Portrait output',
+        tokens_per_hr: isDual ? 0.1 : 0.2,
+      })
+    }
+
+    if (ctx.has1440p) {
+      items.push({ platform: '_2k', label: '2K (1440p) add-on', detail: 'Any output at 1440p', tokens_per_hr: 0.5 })
+    }
+    if (ctx.needsProfessionalGpu) {
+      items.push({ platform: '_pro', label: 'Pro streaming', detail: '>3 NVENC sessions', tokens_per_hr: 0.5 })
+    }
   }
 
-  const landscapeSet = new Set(ctx.landscapePlatforms)
-
-  // Base covers first platform
-  let baseLabel = ''
-  if (ctx.landscapePlatforms.length > 0) {
-    baseLabel = `${ctx.landscapePlatforms[0]} — landscape (base)`
-  } else if (ctx.passthroughPlatforms.length > 0) {
-    baseLabel = `${ctx.passthroughPlatforms[0]} — passthrough (base)`
-  } else if (ctx.portraitPlatforms.length > 0) {
-    baseLabel = `${ctx.portraitPlatforms[0]} — portrait (base)`
-  }
-
-  items.push({ platform: all[0], label: baseLabel, detail: 'Base rate', tokens_per_hr: 1.0 })
-
-  // Passthrough platforms (free after base)
-  for (const p of ctx.passthroughPlatforms) {
-    if (p === all[0]) continue
-    items.push({ platform: p, label: `${p} — passthrough`, detail: 'Included in base', tokens_per_hr: 0 })
-  }
-
-  // Extra landscape platforms
-  for (let i = 1; i < ctx.landscapePlatforms.length; i++) {
-    const p = ctx.landscapePlatforms[i]
-    items.push({ platform: p, label: `${p} — landscape`, detail: 'Extra landscape output', tokens_per_hr: 0.2 })
-  }
-
-  // Portrait platforms
-  for (const p of ctx.portraitPlatforms) {
-    if (p === all[0]) continue // already counted in base
-    const isDual = landscapeSet.has(p)
+  // Passthrough group: ONE flat charge regardless of how many passthrough platforms.
+  if (hasPassthrough) {
+    const rate = PASSTHROUGH_TOKENS_PER_HR[plan]
     items.push({
-      platform: p,
-      label: `${p} — ${isDual ? 'dual format' : 'portrait'}`,
-      detail: isDual ? 'Same platform, dual format' : 'Portrait output',
-      tokens_per_hr: isDual ? 0.1 : 0.2,
+      platform: '_passthrough',
+      label: `${ctx.passthroughPlatforms.join(' + ')} — passthrough`,
+      detail: plan === 'subscription' ? 'Passthrough (subscriber rate)' : 'Passthrough',
+      tokens_per_hr: rate,
     })
   }
 
-  // 1440p add-on
-  if (ctx.has1440p) {
-    items.push({ platform: '_2k', label: '2K (1440p) add-on', detail: 'Any output at 1440p', tokens_per_hr: 0.5 })
-  }
+  return items
+}
 
-  // Pro streaming surcharge
-  if (ctx.needsProfessionalGpu) {
-    items.push({ platform: '_pro', label: 'Pro streaming', detail: 'Your output mix', tokens_per_hr: 0.5 })
-  }
+/**
+ * Compute burn rate in tokens/hr. Returns 0 when not streaming. Plan-aware (passthrough
+ * is cheaper for subscribers). Sums billingLineItems so it can never diverge from the UI.
+ */
+export function computeBurnRate(ctx: BillingContext, streaming: boolean, plan: Plan = 'payg'): number {
+  if (!streaming) return 0
+  const total = billingLineItems(ctx, plan).reduce((s, i) => s + i.tokens_per_hr, 0)
+  return Math.round(total * 1000) / 1000
+}
 
+/** Build a human-readable pricing breakdown from a billing context. */
+export function buildPricingBreakdown(ctx: BillingContext, plan: Plan = 'payg'): PricingBreakdown {
+  const items = billingLineItems(ctx, plan)
   const total = items.reduce((s, i) => s + i.tokens_per_hr, 0)
-
   return {
     line_items: items,
     total_tokens_per_hr: Math.round(total * 1000) / 1000,
-    total_dollars_per_hr: Math.round(total * 2 * 1000) / 1000,
+    total_dollars_per_hr: Math.round(total * TOKEN_PRICE_USD * 1000) / 1000,
   }
 }
 
@@ -220,12 +246,17 @@ export function secondsRemaining(credits: number, burnRate: number): number {
   return Math.floor((credits / burnRate) * 3600)
 }
 
+/** Total spendable tokens = rolling allotment (subscribers) + purchased balance. */
+export function spendableTokens(profile: { allotment_tokens?: number | string | null; streaming_credits?: number | string | null } | null): number {
+  const allot = parseFloat(String(profile?.allotment_tokens ?? '0')) || 0
+  const purchased = parseFloat(String(profile?.streaming_credits ?? '0')) || 0
+  return Math.round((allot + purchased) * 1000) / 1000
+}
+
 /**
- * Credit a user for a Stripe payment exactly once. Idempotent on paymentId via
- * a single-transaction Postgres function (credit_payment_once): inserts a
- * credited_payments row + bumps the balance together, deduped by PK. Safe to
- * call from both the webhook and the auto-refill path for the same payment.
- * Returns true if it credited now, false if already credited.
+ * Credit a user for a Stripe payment exactly once. Idempotent on paymentId via a
+ * single-transaction Postgres function (credit_payment_once). Tops up the PURCHASED
+ * balance (streaming_credits). Returns true if it credited now, false if already credited.
  */
 export async function creditPaymentOnce(
   paymentId: string,
@@ -241,6 +272,50 @@ export async function creditPaymentOnce(
   })
   if (error) {
     console.error('[billing] credit_payment_once failed:', error.message)
+    return false
+  }
+  return data === true
+}
+
+/**
+ * Atomically deduct tokens (allotment first, then purchased) under a row lock.
+ * Returns the new total spendable, or null on error / missing user.
+ */
+export async function deductTokens(userId: string, amount: number): Promise<number | null> {
+  if (!(amount > 0)) return null
+  const { createServerClient } = await import('@/lib/supabase')
+  const supabase = createServerClient()
+  const { data, error } = await supabase.rpc('deduct_tokens', {
+    p_user_id: userId,
+    p_amount: amount,
+  })
+  if (error) {
+    console.error('[billing] deduct_tokens failed:', error.message)
+    return null
+  }
+  return data === null || data === undefined ? null : Number(data)
+}
+
+/**
+ * Grant the monthly subscription allotment exactly once per Stripe invoice (rollover,
+ * capped). Returns true if granted now, false if already granted (idempotent).
+ */
+export async function grantSubscriptionAllotment(
+  invoiceId: string,
+  userId: string,
+  tokens: number,
+  cap: number,
+): Promise<boolean> {
+  const { createServerClient } = await import('@/lib/supabase')
+  const supabase = createServerClient()
+  const { data, error } = await supabase.rpc('grant_subscription_allotment', {
+    p_invoice_id: invoiceId,
+    p_user_id: userId,
+    p_tokens: tokens,
+    p_cap: cap,
+  })
+  if (error) {
+    console.error('[billing] grant_subscription_allotment failed:', error.message)
     return false
   }
   return data === true
@@ -262,4 +337,3 @@ export function formatTokens(tokens: number): string {
   if (tokens >= 10)  return `${tokens.toFixed(1)} tkn`
   return `${tokens.toFixed(3)} tkn`
 }
-

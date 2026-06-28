@@ -1,8 +1,32 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { stripe } from '@/lib/stripe'
 import { createServerClient } from '@/lib/supabase'
-import { creditPaymentOnce } from '@/lib/billing'
+import { creditPaymentOnce, grantSubscriptionAllotment, SUB_ALLOTMENT_TOKENS, SUB_ALLOTMENT_CAP } from '@/lib/billing'
+import type { SupabaseClient } from '@supabase/supabase-js'
 import Stripe from 'stripe'
+
+// Map a Stripe event back to our user: prefer the metadata user_id we stamp on the
+// subscription/session, fall back to looking the profile up by stripe_customer_id.
+async function resolveUserId(
+  supabase: SupabaseClient,
+  metadataUserId: string | undefined | null,
+  customerId: string | undefined | null,
+): Promise<string | null> {
+  if (metadataUserId) return metadataUserId
+  if (customerId) {
+    const { data } = await supabase
+      .from('profiles')
+      .select('id')
+      .eq('stripe_customer_id', customerId)
+      .maybeSingle()
+    return (data?.id as string) ?? null
+  }
+  return null
+}
+
+// Subscription statuses that still grant subscriber benefits (cheaper passthrough +
+// future allotment grants). past_due is a short payment-retry grace, not a downgrade.
+const SUBSCRIBER_STATUSES = new Set(['active', 'trialing', 'past_due'])
 
 export async function POST(req: NextRequest) {
   const body = await req.text()
@@ -38,6 +62,19 @@ export async function POST(req: NextRequest) {
               .update({ stripe_payment_method_id: si.payment_method as string })
               .eq('id', userId)
           }
+        }
+        break
+      }
+
+      // Subscription checkout completion is handled by customer.subscription.* +
+      // invoice.paid below — nothing to credit here.
+      if (session.mode === 'subscription') {
+        if (userId && session.customer) {
+          await supabase
+            .from('profiles')
+            .update({ stripe_customer_id: session.customer as string })
+            .eq('id', userId)
+            .is('stripe_customer_id', null)
         }
         break
       }
@@ -100,6 +137,101 @@ export async function POST(req: NextRequest) {
           .from('profiles')
           .update({ auto_refill_enabled: false })
           .eq('id', userId)
+      }
+      break
+    }
+
+    // ── Subscription lifecycle (Phase 3) ─────────────────────────────────────
+    case 'customer.subscription.created':
+    case 'customer.subscription.updated': {
+      // Defensive view — the dahlia API shapes some of these differently.
+      const sub = event.data.object as unknown as {
+        id: string
+        status: string
+        customer?: string | { id?: string }
+        metadata?: Record<string, string>
+        current_period_end?: number
+        items?: { data?: Array<{ price?: { id?: string }; current_period_end?: number }> }
+      }
+      const customerId = typeof sub.customer === 'string' ? sub.customer : sub.customer?.id
+      const userId = await resolveUserId(supabase, sub.metadata?.user_id, customerId)
+      if (!userId) break
+
+      const isSubscriber = SUBSCRIBER_STATUSES.has(sub.status)
+      const priceId = sub.items?.data?.[0]?.price?.id ?? null
+      const periodEndUnix = sub.current_period_end ?? sub.items?.data?.[0]?.current_period_end ?? null
+
+      await supabase
+        .from('profiles')
+        .update({
+          plan: isSubscriber ? 'subscription' : 'payg',
+          subscription_status: sub.status,
+          subscription_price_id: priceId,
+          subscription_current_period_end: periodEndUnix ? new Date(periodEndUnix * 1000).toISOString() : null,
+          stripe_subscription_id: sub.id,
+          ...(customerId ? { stripe_customer_id: customerId } : {}),
+        })
+        .eq('id', userId)
+      break
+    }
+
+    case 'customer.subscription.deleted': {
+      const sub = event.data.object as unknown as {
+        id: string
+        customer?: string | { id?: string }
+        metadata?: Record<string, string>
+      }
+      const customerId = typeof sub.customer === 'string' ? sub.customer : sub.customer?.id
+      const userId = await resolveUserId(supabase, sub.metadata?.user_id, customerId)
+      if (!userId) break
+      // Revert to PAYG but KEEP any already-granted allotment (they paid for it).
+      await supabase
+        .from('profiles')
+        .update({ plan: 'payg', subscription_status: 'canceled', stripe_subscription_id: null })
+        .eq('id', userId)
+      break
+    }
+
+    case 'invoice.paid': {
+      const inv = event.data.object as unknown as {
+        id?: string
+        billing_reason?: string | null
+        subscription?: string | { id?: string } | null
+        customer?: string | { id?: string } | null
+        parent?: { subscription_details?: { subscription?: string } }
+      }
+      const subId =
+        (typeof inv.subscription === 'string' ? inv.subscription : inv.subscription?.id) ??
+        inv.parent?.subscription_details?.subscription ??
+        null
+      if (!subId || !inv.id) break // not a subscription invoice → no allotment
+
+      // Only the initial + recurring cycle invoices grant the monthly allotment. The
+      // allowlist is authoritative: an empty/missing/unknown reason safely SKIPS the grant
+      // (don't drop the negation's guard — `reason &&` would let an empty reason through).
+      const reason = inv.billing_reason ?? ''
+      if (!['subscription_create', 'subscription_cycle'].includes(reason)) break
+
+      let metaUserId: string | undefined
+      try {
+        const sub = await stripe.subscriptions.retrieve(subId)
+        metaUserId = sub.metadata?.user_id
+      } catch { /* fall back to customer lookup */ }
+      const customerId = typeof inv.customer === 'string' ? inv.customer : inv.customer?.id
+      const userId = await resolveUserId(supabase, metaUserId, customerId)
+      if (!userId) break
+
+      // Idempotent on the invoice id: rollover-capped monthly allotment grant.
+      await grantSubscriptionAllotment(inv.id, userId, SUB_ALLOTMENT_TOKENS, SUB_ALLOTMENT_CAP)
+      break
+    }
+
+    case 'invoice.payment_failed': {
+      const inv = event.data.object as unknown as { customer?: string | { id?: string } | null }
+      const customerId = typeof inv.customer === 'string' ? inv.customer : inv.customer?.id
+      const userId = await resolveUserId(supabase, undefined, customerId)
+      if (userId) {
+        await supabase.from('profiles').update({ subscription_status: 'past_due' }).eq('id', userId)
       }
       break
     }
