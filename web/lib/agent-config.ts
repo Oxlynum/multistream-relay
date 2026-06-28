@@ -168,3 +168,47 @@ export function buildVpsConfig(
 ): AgentOutput[] {
   return buildAgentOutputs(platforms, outputSettings, groups).filter(o => isPassthroughMode(o.mode))
 }
+
+// ── GPU backend config (Phase 2) ─────────────────────────────────────────────
+// The GPU encodes ONCE per orientation (architecture #7), then returns one stream
+// per orientation to the VPS. So the GPU only needs the per-orientation ENCODE specs
+// — never a platform name, url, or key. KEY-FREE BY CONSTRUCTION: this builds from
+// the raw platform rows directly and NEVER calls decryptSecret/buildAgentOutputs
+// (landmine #2 — keys must never reach the GPU). The VPS holds the keys and does the
+// per-platform tee fan-out of the GPU's return.
+export interface GpuGroupSpec {
+  orientation: 'landscape' | 'portrait'
+  resolution: string
+  fps: number
+  bitrate_kbps: number
+}
+
+export function buildGpuConfig(
+  platforms: PlatformRow[],
+  outputSettings?: OutputSettingsMap,
+  groups?: GroupBitrates,
+): GpuGroupSpec[] {
+  const cap = { landscape: groups?.landscape ?? 6000, portrait: groups?.portrait ?? 4000 }
+  const transcode = platforms.filter(p =>
+    p.enabled &&
+    classifyMode(p.platform, p.orientation ?? 'landscape', p.twitch_hevc_eligible, p.twitch_use_passthrough) === 'transcode',
+  )
+  const resRank = (r?: string) => (r === '1440p' ? 3 : r === '1080p' ? 2 : r === '720p' ? 1 : 2)
+  const specs: GpuGroupSpec[] = []
+  for (const orientation of ['landscape', 'portrait'] as const) {
+    const rows = transcode.filter(p => (p.orientation === 'portrait' ? 'portrait' : 'landscape') === orientation)
+    if (rows.length === 0) continue
+    // A tee group shares one encode: bitrate = the weakest platform (group min),
+    // resolution = the most restrictive (smallest), fps = the smallest.
+    const bitrate = Math.min(
+      ...rows.map(p => outputSettings?.[p.platform]?.bitrate_kbps ?? p.bitrate_kbps ?? cap[orientation]),
+      cap[orientation],
+    )
+    const resolution = rows
+      .map(p => outputSettings?.[p.platform]?.resolution ?? '1080p')
+      .reduce((min, r) => (resRank(r) < resRank(min) ? r : min), '1440p')
+    const fps = Math.min(...rows.map(p => p.fps ?? 60))
+    specs.push({ orientation, resolution, fps, bitrate_kbps: bitrate })
+  }
+  return specs
+}

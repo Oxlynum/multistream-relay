@@ -1,7 +1,7 @@
 import type { NextRequest } from 'next/server'
 import { authenticateNode } from '@/lib/agent-auth'
 import { createServerClient } from '@/lib/supabase'
-import { buildVpsConfig, type PlatformRow } from '@/lib/agent-config'
+import { buildVpsConfig, buildAgentOutputs, type PlatformRow } from '@/lib/agent-config'
 import type { OutputSettingsMap } from '@/lib/billing'
 
 // VPS-as-the-Hub: a multi-tenant hub polls this every ~10s to learn the FULL set of
@@ -23,7 +23,7 @@ export async function GET(request: NextRequest) {
   // Sessions attached to this hub that should be serving.
   const { data: sessions } = await supabase
     .from('gpu_instances')
-    .select('id, user_id, ingest_key, srt_passphrase')
+    .select('id, user_id, ingest_key, srt_passphrase, needs_transcode, gpu_node_id, bridge_secret')
     .eq('vps_hub_id', node.hubId)
     .in('status', ['running', 'provisioning'])
 
@@ -60,14 +60,49 @@ export async function GET(request: NextRequest) {
   }
   const profileById = new Map((profiles ?? []).map(pr => [pr.id, pr]))
 
+  // For transcode tenants, fetch their gpu_backend node so we can hand the VPS the
+  // bridge target (only once the GPU is 'ready' — else the VPS has no forward target
+  // and just keeps serving passthrough).
+  const gpuNodeIds = tenants.map(t => t.gpu_node_id).filter(Boolean) as string[]
+  const gpuNodeById = new Map<string, { ip_address: string | null; bridge_in_port: number | null; phase: string | null }>()
+  if (gpuNodeIds.length) {
+    const { data: gpuNodes } = await supabase
+      .from('relay_nodes')
+      .select('id, ip_address, bridge_in_port, phase')
+      .in('id', gpuNodeIds)
+    for (const n of gpuNodes ?? []) gpuNodeById.set(n.id as string, n)
+  }
+
   const streams = tenants.map(t => {
     const prof = profileById.get(t.user_id)
     const outputSettings: OutputSettingsMap = (prof?.output_settings as OutputSettingsMap) ?? {}
-    const outputs = buildVpsConfig(
-      platformsByUser.get(t.user_id) ?? [],
-      outputSettings,
-      { landscape: prof?.landscape_bitrate_kbps ?? 6000, portrait: prof?.portrait_bitrate_kbps ?? 4000 },
-    ).filter(o => o.enabled)
+    const groupCaps = { landscape: prof?.landscape_bitrate_kbps ?? 6000, portrait: prof?.portrait_bitrate_kbps ?? 4000 }
+    const platRows = platformsByUser.get(t.user_id) ?? []
+    const outputs = buildVpsConfig(platRows, outputSettings, groupCaps).filter(o => o.enabled)
+
+    // Bridge block for a transcode tenant whose GPU backend is ready: tells the VPS
+    // where to push the source (source_forward) and how to fan the GPU's H.264 return
+    // out to the transcode platforms (return_outputs — DECRYPTED keys live ONLY here,
+    // on the trusted VPS, never on the GPU).
+    let bridge: unknown = undefined
+    const gpuNode = t.gpu_node_id ? gpuNodeById.get(t.gpu_node_id) : undefined
+    if (t.needs_transcode && gpuNode && gpuNode.phase === 'ready' && gpuNode.ip_address && gpuNode.bridge_in_port) {
+      const transcodeOut = buildAgentOutputs(platRows, outputSettings, groupCaps)
+        .filter(o => o.enabled && o.mode === 'transcode')
+      const returnOutputs = (['landscape', 'portrait'] as const).map(orientation => ({
+        orientation,
+        from: `return/${t.ingest_key}/${orientation}`,
+        targets: transcodeOut
+          .filter(o => (o.orientation === 'portrait' ? 'portrait' : 'landscape') === orientation)
+          .map(o => ({ name: o.name, url: o.url, key: o.key })),
+      })).filter(g => g.targets.length > 0)
+      bridge = {
+        source_forward: `tls://${gpuNode.ip_address}:${gpuNode.bridge_in_port}`,
+        bridge_secret: t.bridge_secret ?? null,
+        return_outputs: returnOutputs,
+      }
+    }
+
     return {
       instance_id: t.id,
       ingest_key: t.ingest_key,
@@ -78,6 +113,7 @@ export async function GET(request: NextRequest) {
         pos_x: prof?.portrait_pos_x ?? 0.5,
         pos_y: prof?.portrait_pos_y ?? 0.5,
       },
+      ...(bridge ? { bridge } : {}),
     }
   })
 
