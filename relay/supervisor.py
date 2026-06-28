@@ -488,12 +488,21 @@ def build_passthrough_cmd(out: dict, source: str = LOCAL_SOURCE) -> list[str]:
     requires fragmented-MP4 (CMAF) segments for HEVC — MPEG-TS is H.264-only here.
     `-c copy` passes the source HEVC video + AAC audio straight through untouched,
     so YouTube gets full source quality with zero GPU encode cost.
+
+    Two bitstream fixups are REQUIRED for the mpegts(SRT)->fMP4 copy (verified live —
+    without them the muxer dies in ~5s and crash-loops, YouTube never ingests):
+      -bsf:a aac_adtstoasc : source AAC is ADTS-framed (mpegts), fMP4/CMAF needs ASC.
+                             Without it: "Operation not permitted" muxing every AAC pkt.
+      -tag:v hvc1          : YouTube needs the hvc1 tag to recognize HEVC in fMP4
+                             (ffmpeg defaults to hev1, which YouTube won't ingest).
     """
     return [
         "ffmpeg", "-hide_banner", "-loglevel", "warning",
         *_input_args(source),
         "-i", source,
         "-c", "copy",
+        "-bsf:a", "aac_adtstoasc",
+        "-tag:v", "hvc1",
         "-f", "hls",
         "-method", "PUT",
         "-http_persistent", "1",
