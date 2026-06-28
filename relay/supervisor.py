@@ -46,6 +46,12 @@ LOCAL_SOURCE = os.environ.get(
     "RELAY_SOURCE", "srt://127.0.0.1:8890?streamid=read:live"
 )
 
+# Self-signed cert for the VPS-hub GPU bridge's mpegts-over-TLS listener (RELAY_ROLE=gpu),
+# generated at boot by agent.py._gen_self_signed_cert(). Same paths MediaMTX uses for the
+# hub's RTMPS return server.
+TLS_CERT_FILE = "/app/relay.crt"
+TLS_KEY_FILE = "/app/relay.key"
+
 LOG_LINES = 250
 RESTART_MIN = 2.0      # seconds
 RESTART_MAX = 30.0     # seconds
@@ -306,7 +312,16 @@ def _input_args(source: str) -> list[str]:
         # Declare mpegts explicitly (a raw TLS byte stream has no container hint), and
         # +igndts because DTS is unreliable after the VPS's `-c copy` mpegts re-mux
         # (see bpm_inject.py); the bumped probe lets NVDEC see the HEVC SPS/PPS first.
-        return ["-f", "mpegts", "-fflags", "+genpts+igndts", "-analyzeduration", "10M", "-probesize", "10M"]
+        args = ["-f", "mpegts", "-fflags", "+genpts+igndts", "-analyzeduration", "10M", "-probesize", "10M"]
+        # TLS SERVER (listen=1): ffmpeg's tls protocol does NOT load cert_file/key_file
+        # when they're given as URL query params — the server then offers no certificate
+        # and every handshake dies with "no shared cipher" (the GPU's :8899 transcode
+        # ffmpeg exits → crash-loop → the hub's source_forward sees "connection refused").
+        # The cert MUST be passed as INPUT OPTIONS instead. Verified on jellyfin-ffmpeg
+        # 7.1.4-3: URL-query cert → handshake fails; -cert_file/-key_file input opts → OK.
+        if "listen=1" in source:
+            args = ["-cert_file", TLS_CERT_FILE, "-key_file", TLS_KEY_FILE] + args
+        return args
     return []
 
 

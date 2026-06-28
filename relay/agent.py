@@ -637,7 +637,10 @@ def main_gpu() -> None:
     # The transcode reads the source from a raw mpegts-over-TLS listener (the VPS
     # source_forward connects in). One Supervisor; one transcode runner (build_group
     # for the GPU does one decode → N orientation encodes → N RTMPS returns).
-    listen = "tls://0.0.0.0:8899?listen=1&cert_file=/app/relay.crt&key_file=/app/relay.key"
+    # NOTE: the cert is injected as -cert_file/-key_file INPUT OPTIONS by
+    # supervisor._input_args() — ffmpeg's tls server ignores cert_file/key_file passed
+    # as URL query params ("no shared cipher" handshake failure). Do NOT put them here.
+    listen = "tls://0.0.0.0:8899?listen=1"
     sup = Supervisor(source=listen, role="gpu")
 
     def shutdown(sig: int, _frame: object) -> None:
