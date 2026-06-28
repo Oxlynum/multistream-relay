@@ -193,6 +193,13 @@ const builderCloudInit = [
   `  - ${loginCmd}`,
   `  - docker pull ${sq(RELAY_IMAGE)}`,
   '  - docker logout ghcr.io 2>/dev/null || true',
+  // Lean the OS baked into the snapshot: snapd + unattended-upgrades + apt-daily run on
+  // EVERY boot and contend for CPU/IO/dpkg-lock — measured pushing cloud-init
+  // modules-final to ~55s on a fresh hub. A hub needs none of them (it just runs one
+  // container). disable+mask persists into the snapshot, so every hub boots leaner and
+  // more consistently. No functionality impact (no snaps, no auto-apt on a single-purpose box).
+  '  - systemctl disable --now snapd.service snapd.socket snapd.seeded.service unattended-upgrades.service apt-daily.service apt-daily-upgrade.service apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true',
+  '  - systemctl mask snapd.service snapd.socket unattended-upgrades.service apt-daily.service apt-daily-upgrade.service apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true',
   `  - docker image inspect ${sq(RELAY_IMAGE)} >/dev/null 2>&1 && poweroff || echo pull-failed > /root/BAKE_FAIL`,
   '',
 ].join('\n')
