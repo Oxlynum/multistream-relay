@@ -140,7 +140,12 @@ async function spawnHub(args: {
     .insert({
       provider: candidate.provider,
       region,
-      lat, lon,
+      // Store the HUB SERVER's coords (EU), NOT the caller's (args lat/lon). The GPU
+      // backend race anchors on these (it must land the GPU NEAR the hub — the bridge
+      // return is loss-intolerant TCP). Storing the caller's US coords made the race
+      // rank a US RunPod #1 and skip EU Vast entirely. Hub *selection* still uses the
+      // caller's coords (rankCandidates, passed separately) to pick the nearest region.
+      lat: candidate.lat, lon: candidate.lon,
       server_type: candidate.serverType,
       status: 'spawning',
       max_sessions: HUB_MAX_SESSIONS,

@@ -358,46 +358,55 @@ export async function startProvisionRace(args: RaceArgs): Promise<RaceResult> {
   })
 
   const providerByName = new Map(providers.map(p => [p.name, p]))
-  // Slice out candidates already tried in prior rounds.
-  const eligible = dedupedCandidates.slice(skipN, skipN + racersN)
-  if (eligible.length === 0) {
+  // Candidate pool past the rounds already tried (skipN). We fan out racersN at a time,
+  // but a create FAILURE (RunPod 500 / no-capacity, a drained region) must NOT end the
+  // race — fall through to the NEXT ranked host until we have racersN live pods or run
+  // out. Without this, a single top-ranked host failing to create aborted the whole race
+  // and no other provider was ever attempted (e.g. RunPod failed → Vast never tried).
+  // Bounded by MAX_CREATE_ATTEMPTS so we never probe an unbounded number of dead hosts.
+  const pool = dedupedCandidates.slice(skipN)
+  if (pool.length === 0) {
     return { started: false, racerCount: 0, error: 'no untried candidates remaining' }
   }
+  // Create-failure fallthrough is enabled ONLY in 'backend' mode. The all-in-one re-race
+  // cascade (agent/failed) computes skipN as (round+1)*2 assuming EXACTLY 2 racers/round;
+  // if this loop walked past that window on all-in-one, the next cascade round would
+  // re-attempt candidates already tried here (duplicate pods). Backend re-race
+  // (reraceGpuBackend) keys off the racers[] array, not that fixed stride, so the
+  // fallthrough is safe there — and it's exactly the path that needs it (RunPod→Vast).
+  const MAX_CREATE_ATTEMPTS = mode === 'backend' ? racersN + 4 : racersN
 
-  const preferred = eligible.filter(x => (x.c.preferenceTier ?? 0) === 0).length
-  console.log(`[broker/race] fanning out ${eligible.length} racer(s) (skip=${skipN}, preferred=${preferred}): ${eligible.map(e => e.c.label).join(', ')}`)
-
-  let racerCount = 0
-
-  await Promise.allSettled(
-    eligible.map(async ({ c, distKm }) => {
-      const provider = providerByName.get(c.provider)
-      if (!provider) return
-      try {
-        const created = await provider.create({
-          candidate: c,
-          name: args.name,
-          imageTag: args.imageTag,
-          env: args.env,
-          mode,
-        })
-        racerCount++
-        const racer: RacerEntry = {
-          provider: c.provider,
-          provider_id: created.podId,
-          state: 'booting',
-          machine_id: typeof c.placement.machineId === 'number' ? c.placement.machineId : undefined,
-        }
-        // Called immediately after this pod is created — before any other await in
-        // this promise chain — so the pod is reapable from the DB even if the
-        // fan-out is killed right after this resolves.
-        try { await args.onRacerCreated(racer) } catch { /* best effort */ }
-        console.log(`[broker/race] created ${c.provider} pod ${created.podId} (${c.gpuKey} @ ${c.label} ${distKm.toFixed(0)}km)`)
-      } catch (err) {
-        console.error(`[broker/race] ${c.provider} ${c.gpuKey} @ ${c.label} failed to create:`, err instanceof Error ? err.message : err)
+  const createOne = async ({ c, distKm }: { c: GpuCandidate; distKm: number }): Promise<boolean> => {
+    const provider = providerByName.get(c.provider)
+    if (!provider) return false
+    try {
+      const created = await provider.create({ candidate: c, name: args.name, imageTag: args.imageTag, env: args.env, mode })
+      const racer: RacerEntry = {
+        provider: c.provider,
+        provider_id: created.podId,
+        state: 'booting',
+        machine_id: typeof c.placement.machineId === 'number' ? c.placement.machineId : undefined,
       }
-    })
-  )
+      // Persist the racer before any further await so it's reapable even if we die here.
+      try { await args.onRacerCreated(racer) } catch { /* best effort */ }
+      console.log(`[broker/race] created ${c.provider} pod ${created.podId} (${c.gpuKey} @ ${c.label} ${distKm.toFixed(0)}km)`)
+      return true
+    } catch (err) {
+      console.error(`[broker/race] ${c.provider} ${c.gpuKey} @ ${c.label} failed to create:`, err instanceof Error ? err.message : err)
+      return false
+    }
+  }
+
+  let racerCount = 0, attempted = 0, idx = 0
+  while (racerCount < racersN && idx < pool.length && attempted < MAX_CREATE_ATTEMPTS) {
+    const batch = pool.slice(idx, idx + (racersN - racerCount))
+    idx += batch.length
+    attempted += batch.length
+    const preferred = batch.filter(x => (x.c.preferenceTier ?? 0) === 0).length
+    console.log(`[broker/race] fanning out ${batch.length} racer(s) (skip=${skipN}, tried=${attempted}, preferred=${preferred}): ${batch.map(e => e.c.label).join(', ')}`)
+    const results = await Promise.allSettled(batch.map(createOne))
+    racerCount += results.filter(r => r.status === 'fulfilled' && r.value === true).length
+  }
 
   return { started: racerCount > 0, racerCount }
 }
