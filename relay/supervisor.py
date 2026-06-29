@@ -437,7 +437,13 @@ def _tee_targets(outputs: list[dict]) -> str:
         url = _full_rtmp_url(o)
         if not _tee_safe(url):
             continue
-        parts.append(f"[f=flv:onfail=ignore:use_fifo=1:fifo_options=queue_size=512,drop_pkts_on_overflow=1]{url}")
+        # fifo_options is a nested AVOptions list: its sub-options are ':'-separated,
+        # and inside a tee slave that ':' MUST be escaped as '\:' (the tee parser splits
+        # slave options on unescaped ':'). A comma is NOT a fifo separator — using one
+        # made the fifo muxer read queue_size="512,drop_pkts_on_overflow=1" → "Invalid
+        # argument", killing the whole tee (every platform dark). Verified on
+        # jellyfin-ffmpeg 7.1.4-3 + the live VPS-hub deliver tee (2026-06-29).
+        parts.append(f"[f=flv:onfail=ignore:use_fifo=1:fifo_options=queue_size=512\\:drop_pkts_on_overflow=1]{url}")
     return "|".join(parts)
 
 
