@@ -109,7 +109,16 @@ async function handleGpuStatus(request: NextRequest, node: NodeAuth): Promise<Re
 // (landmine #2: that would teardown the whole box on the first tenant's idle).
 async function handleVpsStatus(request: NextRequest, hubId: string): Promise<Response> {
   const body = await request.json().catch(() => ({})) as {
-    streams?: Array<{ ingest_key?: string; streaming?: boolean }>
+    streams?: Array<{
+      ingest_key?: string
+      streaming?: boolean
+      // Per-platform runner states (state + platforms[]) the dock turns into status
+      // dots. Empty while OBS isn't publishing. The hub is the ONLY producer of this
+      // now (the all-in-one pod heartbeat that used to write gpu_instances.outputs was
+      // deleted with the direct path 2026-06-29) — without persisting it the dock dots
+      // stay stuck on "idle".
+      outputs?: Array<{ state?: string; platforms?: string[] }>
+    }>
     cost?: { egress_gb_hr?: number; ingress_gb_hr?: number; projected_usd_hr?: number }
   }
   const supabase = createServerClient()
@@ -202,6 +211,11 @@ async function handleVpsStatus(request: NextRequest, hubId: string): Promise<Res
     await supabase.from('gpu_instances')
       .update({
         last_seen_at: nowIso, streaming, idle_since: idleSince, burn_rate: bill.burnRate,
+        // Per-platform runner states for the dock's status dots (/api/gpu/status reads
+        // this column). The reaped all-in-one pod heartbeat used to be the writer; the
+        // hub is now the sole producer. Default [] so a tenant that reports no outputs
+        // (OBS not publishing) clears stale dots rather than freezing them.
+        outputs: r?.outputs ?? [],
         ...(streaming ? { renew_deadline: new Date(now + RECONNECT_GRACE_MS).toISOString() } : {}),
       })
       .eq('user_id', userId).eq('vps_hub_id', hubId)

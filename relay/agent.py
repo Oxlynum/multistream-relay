@@ -395,7 +395,24 @@ def main_vps() -> None:
                 t["sup"].schedule_stop()
                 t["applied_hash"] = None
 
-            report.append({"ingest_key": key, "streaming": connected})
+            # Per-platform output state for the OBS dock's status dots. Each runner
+            # reports {state, platforms}: passthrough/ertmp runners carry one platform
+            # (YouTube/Twitch-eRTMP); a deliver:<orientation> runner carries every
+            # transcode platform it tees to (e.g. Twitch-H.264 + Kick share one tee, so
+            # one state). Runners with no platforms (source_forward) are dropped. Only
+            # report while OBS is publishing — once it drops the runners linger in a
+            # 'stopped' state that the dock would misread as "connecting…" rather than
+            # idle; an empty list is the honest "idle" signal.
+            outputs = (
+                [
+                    {"state": r["state"], "platforms": r["platforms"]}
+                    for r in t["sup"].status()
+                    if r.get("platforms")
+                ]
+                if connected
+                else []
+            )
+            report.append({"ingest_key": key, "streaming": connected, "outputs": outputs})
 
         hb = _api("POST", "/api/agent/status", {"role": "vps", "hub_id": HUB_ID, "streams": report})
         if hb and hb.get("command") == "stop" and hb.get("reason") == "scale_to_zero":
