@@ -15,6 +15,16 @@ export const PRICE_CEILING = 0.50
 // each Hetzner region is measured.
 export const BACKEND_PRICE_CEILING = 1.00
 
+// Total GPU-backend boot attempts before the node DEGRADES to passthrough-only.
+// The boot self-test gate (NVENC driver-regression check) fails a bad host in ~1s and
+// the box POSTs /api/agent/failed, so each retry is cheap — but on Vast's consumer pool
+// bad NVENC hosts are common enough that a SINGLE attempt strands the transcode path
+// (Twitch/Kick dark) until the daily reaper. /api/agent/failed re-races immediately up
+// to this budget (race_round is 0-based: round R = R+1 attempts so far) so a few bad
+// hosts are skipped within seconds. Only when the budget is exhausted does the node end
+// (phase='ended') — the hub passthrough outputs keep serving; no direct-to-GPU fallback.
+export const GPU_BOOT_ATTEMPTS = 4
+
 // Default location when the request carries no geo headers (local dev, VPNs):
 // central US minimizes worst-case latency for an unknown US user.
 export const FALLBACK_LAT = 39.0

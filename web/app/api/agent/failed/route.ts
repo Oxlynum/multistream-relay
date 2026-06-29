@@ -4,19 +4,24 @@ import { createServerClient } from '@/lib/supabase'
 import { type RacerEntry } from '@/lib/gpu-broker'
 import { getProvider } from '@/lib/providers'
 import { teardownHub } from '@/lib/pod-teardown'
+import { reraceGpuBackend } from '@/lib/vps-broker'
+import { GPU_BOOT_ATTEMPTS } from '@/lib/datacenters'
 
 // VPS-hub GPU BACKEND failure (role-aware, on the gpu_backend relay_nodes row): a GPU
 // racer reports it can't serve (self-test failed / fatal boot). Mark it failed +
-// destroy the box; if ALL racers are dead, DEGRADE the node (transcode outputs stop
-// delivering; the hub keeps serving passthrough). No direct-to-GPU fallback. (Re-race
-// on boot-failure + the mid-stream re-race land in P9.)
+// destroy the box. If ALL racers are dead, FAST RE-RACE to the next-ranked candidate
+// (up to GPU_BOOT_ATTEMPTS total boot attempts) so one bad NVENC host doesn't strand the
+// session on passthrough-only until the daily reaper; once that budget is exhausted the
+// node DEGRADES (transcode outputs stop; the hub keeps serving passthrough). No
+// direct-to-GPU fallback. (The mid-stream re-race — a GPU that dies after pairing —
+// still lands via the reaper's reraceGpuBackend call.)
 async function handleGpuFailed(request: NextRequest, node: NodeAuth): Promise<Response> {
   const body = await request.json().catch(() => ({})) as { reason?: string; provider_id?: string }
   const supabase = createServerClient()
 
   const { data: nodeRow } = await supabase
     .from('relay_nodes')
-    .select('racers, phase')
+    .select('racers, phase, race_round')
     .eq('id', node.nodeId!)
     .maybeSingle()
   if (!nodeRow) return Response.json({ ack: true })
@@ -44,8 +49,33 @@ async function handleGpuFailed(request: NextRequest, node: NodeAuth): Promise<Re
   const allDead = updated.every(r => r.state === 'failed' || r.state === 'loser')
   const hasWinner = updated.some(r => r.state === 'ready')
   if (allDead && !hasWinner) {
-    await supabase.from('relay_nodes').update({ phase: 'ended', status: 'error' }).eq('id', node.nodeId!)
-    console.warn(`[agent/failed] gpu node ${node.nodeId} all racers dead (${body.reason ?? '?'}) → degraded; passthrough unaffected`)
+    // Fast re-race on boot-failure: a single bad NVENC host (the boot self-test gate
+    // firing) must NOT strand the session on passthrough-only until the daily reaper.
+    // race_round is 0-based, so round R means R+1 boot attempts have been made. While
+    // under GPU_BOOT_ATTEMPTS, re-race immediately to the next-ranked candidate
+    // (reraceGpuBackend rotates the gpu key — so a late /failed from the now-destroyed
+    // box can't 401-bypass and kill the fresh racer — destroys the dead box, resets the
+    // node, bumps race_round, and fans out a fresh N=1 race anchored on the hub region).
+    const attemptsSoFar = (nodeRow.race_round ?? 0) + 1
+    if (attemptsSoFar < GPU_BOOT_ATTEMPTS) {
+      console.warn(`[agent/failed] gpu node ${node.nodeId} boot-failed (${body.reason ?? '?'}) attempt ${attemptsSoFar}/${GPU_BOOT_ATTEMPTS} → re-racing`)
+      try {
+        const res = await reraceGpuBackend(node.nodeId!, supabase)
+        // On no-capacity / error reraceGpuBackend already sets phase='ended' (degrade).
+        if (!res.ok) console.warn(`[agent/failed] gpu node ${node.nodeId} re-race failed: ${res.error} → degraded`)
+      } catch (e) {
+        // Never let a re-race throw leave the node 'racing' forever (no reaper branch
+        // would catch it mid-session) — degrade so passthrough keeps serving + the
+        // session can be cleanly restarted.
+        await supabase.from('relay_nodes').update({ phase: 'ended', status: 'error' }).eq('id', node.nodeId!)
+        console.error(`[agent/failed] gpu node ${node.nodeId} re-race threw → degraded:`, e)
+      }
+    } else {
+      // Budget exhausted: DEGRADE (transcode outputs stop; the hub keeps serving
+      // passthrough). No direct-to-GPU fallback.
+      await supabase.from('relay_nodes').update({ phase: 'ended', status: 'error' }).eq('id', node.nodeId!)
+      console.warn(`[agent/failed] gpu node ${node.nodeId} all racers dead after ${attemptsSoFar} attempts (${body.reason ?? '?'}) → degraded; passthrough unaffected`)
+    }
   }
   return Response.json({ ack: true })
 }
