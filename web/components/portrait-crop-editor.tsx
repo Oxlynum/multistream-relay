@@ -100,17 +100,17 @@ export function PortraitCropEditor() {
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
-          className="relative w-full sm:w-[360px] aspect-video rounded-lg overflow-hidden bg-base border border-line cursor-move select-none shrink-0"
+          className="relative w-full sm:w-[360px] aspect-video rounded-lg overflow-hidden bg-bg border border-line cursor-move select-none shrink-0"
           style={{
             backgroundImage:
-              'linear-gradient(135deg, rgba(45,212,191,0.10), rgba(45,212,191,0)), repeating-linear-gradient(0deg, rgba(255,255,255,0.04) 0 1px, transparent 1px 28px), repeating-linear-gradient(90deg, rgba(255,255,255,0.04) 0 1px, transparent 1px 28px)',
+              'linear-gradient(135deg, rgba(124,92,252,0.12), rgba(124,92,252,0)), repeating-linear-gradient(0deg, rgba(255,255,255,0.04) 0 1px, transparent 1px 28px), repeating-linear-gradient(90deg, rgba(255,255,255,0.04) 0 1px, transparent 1px 28px)',
           }}
         >
           {/* dimmed area outside crop */}
           <div className="absolute inset-0 bg-black/50 pointer-events-none" />
           {/* the crop window */}
           <div
-            className="absolute border-2 border-accent bg-accent/10 pointer-events-none"
+            className="absolute border-2 border-brand bg-brand/10 pointer-events-none"
             style={{
               left: `${leftPct}%`,
               top: `${topPct}%`,
@@ -119,7 +119,7 @@ export function PortraitCropEditor() {
               boxShadow: '0 0 0 9999px rgba(0,0,0,0.0)',
             }}
           >
-            <span className="absolute -top-5 left-0 text-[10px] font-mono text-accent whitespace-nowrap">
+            <span className="absolute -top-5 left-0 text-[10px] font-mono text-brand whitespace-nowrap">
               9:16 vertical
             </span>
           </div>
@@ -144,7 +144,7 @@ export function PortraitCropEditor() {
               onChange={e => setCrop(c => ({ ...c, zoom: Number(e.target.value) }))}
               onMouseUp={() => save(crop)}
               onTouchEnd={() => save(crop)}
-              className="w-full accent-accent"
+              className="w-full accent-brand"
             />
             <div className="flex justify-between text-xs text-ink-faint mt-1">
               <span>Fit height</span>
@@ -165,7 +165,7 @@ export function PortraitCropEditor() {
             >
               Reset to center
             </button>
-            {saved && <span className="text-xs text-accent">Saved ✓</span>}
+            {saved && <span className="text-xs text-success">Saved ✓</span>}
           </div>
         </div>
       </div>

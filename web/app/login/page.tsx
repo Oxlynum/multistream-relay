@@ -3,8 +3,22 @@
 import { useState, Suspense } from 'react'
 import Link from 'next/link'
 import { useRouter, useSearchParams } from 'next/navigation'
+import { Loader2 } from 'lucide-react'
+
 import { createBrowserClient } from '@/lib/supabase'
 import { Logo } from '@/components/logo'
+import { AuthPanel } from '@/components/auth/auth-panel'
+import { Button } from '@/components/ui/button'
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from '@/components/ui/card'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Alert, AlertDescription } from '@/components/ui/alert'
 
 // Only allow same-origin relative paths as a post-login destination (no open
 // redirect to external hosts).
@@ -34,61 +48,83 @@ function LoginInner() {
       return
     }
 
+    // Keep the spinner through navigation — do NOT reset `loading` on success.
     router.push(safeNext(searchParams.get('next')))
   }
 
   return (
-    <main className="min-h-screen flex flex-col items-center justify-center px-4 relative overflow-hidden">
-      <div className="absolute inset-0 bg-grid mask-fade pointer-events-none" />
-      <div className="absolute -top-40 left-1/2 -translate-x-1/2 w-[500px] h-[500px] bg-accent/10 rounded-full blur-[120px] pointer-events-none" />
+    <main className="grid min-h-screen lg:grid-cols-2">
+      <AuthPanel />
 
-      <div className="relative w-full max-w-sm">
-        <div className="flex justify-center mb-8">
-          <Logo />
+      <div className="flex flex-col items-center justify-center px-4 py-12">
+        <div className="w-full max-w-sm">
+          <div className="mb-8 flex justify-center lg:hidden">
+            <Logo />
+          </div>
+
+          <Card className="shadow-lg">
+            <CardHeader>
+              <CardTitle className="font-display text-xl">Welcome back</CardTitle>
+              <CardDescription>Sign in to your SlimCast account.</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <form onSubmit={handleSubmit} className="space-y-4">
+                <div className="space-y-1.5">
+                  <Label htmlFor="email">Email</Label>
+                  <Input
+                    id="email"
+                    type="email"
+                    autoComplete="email"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    required
+                    className="h-10"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="password">Password</Label>
+                  <Input
+                    id="password"
+                    type="password"
+                    autoComplete="current-password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    required
+                    className="h-10"
+                  />
+                </div>
+
+                {error && (
+                  <Alert variant="destructive">
+                    <AlertDescription>{error}</AlertDescription>
+                  </Alert>
+                )}
+
+                <Button
+                  type="submit"
+                  disabled={loading}
+                  className="h-11 w-full rounded-xl text-sm font-semibold shadow-glow"
+                >
+                  {loading ? (
+                    <>
+                      <Loader2 className="size-4 animate-spin" />
+                      Signing in…
+                    </>
+                  ) : (
+                    'Sign in'
+                  )}
+                </Button>
+              </form>
+            </CardContent>
+          </Card>
+
+          <p className="mt-6 text-center text-sm text-ink-muted">
+            No account?{' '}
+            <Link href="/signup" className="font-medium text-brand hover:text-brand-strong">
+              Start free
+            </Link>
+          </p>
         </div>
-
-        <div className="bg-surface border border-line rounded-2xl p-8">
-          <h1 className="text-xl font-semibold mb-1">Welcome back</h1>
-          <p className="text-sm text-ink-muted mb-6">Sign in to your SlimCast account.</p>
-
-          <form onSubmit={handleSubmit} className="space-y-4">
-            <div>
-              <label className="block text-xs font-medium text-ink-muted mb-1.5">Email</label>
-              <input
-                type="email"
-                value={email}
-                onChange={e => setEmail(e.target.value)}
-                required
-                className="w-full bg-base border border-line rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-accent transition-colors"
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-ink-muted mb-1.5">Password</label>
-              <input
-                type="password"
-                value={password}
-                onChange={e => setPassword(e.target.value)}
-                required
-                className="w-full bg-base border border-line rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-accent transition-colors"
-              />
-            </div>
-            {error && (
-              <p className="text-red-400 text-sm bg-red-950/30 border border-red-900/50 rounded-lg px-3 py-2">{error}</p>
-            )}
-            <button
-              type="submit"
-              disabled={loading}
-              className="w-full bg-accent hover:bg-accent-strong text-base disabled:opacity-50 py-2.5 rounded-lg font-semibold text-sm transition-colors"
-            >
-              {loading ? 'Signing in…' : 'Sign in'}
-            </button>
-          </form>
-        </div>
-
-        <p className="text-ink-muted text-sm text-center mt-6">
-          No account?{' '}
-          <Link href="/signup" className="text-accent hover:text-accent-strong font-medium">Start free</Link>
-        </p>
       </div>
     </main>
   )

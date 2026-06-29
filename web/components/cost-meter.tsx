@@ -41,11 +41,11 @@ export function CostMeter() {
   const lowRemaining = remaining < 1800
 
   return (
-    <div className="bg-surface border border-accent/40 rounded-2xl p-5 flex items-center justify-between">
+    <div className="bg-surface border border-success/30 rounded-2xl p-5 flex items-center justify-between shadow-glow">
       <div className="flex items-center gap-3">
         <span className="relative flex h-2.5 w-2.5">
-          <span className="absolute inline-flex h-full w-full rounded-full bg-accent opacity-60 animate-ping" />
-          <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-accent" />
+          <span className="absolute inline-flex h-full w-full rounded-full bg-success opacity-60 animate-ping" />
+          <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-success" />
         </span>
         <div>
           <div className="text-sm font-semibold">Streaming now</div>
@@ -55,7 +55,7 @@ export function CostMeter() {
         </div>
       </div>
       <div className="text-right">
-        <div className={`text-lg font-bold font-mono ${lowRemaining ? 'text-amber-400' : 'text-ink'}`}>
+        <div className={`text-lg font-bold font-mono ${lowRemaining ? 'text-warning' : 'text-ink'}`}>
           {formatDuration(remaining)}
         </div>
         <div className="text-xs text-ink-faint">left at this rate</div>

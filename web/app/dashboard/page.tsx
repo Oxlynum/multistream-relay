@@ -1,9 +1,17 @@
 'use client'
 
 import { useEffect, useState, useCallback } from 'react'
+import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { createBrowserClient } from '@/lib/supabase'
 import { DashboardNav } from '@/components/dashboard-nav'
+import { BalanceCard } from '@/components/dashboard/balance-card'
+import { StatTile } from '@/components/dashboard/stat-tile'
+import { Card, CardContent } from '@/components/ui/card'
+import { Button } from '@/components/ui/button'
+import { Badge } from '@/components/ui/badge'
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { Skeleton } from '@/components/ui/skeleton'
 import { formatTokens } from '@/lib/billing'
 
 interface DashboardData {
@@ -94,7 +102,10 @@ export default function DashboardPage() {
     return (
       <div className="min-h-screen">
         <DashboardNav />
-        <div className="flex items-center justify-center py-32 text-ink-faint text-sm">Loading…</div>
+        <main className="mx-auto max-w-5xl space-y-5 px-6 py-10">
+          <Skeleton className="h-36 w-full rounded-2xl" />
+          <Skeleton className="h-48 w-full rounded-2xl" />
+        </main>
       </div>
     )
   }
@@ -106,107 +117,104 @@ export default function DashboardPage() {
     <div className="min-h-screen">
       <DashboardNav />
 
-      <main className="max-w-5xl mx-auto px-6 py-10 space-y-5">
+      <main className="mx-auto max-w-5xl space-y-5 px-6 py-10">
 
-        {/* Token balance */}
-        <div className={`border rounded-2xl p-6 flex items-center justify-between ${creditsLow ? 'bg-amber-950/20 border-amber-800/60' : 'bg-surface border-line'}`}>
-          <div>
-            <div className="text-sm text-ink-muted mb-1">Token balance</div>
-            <div className={`text-3xl font-bold font-mono ${creditsLow ? 'text-amber-400' : 'text-ink'}`}>
-              {formatTokens(credits)}
+        {/* Token balance hero */}
+        <BalanceCard
+          tokens={credits}
+          low={creditsLow}
+          subtitle={
+            creditsLow
+              ? 'Less than 30 minutes remaining'
+              : '1 token = $2 · base 1 tkn/hr while live'
+          }
+          action={
+            <Button
+              render={<Link href="/dashboard/credits" />}
+              size="lg"
+              className="h-10 px-5 font-semibold"
+            >
+              Buy tokens
+            </Button>
+          }
+        />
+
+        {/* Streaming stats */}
+        <Card className="border-line">
+          <CardContent className="space-y-5 py-1">
+            <div className="flex items-center justify-between gap-3">
+              <div className="text-sm text-ink-muted">Streaming stats</div>
+              <Tabs value={period} onValueChange={(v) => setPeriod(v as string)}>
+                <TabsList>
+                  {PERIODS.map(({ value, label }) => (
+                    <TabsTrigger key={value} value={value}>{label}</TabsTrigger>
+                  ))}
+                </TabsList>
+              </Tabs>
             </div>
-            <div className="text-xs text-ink-faint mt-1">1 token = $2 · base 1 tkn/hr while live</div>
-            {creditsLow && <div className="text-sm text-amber-500 mt-1">Less than 30 minutes remaining</div>}
-          </div>
-          <a href="/dashboard/credits" className="bg-accent hover:bg-accent-strong text-base px-5 py-2 rounded-lg text-sm font-semibold transition-colors">
-            Buy tokens
-          </a>
-        </div>
 
-        {/* Stats */}
-        <div className="bg-surface border border-line rounded-2xl p-6">
-          <div className="flex items-center justify-between mb-5">
-            <div className="text-sm text-ink-muted">Streaming stats</div>
-            <div className="flex gap-1 bg-base border border-line rounded-lg p-1">
-              {PERIODS.map(({ value, label }) => (
-                <button
-                  key={value}
-                  onClick={() => setPeriod(value)}
-                  className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${
-                    period === value ? 'bg-elevated text-ink' : 'text-ink-muted hover:text-ink'
-                  }`}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {statsLoading ? (
-            <div className="text-ink-faint text-sm py-4">Loading…</div>
-          ) : (
-            <>
-              <div className="grid grid-cols-2 gap-4 sm:grid-cols-4 mb-5">
-                <Stat label="Hours streamed" value={fmtDuration(stats?.total_duration_seconds ?? 0)} />
-                <Stat label="Sessions" value={String(stats?.session_count ?? 0)} />
-                <Stat label="Avg session" value={fmtDuration(stats?.avg_duration_seconds ?? 0)} />
-                <Stat label="Tokens used" value={formatTokens(stats?.total_credits_used ?? 0)} />
-              </div>
-
-              {(stats?.top_platforms?.length ?? 0) > 0 && (
-                <div>
-                  <div className="text-xs text-ink-faint mb-2">Platforms streamed to</div>
-                  <div className="flex flex-wrap gap-2">
-                    {stats?.top_platforms.map(({ platform, count }) => (
-                      <span key={platform} className="bg-base border border-line text-ink-muted text-xs px-3 py-1 rounded-full">
-                        {PLATFORM_LABELS[platform] ?? platform}
-                        <span className="text-ink-faint ml-1">×{count}</span>
-                      </span>
-                    ))}
-                  </div>
+            {statsLoading ? (
+              <div className="py-4 text-sm text-ink-faint">Loading…</div>
+            ) : (
+              <>
+                <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+                  <StatTile label="Hours streamed" value={fmtDuration(stats?.total_duration_seconds ?? 0)} />
+                  <StatTile label="Sessions" value={String(stats?.session_count ?? 0)} />
+                  <StatTile label="Avg session" value={fmtDuration(stats?.avg_duration_seconds ?? 0)} />
+                  <StatTile label="Tokens used" value={formatTokens(stats?.total_credits_used ?? 0)} />
                 </div>
-              )}
 
-              {stats?.session_count === 0 && (
-                <p className="text-sm text-ink-faint">
-                  No streams yet in this period. Press Go Live in OBS to start.
-                </p>
-              )}
-            </>
-          )}
-        </div>
+                {(stats?.top_platforms?.length ?? 0) > 0 && (
+                  <div>
+                    <div className="mb-2 text-xs text-ink-faint">Platforms streamed to</div>
+                    <div className="flex flex-wrap gap-2">
+                      {stats?.top_platforms.map(({ platform, count }) => (
+                        <Badge key={platform} variant="outline" className="border-line text-ink-muted">
+                          {PLATFORM_LABELS[platform] ?? platform}
+                          <span className="ml-1 text-ink-faint">×{count}</span>
+                        </Badge>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {stats?.session_count === 0 && (
+                  <p className="text-sm text-ink-faint">
+                    No streams yet in this period. Press Go Live in OBS to start.
+                  </p>
+                )}
+              </>
+            )}
+          </CardContent>
+        </Card>
 
         {/* Platforms */}
-        <div className="bg-surface border border-line rounded-2xl p-6">
-          <div className="flex items-center justify-between mb-4">
-            <div className="text-sm text-ink-muted">Platforms</div>
-            <a href="/dashboard/platforms" className="text-xs text-accent hover:text-accent-strong">Manage →</a>
-          </div>
-          {(data?.platforms.length ?? 0) === 0 ? (
-            <p className="text-sm text-ink-muted">
-              No platforms connected. <a href="/dashboard/platforms" className="text-accent hover:text-accent-strong">Add platforms →</a>
-            </p>
-          ) : (
-            <div className="flex flex-wrap gap-2">
-              {data?.platforms.map(p => (
-                <span key={p} className="bg-base border border-line text-ink-muted text-sm px-3 py-1 rounded-full">
-                  {PLATFORM_LABELS[p] ?? p}
-                </span>
-              ))}
+        <Card className="border-line">
+          <CardContent className="space-y-4 py-1">
+            <div className="flex items-center justify-between">
+              <div className="text-sm text-ink-muted">Platforms</div>
+              <Link href="/dashboard/platforms" className="text-xs text-brand transition-colors hover:text-cyan">
+                Manage →
+              </Link>
             </div>
-          )}
-        </div>
+            {(data?.platforms.length ?? 0) === 0 ? (
+              <p className="text-sm text-ink-muted">
+                No platforms connected.{' '}
+                <Link href="/dashboard/platforms" className="text-brand hover:text-cyan">Add platforms →</Link>
+              </p>
+            ) : (
+              <div className="flex flex-wrap gap-2">
+                {data?.platforms.map(p => (
+                  <Badge key={p} variant="outline" className="border-line text-ink-muted">
+                    {PLATFORM_LABELS[p] ?? p}
+                  </Badge>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
 
       </main>
-    </div>
-  )
-}
-
-function Stat({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="bg-base border border-line rounded-xl p-4">
-      <div className="text-xs text-ink-faint mb-1">{label}</div>
-      <div className="text-2xl font-bold font-mono text-ink">{value}</div>
     </div>
   )
 }

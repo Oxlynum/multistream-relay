@@ -5,6 +5,9 @@ import { createBrowserClient } from '@/lib/supabase'
 import {
   LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
 } from 'recharts'
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from '@/components/ui/select'
 
 interface MetricPoint {
   recorded_at: string
@@ -47,7 +50,7 @@ function CustomTooltip({ active, payload, label }: {
   if (!active || !payload?.length) return null
   const pt = payload[0]?.payload
   return (
-    <div className="bg-elevated border border-line rounded-lg px-3 py-2 text-xs space-y-1">
+    <div className="bg-surface-2 border border-line rounded-lg px-3 py-2 text-xs space-y-1">
       <div className="text-ink-faint font-mono mb-1">{label}</div>
       {pt?.health !== null && pt?.health !== undefined && (
         <div style={{ color: healthColor(pt.health) }}>
@@ -60,7 +63,7 @@ function CustomTooltip({ active, payload, label }: {
         </div>
       )}
       {!!pt?.dropped && pt.dropped > 0 && (
-        <div className="text-amber-400">
+        <div className="text-warning">
           Dropped: <span className="font-mono font-medium">{pt.dropped}</span>
         </div>
       )}
@@ -147,16 +150,19 @@ export function ConnectionHealthGraph({ enabledPlatforms }: { enabledPlatforms?:
           )}
         </div>
 
-        <select
-          value={selectedKey}
-          onChange={e => setSelectedKey(e.target.value)}
-          className="text-xs bg-elevated border border-line text-ink-muted rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-accent cursor-pointer"
-        >
-          <option value="inbound">→ SlimCast</option>
-          {platforms.map(p => (
-            <option key={p} value={p}>→ {PLATFORM_LABELS[p] ?? p}</option>
-          ))}
-        </select>
+        <Select value={selectedKey} onValueChange={(v) => setSelectedKey(v as string)}>
+          <SelectTrigger size="sm" className="text-xs text-ink-muted">
+            <SelectValue>
+              {(v: string) => (v === 'inbound' ? '→ SlimCast' : `→ ${PLATFORM_LABELS[v] ?? v}`)}
+            </SelectValue>
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="inbound">→ SlimCast</SelectItem>
+            {platforms.map(p => (
+              <SelectItem key={p} value={p}>→ {PLATFORM_LABELS[p] ?? p}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       </div>
 
       {/* Chart */}

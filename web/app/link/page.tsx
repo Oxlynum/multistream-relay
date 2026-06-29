@@ -2,8 +2,20 @@
 
 import { useEffect, useState, Suspense } from 'react'
 import { useSearchParams } from 'next/navigation'
+import { CheckCircle2, Loader2 } from 'lucide-react'
+
 import { createBrowserClient } from '@/lib/supabase'
 import { Logo } from '@/components/logo'
+import { AuthPanel } from '@/components/auth/auth-panel'
+import { Button } from '@/components/ui/button'
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from '@/components/ui/card'
+import { Alert, AlertDescription } from '@/components/ui/alert'
 
 // Device-link consent page. The OBS plugin opens this in the browser with its
 // PKCE challenge + loopback port. The user (logged in) clicks Authorize; we mint
@@ -70,44 +82,67 @@ function LinkInner() {
   }
 
   return (
-    <main className="min-h-screen flex flex-col items-center justify-center px-4 relative overflow-hidden">
-      <div className="absolute inset-0 bg-grid mask-fade pointer-events-none" />
-      <div className="relative w-full max-w-sm">
-        <div className="flex justify-center mb-8"><Logo /></div>
-        <div className="bg-surface border border-line rounded-2xl p-8 text-center">
-          <h1 className="text-xl font-semibold mb-1">Connect OBS</h1>
-          <p className="text-sm text-ink-muted mb-6">
-            Authorize the SlimCast OBS plugin on this computer to control your account.
+    <main className="grid min-h-screen lg:grid-cols-2">
+      <AuthPanel />
+
+      <div className="flex flex-col items-center justify-center px-4 py-12">
+        <div className="w-full max-w-sm">
+          <div className="mb-8 flex justify-center lg:hidden">
+            <Logo />
+          </div>
+
+          <Card className="shadow-lg">
+            <CardHeader>
+              <CardTitle className="font-display text-xl">Connect OBS</CardTitle>
+              <CardDescription>
+                Authorize the SlimCast OBS plugin on this computer to control your account.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {status === 'checking' && (
+                <div className="flex items-center justify-center gap-2 py-4 text-sm text-ink-muted">
+                  <Loader2 className="size-4 animate-spin" />
+                  Checking…
+                </div>
+              )}
+
+              {status === 'ready' && (
+                <Button
+                  onClick={authorize}
+                  className="h-11 w-full rounded-xl text-sm font-semibold shadow-glow"
+                >
+                  Authorize OBS
+                </Button>
+              )}
+
+              {status === 'working' && (
+                <div className="flex items-center justify-center gap-2 py-4 text-sm text-ink-muted">
+                  <Loader2 className="size-4 animate-spin" />
+                  Authorizing…
+                </div>
+              )}
+
+              {status === 'done' && (
+                <Alert className="border-success/40 text-success">
+                  <CheckCircle2 className="size-4" />
+                  <AlertDescription className="text-success/90">
+                    Authorized — return to OBS. You can close this tab.
+                  </AlertDescription>
+                </Alert>
+              )}
+
+              {status === 'error' && (
+                <Alert variant="destructive">
+                  <AlertDescription>{message}</AlertDescription>
+                </Alert>
+              )}
+            </CardContent>
+          </Card>
+
+          <p className="mt-6 text-center text-xs text-ink-faint">
+            Only authorize if you just clicked “Connect” in your own OBS.
           </p>
-
-          {status === 'checking' && <p className="text-sm text-ink-muted">Checking…</p>}
-
-          {status === 'ready' && (
-            <button
-              onClick={authorize}
-              className="w-full bg-accent hover:bg-accent-strong text-base py-2.5 rounded-lg font-semibold text-sm transition-colors"
-            >
-              Authorize OBS
-            </button>
-          )}
-
-          {status === 'working' && <p className="text-sm text-ink-muted">Authorizing…</p>}
-
-          {status === 'done' && (
-            <p className="text-sm text-accent">
-              Authorized — return to OBS. You can close this tab.
-            </p>
-          )}
-
-          {status === 'error' && (
-            <p className="text-red-400 text-sm bg-red-950/30 border border-red-900/50 rounded-lg px-3 py-2">
-              {message}
-            </p>
-          )}
         </div>
-        <p className="text-ink-faint text-xs text-center mt-6">
-          Only authorize if you just clicked “Connect” in your own OBS.
-        </p>
       </div>
     </main>
   )

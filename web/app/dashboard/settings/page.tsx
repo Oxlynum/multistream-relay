@@ -5,6 +5,13 @@ import { useRouter } from 'next/navigation'
 import { createBrowserClient } from '@/lib/supabase'
 import { DashboardNav } from '@/components/dashboard-nav'
 import { PortraitCropEditor } from '@/components/portrait-crop-editor'
+import { Card, CardContent } from '@/components/ui/card'
+import { Button } from '@/components/ui/button'
+import { Switch } from '@/components/ui/switch'
+import { Input } from '@/components/ui/input'
+import { Alert, AlertDescription } from '@/components/ui/alert'
+import { PlatformIcon, PLATFORM_META as PLATFORM_TINTS, type PlatformKey } from '@/components/platform-icon'
+import { cn } from '@/lib/utils'
 import { formatTokens, formatDuration, secondsRemaining, type OutputSettingsMap, type OutputSettings } from '@/lib/billing'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -47,21 +54,37 @@ const PLATFORM_META: Record<string, {
 
 const PLATFORM_ORDER = ['twitch', 'kick', 'youtube', 'tiktok']
 
-const PLATFORM_ICONS: Record<string, string> = {
-  twitch:  'T',
-  kick:    'K',
-  youtube: 'YT',
-  tiktok:  'TK',
-}
-
-const PLATFORM_ICON_COLORS: Record<string, string> = {
-  twitch:  'bg-purple-600',
-  kick:    'bg-green-600',
-  youtube: 'bg-red-600',
-  tiktok:  'bg-pink-600',
-}
-
 const RESOLUTIONS = ['720p', '1080p', '1440p'] as const
+
+// ── Segmented option button ───────────────────────────────────────────────────
+
+function SegButton({
+  active, disabled, title, onClick, children,
+}: {
+  active: boolean
+  disabled?: boolean
+  title?: string
+  onClick: () => void
+  children: React.ReactNode
+}) {
+  return (
+    <button
+      disabled={disabled}
+      onClick={onClick}
+      title={title}
+      className={cn(
+        'rounded-lg px-2.5 py-1 text-xs font-semibold transition-colors',
+        active
+          ? 'bg-brand text-primary-foreground'
+          : disabled
+            ? 'cursor-not-allowed border border-line/40 bg-surface-2 text-ink-faint/40'
+            : 'border border-line bg-surface-2 text-ink-muted hover:border-brand/50 hover:text-ink',
+      )}
+    >
+      {children}
+    </button>
+  )
+}
 
 // ── OBS Connection sub-section ────────────────────────────────────────────────
 
@@ -96,35 +119,34 @@ function OBSConnectionSection() {
 
   return (
     <div>
-      <div className="text-xs text-ink-faint mb-3 leading-relaxed">
+      <div className="mb-3 text-xs leading-relaxed text-ink-faint">
         In OBS, open the SlimCast panel and click <span className="text-ink-muted">Connect with SlimCast</span> — no key needed.
         Use a manual key only as a fallback. Resetting revokes <span className="text-ink-muted">all</span> connected devices.
       </div>
       {apiKey ? (
         <div className="space-y-3">
-          <div className="bg-amber-950/30 border border-amber-800/60 rounded-lg px-3 py-2 text-xs text-amber-400">
-            Copy this now — it won&apos;t be shown again.
-          </div>
+          <Alert className="border-warning/40 bg-warning/10">
+            <AlertDescription className="text-warning">
+              Copy this now — it won&apos;t be shown again.
+            </AlertDescription>
+          </Alert>
           <div className="flex items-center gap-3">
-            <code className="flex-1 bg-base border border-line rounded-lg px-3 py-2 text-sm font-mono text-ink break-all">
+            <code className="flex-1 rounded-lg border border-line bg-surface-2 px-3 py-2 font-mono text-sm break-all text-ink">
               {apiKey}
             </code>
-            <button
+            <Button
+              variant={copied ? 'default' : 'secondary'}
               onClick={() => copy(apiKey)}
-              className={`px-3 py-2 rounded-lg text-sm font-medium transition-colors min-w-[70px] ${copied ? 'bg-accent text-base' : 'bg-elevated hover:bg-line-strong text-ink'}`}
+              className={cn('h-9 min-w-[72px]', copied && 'bg-success text-bg hover:bg-success')}
             >
               {copied ? 'Copied!' : 'Copy'}
-            </button>
+            </Button>
           </div>
         </div>
       ) : (
-        <button
-          onClick={generateApiKey}
-          disabled={keyLoading}
-          className="bg-elevated hover:bg-line-strong disabled:opacity-50 px-4 py-2 rounded-lg text-sm font-semibold transition-colors"
-        >
+        <Button variant="secondary" onClick={generateApiKey} disabled={keyLoading} className="h-9 font-semibold">
           {keyLoading ? 'Resetting…' : 'Reset access · new manual key'}
-        </button>
+        </Button>
       )}
     </div>
   )
@@ -151,7 +173,7 @@ function BitrateInput({
 
   return (
     <div className="flex items-center gap-1.5">
-      <input
+      <Input
         type="number"
         min={min}
         max={max}
@@ -160,7 +182,7 @@ function BitrateInput({
         onChange={e => setRaw(e.target.value)}
         onBlur={e => commit(e.target.value)}
         onKeyDown={e => { if (e.key === 'Enter') commit((e.target as HTMLInputElement).value) }}
-        className="w-24 bg-base border border-line rounded-lg px-2 py-1.5 text-sm font-mono text-ink focus:outline-none focus:border-accent transition-colors text-center"
+        className="h-8 w-24 text-center font-mono"
       />
       <span className="text-xs text-ink-faint">kbps</span>
     </div>
@@ -172,20 +194,22 @@ function BitrateInput({
 function CostSummary({ pricing, loading }: { pricing: PricingBreakdown | null; loading: boolean }) {
   if (loading || !pricing) {
     return (
-      <div className="bg-surface border border-line rounded-2xl p-5">
-        <div className="text-xs text-ink-faint">Calculating cost…</div>
-      </div>
+      <Card className="border-line">
+        <CardContent className="py-1">
+          <div className="text-xs text-ink-faint">Calculating cost…</div>
+        </CardContent>
+      </Card>
     )
   }
 
-  const { line_items, total_tokens_per_hr, total_dollars_per_hr, credits, estimated_seconds_remaining } = pricing
+  const { line_items, total_tokens_per_hr, total_dollars_per_hr, credits } = pricing
   const hasItems = line_items.length > 0
   const remaining = secondsRemaining(credits, total_tokens_per_hr)
 
   return (
-    <div className="bg-surface border border-line rounded-2xl overflow-hidden">
+    <div className="overflow-hidden rounded-2xl border border-line bg-surface">
       <div className="px-5 pt-5 pb-4">
-        <div className="text-xs text-ink-faint uppercase tracking-widest font-mono mb-4">Cost summary</div>
+        <div className="mb-4 font-mono text-xs tracking-widest text-ink-faint uppercase">Cost summary</div>
 
         {!hasItems ? (
           <div className="text-sm text-ink-faint">Enable at least one platform to see costs.</div>
@@ -195,9 +219,9 @@ function CostSummary({ pricing, loading }: { pricing: PricingBreakdown | null; l
               <div key={i} className="flex items-center justify-between text-sm">
                 <div>
                   <span className="text-ink capitalize">{item.label}</span>
-                  <span className="text-ink-faint text-xs ml-2">{item.detail}</span>
+                  <span className="ml-2 text-xs text-ink-faint">{item.detail}</span>
                 </div>
-                <span className={`font-mono text-xs tabular-nums ${item.tokens_per_hr === 0 ? 'text-ink-faint' : 'text-ink'}`}>
+                <span className={cn('font-mono text-xs tabular-nums', item.tokens_per_hr === 0 ? 'text-ink-faint' : 'text-ink')}>
                   {item.tokens_per_hr === 0 ? 'free' : `+${item.tokens_per_hr.toFixed(1)} tkn/hr`}
                 </span>
               </div>
@@ -207,17 +231,17 @@ function CostSummary({ pricing, loading }: { pricing: PricingBreakdown | null; l
       </div>
 
       {hasItems && (
-        <div className="border-t border-line px-5 py-4 flex items-center justify-between">
+        <div className="flex items-center justify-between border-t border-line px-5 py-4">
           <div>
-            <div className="text-base font-bold font-mono text-ink">
+            <div className="font-mono text-base font-bold text-ink">
               {total_tokens_per_hr.toFixed(1)} tkn/hr
             </div>
-            <div className="text-xs text-ink-faint mt-0.5">
+            <div className="mt-0.5 text-xs text-ink-faint">
               ${total_dollars_per_hr.toFixed(2)}/hr · {formatTokens(credits)} balance
             </div>
           </div>
           <div className="text-right">
-            <div className="text-base font-bold font-mono text-ink">
+            <div className="font-mono text-base font-bold text-ink">
               {formatDuration(remaining)}
             </div>
             <div className="text-xs text-ink-faint">at this rate</div>
@@ -265,156 +289,145 @@ function OutputCard({
 
   const encodeLabel = isPassthrough ? 'HEVC passthrough' : orientation === 'portrait' ? 'Portrait' : 'Landscape'
   const encodeColor = isPassthrough
-    ? 'text-blue-400'
-    : orientation === 'portrait' ? 'text-pink-400' : 'text-accent'
+    ? 'text-cyan'
+    : orientation === 'portrait' ? 'text-pink' : 'text-brand'
+
+  const tint = PLATFORM_TINTS[platform as PlatformKey]?.tint
 
   return (
-    <div className={`bg-surface border rounded-2xl p-5 transition-opacity ${!config.enabled ? 'opacity-50' : ''} ${config.enabled ? 'border-line' : 'border-line/40'}`}>
-      <div className="flex items-start gap-4">
-        {/* Platform icon */}
-        <div className={`w-10 h-10 rounded-xl flex items-center justify-center text-xs font-bold text-white flex-shrink-0 ${PLATFORM_ICON_COLORS[platform]}`}>
-          {PLATFORM_ICONS[platform]}
-        </div>
+    <Card className={cn('border-line transition-opacity', !config.enabled && 'opacity-50')}>
+      <CardContent className="py-1">
+        <div className="flex items-start gap-4">
+          {/* Platform icon */}
+          <span
+            className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border"
+            style={{ borderColor: `${tint}40`, color: tint, background: `${tint}14` }}
+          >
+            <PlatformIcon platform={platform as PlatformKey} className="h-5 w-5" />
+          </span>
 
-        <div className="flex-1 min-w-0">
-          {/* Header row */}
-          <div className="flex items-center justify-between mb-3">
-            <div>
+          <div className="min-w-0 flex-1">
+            {/* Header row */}
+            <div className="mb-3 flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <span className="font-semibold text-ink">{meta.label}</span>
-                <span className={`text-xs font-mono ${encodeColor}`}>{encodeLabel}</span>
+                <span className="font-display font-semibold text-ink">{meta.label}</span>
+                <span className={cn('font-mono text-xs', encodeColor)}>{encodeLabel}</span>
                 {saving && <span className="text-xs text-ink-faint">saving…</span>}
               </div>
+              <Switch checked={config.enabled} onCheckedChange={onToggle} />
             </div>
-            <button
-              onClick={() => onToggle(!config.enabled)}
-              className={`relative w-9 h-5 rounded-full transition-colors flex-shrink-0 ${config.enabled ? 'bg-accent' : 'bg-line-strong'}`}
-            >
-              <span className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${config.enabled ? 'translate-x-4' : ''}`} />
-            </button>
-          </div>
 
-          {/* Twitch HEVC eligibility / passthrough control */}
-          {platform === 'twitch' && (
-            twitchEligible ? (
-              <div className="mb-3 flex items-center justify-between gap-3 rounded-xl bg-blue-500/10 border border-blue-500/20 px-3 py-2">
-                <div className="text-xs">
-                  <div className="font-semibold text-blue-300">HEVC passthrough available · up to 2K</div>
-                  <div className="text-ink-faint">
-                    {twitchPassthrough
-                      ? 'Sending your source HEVC untouched — best quality, no transcode.'
-                      : 'Currently transcoding to H.264 (≤1080p). Turn on for original-quality 2K.'}
+            {/* Twitch HEVC eligibility / passthrough control */}
+            {platform === 'twitch' && (
+              twitchEligible ? (
+                <div className="mb-3 flex items-center justify-between gap-3 rounded-xl border border-cyan/20 bg-cyan/10 px-3 py-2">
+                  <div className="text-xs">
+                    <div className="font-semibold text-cyan">HEVC passthrough available · up to 2K</div>
+                    <div className="text-ink-faint">
+                      {twitchPassthrough
+                        ? 'Sending your source HEVC untouched — best quality, no transcode.'
+                        : 'Currently transcoding to H.264 (≤1080p). Turn on for original-quality 2K.'}
+                    </div>
+                  </div>
+                  <Switch
+                    checked={twitchPassthrough}
+                    onCheckedChange={onPassthroughChange}
+                  />
+                </div>
+              ) : (
+                <div className="mb-3 flex items-center justify-between gap-3 rounded-xl border border-line/60 bg-surface-2 px-3 py-2">
+                  <div className="text-xs text-ink-faint">
+                    <span className="text-ink-muted">H.264 transcode.</span> HEVC / 2K passthrough needs Twitch Affiliate status.
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={onRecheckEligibility}
+                    disabled={saving}
+                    className="shrink-0"
+                  >
+                    {saving ? 'Checking…' : 'Re-check'}
+                  </Button>
+                </div>
+              )
+            )}
+
+            {/* Settings row */}
+            <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
+              {/* Resolution selector */}
+              {!isPassthrough && (
+                <div>
+                  <div className="mb-1.5 text-xs text-ink-faint">Resolution</div>
+                  <div className="flex gap-1">
+                    {RESOLUTIONS.map(res => {
+                      // Twitch only accepts 2K via HEVC passthrough — never as an H.264
+                      // transcode — so 1440p is unavailable in Twitch's transcode mode.
+                      const isLocked = res === '1440p' && (platform === 'twitch' || !has2kAddon)
+                      const lockTitle = platform === 'twitch'
+                        ? 'Twitch 2K requires HEVC passthrough (Affiliate)'
+                        : 'Requires 2K add-on'
+                      return (
+                        <SegButton
+                          key={res}
+                          active={resolution === res}
+                          disabled={isLocked}
+                          title={isLocked ? lockTitle : undefined}
+                          onClick={() => !isLocked && onResolutionChange(res)}
+                        >
+                          {res}{isLocked ? ' 🔒' : ''}
+                        </SegButton>
+                      )
+                    })}
                   </div>
                 </div>
-                <button
-                  onClick={() => onPassthroughChange(!twitchPassthrough)}
-                  title="HEVC passthrough"
-                  className={`relative w-9 h-5 rounded-full transition-colors flex-shrink-0 ${twitchPassthrough ? 'bg-blue-500' : 'bg-line-strong'}`}
-                >
-                  <span className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${twitchPassthrough ? 'translate-x-4' : ''}`} />
-                </button>
-              </div>
-            ) : (
-              <div className="mb-3 flex items-center justify-between gap-3 rounded-xl bg-base border border-line/60 px-3 py-2">
-                <div className="text-xs text-ink-faint">
-                  <span className="text-ink-muted">H.264 transcode.</span> HEVC / 2K passthrough needs Twitch Affiliate status.
-                </div>
-                <button
-                  onClick={onRecheckEligibility}
-                  disabled={saving}
-                  className="text-xs font-semibold px-2.5 py-1 rounded-lg bg-surface border border-line text-ink-muted hover:border-accent/50 hover:text-ink disabled:opacity-50 flex-shrink-0"
-                >
-                  {saving ? 'Checking…' : 'Re-check'}
-                </button>
-              </div>
-            )
-          )}
+              )}
 
-          {/* Settings row */}
-          <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
-            {/* Resolution selector */}
-            {!isPassthrough && (
-              <div>
-                <div className="text-xs text-ink-faint mb-1.5">Resolution</div>
-                <div className="flex gap-1">
-                  {RESOLUTIONS.map(res => {
-                    // Twitch only accepts 2K via HEVC passthrough — never as an H.264
-                    // transcode — so 1440p is unavailable in Twitch's transcode mode.
-                    const isLocked = res === '1440p' && (platform === 'twitch' || !has2kAddon)
-                    const lockTitle = platform === 'twitch'
-                      ? 'Twitch 2K requires HEVC passthrough (Affiliate)'
-                      : 'Requires 2K add-on'
-                    return (
-                      <button
-                        key={res}
-                        disabled={isLocked}
-                        onClick={() => !isLocked && onResolutionChange(res)}
-                        title={isLocked ? lockTitle : undefined}
-                        className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors ${
-                          resolution === res
-                            ? 'bg-accent text-base'
-                            : isLocked
-                              ? 'bg-base border border-line/40 text-ink-faint/40 cursor-not-allowed'
-                              : 'bg-base border border-line text-ink-muted hover:border-accent/50 hover:text-ink'
-                        }`}
+              {/* Bitrate input */}
+              {!isPassthrough && (
+                <div>
+                  <div className="mb-1.5 text-xs text-ink-faint">Bitrate</div>
+                  <BitrateInput
+                    value={bitrate}
+                    min={meta.bitrateMin}
+                    max={meta.bitrateMax}
+                    onChange={onBitrateChange}
+                  />
+                  <div className="mt-1 text-xs text-ink-faint/60">
+                    {meta.bitrateMin.toLocaleString()}–{meta.bitrateMax.toLocaleString()}
+                  </div>
+                </div>
+              )}
+
+              {/* Orientation selector (platforms that support it) */}
+              {meta.supportsPortrait && (
+                <div>
+                  <div className="mb-1.5 text-xs text-ink-faint">Orientation</div>
+                  <div className="flex gap-1">
+                    {['landscape', 'portrait'].map(o => (
+                      <SegButton
+                        key={o}
+                        active={orientation === o}
+                        onClick={() => onOrientationChange(o)}
                       >
-                        {res}{isLocked ? ' 🔒' : ''}
-                      </button>
-                    )
-                  })}
+                        <span className="capitalize">{o}</span>
+                      </SegButton>
+                    ))}
+                  </div>
                 </div>
-              </div>
-            )}
+              )}
 
-            {/* Bitrate input */}
-            {!isPassthrough && (
-              <div>
-                <div className="text-xs text-ink-faint mb-1.5">Bitrate</div>
-                <BitrateInput
-                  value={bitrate}
-                  min={meta.bitrateMin}
-                  max={meta.bitrateMax}
-                  onChange={onBitrateChange}
-                />
-                <div className="text-xs text-ink-faint/60 mt-1">
-                  {meta.bitrateMin.toLocaleString()}–{meta.bitrateMax.toLocaleString()}
+              {/* Passthrough info */}
+              {isPassthrough && (
+                <div className="text-xs text-ink-faint">
+                  Original quality — your source goes through untouched.
+                  <br />Bitrate is whatever OBS sends.
                 </div>
-              </div>
-            )}
-
-            {/* Orientation selector (platforms that support it) */}
-            {meta.supportsPortrait && (
-              <div>
-                <div className="text-xs text-ink-faint mb-1.5">Orientation</div>
-                <div className="flex gap-1">
-                  {['landscape', 'portrait'].map(o => (
-                    <button
-                      key={o}
-                      onClick={() => onOrientationChange(o)}
-                      className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors capitalize ${
-                        orientation === o
-                          ? 'bg-accent text-base'
-                          : 'bg-base border border-line text-ink-muted hover:border-accent/50 hover:text-ink'
-                      }`}
-                    >
-                      {o}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Passthrough info */}
-            {isPassthrough && (
-              <div className="text-xs text-ink-faint">
-                Original quality — your source goes through untouched.
-                <br />Bitrate is whatever OBS sends.
-              </div>
-            )}
+              )}
+            </div>
           </div>
         </div>
-      </div>
-    </div>
+      </CardContent>
+    </Card>
   )
 }
 
@@ -477,58 +490,58 @@ function DeleteAccountSection() {
   }
 
   return (
-    <div className="bg-surface border border-red-900/50 rounded-2xl overflow-hidden">
+    <div className="overflow-hidden rounded-2xl border border-danger/30 bg-surface">
       <button
         onClick={() => setOpen(v => !v)}
-        className="w-full flex items-center justify-between px-5 py-4 hover:bg-red-950/20 transition-colors"
+        className="flex w-full items-center justify-between px-5 py-4 transition-colors hover:bg-danger/5"
       >
         <div>
-          <div className="text-sm font-semibold text-left text-red-400">Delete account</div>
-          <div className="text-xs text-ink-faint mt-0.5 text-left">Permanently remove your account and all data</div>
+          <div className="text-left text-sm font-semibold text-danger">Delete account</div>
+          <div className="mt-0.5 text-left text-xs text-ink-faint">Permanently remove your account and all data</div>
         </div>
-        <span className={`text-ink-faint text-xs transition-transform ${open ? 'rotate-180' : ''}`}>▾</span>
+        <span className={cn('text-xs text-ink-faint transition-transform', open && 'rotate-180')}>▾</span>
       </button>
 
       {open && (
-        <div className="px-5 pb-5 border-t border-red-900/40 pt-4 space-y-4">
-          <div className="text-xs text-ink-muted leading-relaxed">
-            This <span className="text-red-400 font-medium">permanently deletes</span> your account: stream keys,
+        <div className="space-y-4 border-t border-danger/20 px-5 pt-4 pb-5">
+          <div className="text-xs leading-relaxed text-ink-muted">
+            This <span className="font-medium text-danger">permanently deletes</span> your account: stream keys,
             platform connections, and history. Any active stream is stopped, its server destroyed, and any
             subscription canceled immediately. This cannot be undone.
           </div>
 
           {balance != null && balance > 0 && (
-            <label className="flex items-start gap-2.5 rounded-xl bg-red-950/20 border border-red-900/40 px-3 py-2.5 cursor-pointer">
+            <label className="flex cursor-pointer items-start gap-2.5 rounded-xl border border-danger/30 bg-danger/5 px-3 py-2.5">
               <input
                 type="checkbox"
                 checked={forfeit}
                 onChange={e => setForfeit(e.target.checked)}
-                className="mt-0.5 accent-red-500"
+                className="mt-0.5 accent-danger"
               />
               <span className="text-xs text-ink-muted">
-                I understand I’m forfeiting my remaining <span className="text-ink font-medium">{formatTokens(balance)}</span> —
+                I understand I’m forfeiting my remaining <span className="font-medium text-ink">{formatTokens(balance)}</span> —
                 they’re non-refundable and will be lost.
               </span>
             </label>
           )}
 
           <div>
-            <div className="text-xs text-ink-faint mb-1.5">Type <span className="font-mono text-ink-muted">DELETE</span> to confirm</div>
-            <input
+            <div className="mb-1.5 text-xs text-ink-faint">Type <span className="font-mono text-ink-muted">DELETE</span> to confirm</div>
+            <Input
               type="text"
               value={confirmText}
               onChange={e => setConfirmText(e.target.value)}
               placeholder="DELETE"
-              className="w-full bg-base border border-line rounded-lg px-3 py-2 text-sm font-mono text-ink focus:outline-none focus:border-red-500 transition-colors"
+              className="h-9 font-mono"
             />
           </div>
 
-          {error && <div className="text-xs text-red-400">{error}</div>}
+          {error && <div className="text-xs text-danger">{error}</div>}
 
           <button
             onClick={handleDelete}
             disabled={!canDelete}
-            className="bg-red-600 hover:bg-red-500 disabled:opacity-40 disabled:cursor-not-allowed px-4 py-2 rounded-lg text-sm font-semibold text-white transition-colors"
+            className="rounded-lg bg-danger px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-danger/90 disabled:cursor-not-allowed disabled:opacity-40"
           >
             {deleting ? 'Deleting…' : 'Permanently delete my account'}
           </button>
@@ -702,7 +715,7 @@ export default function SettingsPage() {
     return (
       <div className="min-h-screen">
         <DashboardNav />
-        <div className="flex items-center justify-center py-32 text-ink-faint text-sm">Loading…</div>
+        <div className="flex items-center justify-center py-32 text-sm text-ink-faint">Loading…</div>
       </div>
     )
   }
@@ -711,9 +724,9 @@ export default function SettingsPage() {
     return (
       <div className="min-h-screen">
         <DashboardNav />
-        <div className="max-w-2xl mx-auto px-6 py-16 text-center text-ink-muted">
+        <div className="mx-auto max-w-2xl px-6 py-16 text-center text-ink-muted">
           <p className="mb-4">No platforms connected yet.</p>
-          <a href="/dashboard/platforms" className="text-accent hover:text-accent-strong">Connect platforms →</a>
+          <a href="/dashboard/platforms" className="text-brand hover:text-cyan">Connect platforms →</a>
         </div>
       </div>
     )
@@ -725,12 +738,12 @@ export default function SettingsPage() {
     <div className="min-h-screen">
       <DashboardNav />
 
-      <main className="max-w-2xl mx-auto px-6 py-10 space-y-5">
+      <main className="mx-auto max-w-2xl space-y-5 px-6 py-10">
 
         {/* Header */}
         <div>
-          <h1 className="text-lg font-semibold">Stream settings</h1>
-          <p className="text-sm text-ink-muted mt-1">
+          <h1 className="font-display text-2xl font-semibold text-ink">Stream settings</h1>
+          <p className="mt-1 text-sm text-ink-muted">
             Per-output resolution and bitrate. Changes apply within ~10s, even mid-stream.
             Resolution and frame rate in OBS override these per-output settings.
           </p>
@@ -765,33 +778,33 @@ export default function SettingsPage() {
 
         {/* 2K add-on notice */}
         {!has2kAddon && (
-          <div className="bg-base border border-line rounded-xl px-4 py-3 flex items-center justify-between gap-4">
+          <div className="flex items-center justify-between gap-4 rounded-xl border border-line bg-surface-2 px-4 py-3">
             <div>
               <div className="text-sm font-medium text-ink-muted">2K (1440p) add-on</div>
-              <div className="text-xs text-ink-faint mt-0.5">
+              <div className="mt-0.5 text-xs text-ink-faint">
                 +0.5 tkn/hr when active. Unlocks 1440p resolution on any output.
               </div>
             </div>
-            <span className="text-xs text-ink-faint bg-elevated px-2.5 py-1 rounded-lg shrink-0">Not active</span>
+            <span className="shrink-0 rounded-lg bg-surface-3 px-2.5 py-1 text-xs text-ink-faint">Not active</span>
           </div>
         )}
 
         {/* Portrait framing — collapsible */}
         {hasPortrait && (
-          <div className="bg-surface border border-line rounded-2xl overflow-hidden">
+          <div className="overflow-hidden rounded-2xl border border-line bg-surface">
             <button
               onClick={() => setShowPortraitCrop(v => !v)}
-              className="w-full flex items-center justify-between px-5 py-4 hover:bg-elevated/30 transition-colors"
+              className="flex w-full items-center justify-between px-5 py-4 transition-colors hover:bg-surface-2/40"
             >
               <div>
-                <div className="text-sm font-semibold text-left">Vertical framing</div>
-                <div className="text-xs text-ink-faint mt-0.5 text-left">Set the 9:16 crop applied to portrait outputs</div>
+                <div className="text-left text-sm font-semibold text-ink">Vertical framing</div>
+                <div className="mt-0.5 text-left text-xs text-ink-faint">Set the 9:16 crop applied to portrait outputs</div>
               </div>
-              <span className={`text-ink-faint text-xs transition-transform ${showPortraitCrop ? 'rotate-180' : ''}`}>▾</span>
+              <span className={cn('text-xs text-ink-faint transition-transform', showPortraitCrop && 'rotate-180')}>▾</span>
             </button>
             {showPortraitCrop && (
-              <div className="px-5 pb-5 border-t border-line pt-4">
-                <p className="text-xs text-ink-muted mb-4">
+              <div className="border-t border-line px-5 pt-4 pb-5">
+                <p className="mb-4 text-xs text-ink-muted">
                   Your source is 16:9; portrait platforms need 9:16. Set how the vertical crop is framed — cropped once on the GPU and sent to every portrait platform.
                 </p>
                 <PortraitCropEditor />
@@ -801,19 +814,19 @@ export default function SettingsPage() {
         )}
 
         {/* OBS connection — collapsible */}
-        <div className="bg-surface border border-line rounded-2xl overflow-hidden">
+        <div className="overflow-hidden rounded-2xl border border-line bg-surface">
           <button
             onClick={() => setShowOBSSection(v => !v)}
-            className="w-full flex items-center justify-between px-5 py-4 hover:bg-elevated/30 transition-colors"
+            className="flex w-full items-center justify-between px-5 py-4 transition-colors hover:bg-surface-2/40"
           >
             <div>
-              <div className="text-sm font-semibold text-left">OBS connection</div>
-              <div className="text-xs text-ink-faint mt-0.5 text-left">Manual key reset and device management</div>
+              <div className="text-left text-sm font-semibold text-ink">OBS connection</div>
+              <div className="mt-0.5 text-left text-xs text-ink-faint">Manual key reset and device management</div>
             </div>
-            <span className={`text-ink-faint text-xs transition-transform ${showOBSSection ? 'rotate-180' : ''}`}>▾</span>
+            <span className={cn('text-xs text-ink-faint transition-transform', showOBSSection && 'rotate-180')}>▾</span>
           </button>
           {showOBSSection && (
-            <div className="px-5 pb-5 border-t border-line pt-4">
+            <div className="border-t border-line px-5 pt-4 pb-5">
               <OBSConnectionSection />
             </div>
           )}

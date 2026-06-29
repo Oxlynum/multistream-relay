@@ -5,6 +5,7 @@ import { createBrowserClient } from '@/lib/supabase'
 import { DashboardNav } from '@/components/dashboard-nav'
 import { StreamManager } from '@/components/stream-manager'
 import { ConnectionHealthGraph } from '@/components/ConnectionHealthGraph'
+import { Kicker } from '@/components/ui/kicker'
 
 export default function StreamPage() {
   const [enabledPlatforms, setEnabledPlatforms] = useState<string[]>([])
@@ -29,7 +30,14 @@ export default function StreamPage() {
   return (
     <div className="min-h-screen">
       <DashboardNav />
-      <main className="max-w-3xl mx-auto px-6 py-10 space-y-6">
+      <main className="mx-auto max-w-3xl space-y-6 px-6 py-10">
+        <div>
+          <Kicker color="cyan">Control room</Kicker>
+          <h1 className="mt-3 font-display text-2xl font-semibold text-ink">Live status</h1>
+          <p className="mt-1 text-sm text-ink-muted">
+            Start streaming from OBS — SlimCast spins up a GPU and goes live automatically.
+          </p>
+        </div>
         <StreamManager />
         <ConnectionHealthGraph enabledPlatforms={enabledPlatforms} />
       </main>

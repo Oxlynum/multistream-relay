@@ -184,10 +184,10 @@ function PlatformTile({ platform, state, active }: { platform: string; state: st
 
   const dotColor = isLive ? '#37d67a' : isRestarting ? '#ffb020' : isError ? '#ff5470' : '#555e6e'
   const label    = isLive ? 'live' : isRestarting ? 'reconnecting' : isError ? 'error' : active ? 'connecting…' : 'idle'
-  const labelCls = isLive ? 'text-accent' : isRestarting ? 'text-amber-400' : isError ? 'text-red-400' : 'text-ink-faint'
+  const labelCls = isLive ? 'text-success' : isRestarting ? 'text-warning' : isError ? 'text-danger' : 'text-ink-faint'
 
   return (
-    <div className={`bg-base border rounded-xl px-3 py-2.5 ${isError ? 'border-red-900/60' : 'border-line'}`}>
+    <div className={`bg-surface-2 border rounded-xl px-3 py-2.5 ${isError ? 'border-danger/40' : 'border-line'}`}>
       <div className="flex items-center gap-1.5 mb-0.5">
         <span style={{ color: dotColor }} className="text-[10px] leading-none">●</span>
         <span className="text-xs font-medium text-ink">{PLATFORM_LABELS[platform]}</span>
@@ -296,10 +296,10 @@ export function StreamManager() {
   // ── Searching / spinning up ──────────────────────────────────────────────────
   if (phase === 'provisioning') {
     return (
-      <div className="bg-surface border border-amber-800/40 rounded-2xl p-6 flex items-start gap-3">
+      <div className="bg-surface border border-warning/30 rounded-2xl p-6 flex items-start gap-3">
         <PingDot color="#fbbf24" />
         <div>
-          <div className="text-sm font-semibold text-amber-400 mb-1">Finding the nearest server…</div>
+          <div className="text-sm font-semibold text-warning mb-1">Finding the nearest server…</div>
           <div className="text-xs text-ink-faint">
             Searching for an available GPU near you. Usually ready in under a minute.
           </div>
@@ -311,11 +311,11 @@ export function StreamManager() {
   // ── Server ready, waiting for OBS ────────────────────────────────────────────
   if (phase === 'waiting') {
     return (
-      <div className="bg-surface border border-amber-800/30 rounded-2xl p-6 space-y-4">
+      <div className="bg-surface border border-warning/30 rounded-2xl p-6 space-y-4">
         <div className="flex items-center gap-2.5">
           <PingDot color="#fbbf24" />
           <div>
-            <div className="text-sm font-semibold text-amber-400">Server ready · waiting for OBS</div>
+            <div className="text-sm font-semibold text-warning">Server ready · waiting for OBS</div>
             <div className="text-xs text-ink-faint mt-0.5">
               {datacenter
                 ? `Connected to ${formatLocation(datacenter)} · press Go Live in the SlimCast panel.`
@@ -335,11 +335,11 @@ export function StreamManager() {
   // ── OBS connected, FFmpeg starting ──────────────────────────────────────────
   if (phase === 'connecting') {
     return (
-      <div className="bg-surface border border-amber-800/30 rounded-2xl p-6 space-y-4">
+      <div className="bg-surface border border-warning/30 rounded-2xl p-6 space-y-4">
         <div className="flex items-center gap-2.5">
           <PingDot color="#fbbf24" />
           <div>
-            <div className="text-sm font-semibold text-amber-400">OBS connected · starting streams…</div>
+            <div className="text-sm font-semibold text-warning">OBS connected · starting streams…</div>
             <div className="text-xs text-ink-faint mt-0.5">
               Connecting to platforms — usually takes a few seconds.
             </div>
@@ -361,8 +361,8 @@ export function StreamManager() {
 
   // ── Live ─────────────────────────────────────────────────────────────────────
   const borderCls = lowCredits
-    ? 'border-amber-800/60'
-    : anyError ? 'border-red-900/40' : 'border-accent/30'
+    ? 'border-warning/40'
+    : anyError ? 'border-danger/40' : 'border-success/30 shadow-glow'
 
   return (
     <div className={`bg-surface border rounded-2xl p-6 space-y-5 ${borderCls}`}>
@@ -373,7 +373,7 @@ export function StreamManager() {
           <PingDot color={anyError ? '#f87171' : anyRestarting ? '#fbbf24' : '#37d67a'} />
           <div>
             <div className={`text-sm font-semibold leading-none
-              ${anyError ? 'text-red-400' : anyRestarting ? 'text-amber-400' : 'text-ink'}`}>
+              ${anyError ? 'text-danger' : anyRestarting ? 'text-warning' : 'text-ink'}`}>
               {anyError ? 'Live · platform error' : anyRestarting ? 'Live · reconnecting…' : 'Live'}
             </div>
             {liveStartRef.current && (
@@ -383,7 +383,7 @@ export function StreamManager() {
         </div>
 
         <div className="text-right flex-shrink-0">
-          <div className={`text-base font-bold font-mono ${lowCredits ? 'text-amber-400' : 'text-ink'}`}>
+          <div className={`text-base font-bold font-mono ${lowCredits ? 'text-warning' : 'text-ink'}`}>
             {formatTokens(credits)}
           </div>
           <div className="text-xs text-ink-faint">
@@ -415,11 +415,11 @@ export function StreamManager() {
 
       {/* 12h confirm banner */}
       {confirm_required && confirmMinLeft !== null && (
-        <div className="bg-amber-950/30 border border-amber-800/60 rounded-xl px-4 py-3 space-y-1">
-          <div className="text-sm font-semibold text-amber-400">Still streaming?</div>
-          <div className="text-xs text-amber-500/80">
+        <div className="bg-warning/10 border border-warning/30 rounded-xl px-4 py-3 space-y-1">
+          <div className="text-sm font-semibold text-warning">Still streaming?</div>
+          <div className="text-xs text-warning/80">
             You&apos;ve been live 12 hours. This stream ends in {confirmMinLeft} min unless you tap
-            <span className="text-amber-400"> Yes, keep streaming</span> in the OBS plugin.
+            <span className="text-warning"> Yes, keep streaming</span> in the OBS plugin.
           </div>
         </div>
       )}

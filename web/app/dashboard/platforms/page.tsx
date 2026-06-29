@@ -1,10 +1,13 @@
 'use client'
 
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, Suspense } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
-import { Suspense } from 'react'
+import { toast } from 'sonner'
 import { createBrowserClient } from '@/lib/supabase'
 import { DashboardNav } from '@/components/dashboard-nav'
+import { Kicker } from '@/components/ui/kicker'
+import { PlatformConnectCard } from '@/components/dashboard/platform-connect-card'
+import type { PlatformKey } from '@/components/platform-icon'
 
 interface PlatformConfig {
   platform: string
@@ -20,7 +23,7 @@ interface PlatformConfig {
 // Platforms that support OAuth "Connect" flow
 const OAUTH_PLATFORMS = new Set(['twitch', 'youtube', 'facebook'])
 
-const PLATFORMS = [
+const PLATFORMS: Array<{ id: PlatformKey; label: string; note: string | null }> = [
   { id: 'twitch',   label: 'Twitch',   note: null },
   { id: 'kick',     label: 'Kick',     note: null },
   { id: 'youtube',  label: 'YouTube',  note: null },
@@ -38,12 +41,6 @@ function PlatformsContent() {
   const [saved, setSaved] = useState<string | null>(null)
   const [removing, setRemoving] = useState<string | null>(null)
   const [connecting, setConnecting] = useState<string | null>(null)
-  const [toast, setToast] = useState<{ msg: string; type: 'success' | 'error' } | null>(null)
-
-  const showToast = (msg: string, type: 'success' | 'error' = 'success') => {
-    setToast({ msg, type })
-    setTimeout(() => setToast(null), 3500)
-  }
 
   const loadConnections = useCallback(async (userId: string) => {
     const supabase = createBrowserClient()
@@ -86,8 +83,8 @@ function PlatformsContent() {
       // Handle OAuth redirect params
       const connected = searchParams.get('connected')
       const oauthError = searchParams.get('oauth_error')
-      if (connected) showToast(`${connected.charAt(0).toUpperCase() + connected.slice(1)} connected successfully`)
-      if (oauthError) showToast(`Connection failed: ${oauthError}`, 'error')
+      if (connected) toast.success(`${connected.charAt(0).toUpperCase() + connected.slice(1)} connected successfully`)
+      if (oauthError) toast.error(`Connection failed: ${oauthError}`)
     }
     init()
   }, [router, searchParams, loadConnections, loadOAuthStatus])
@@ -105,14 +102,14 @@ function PlatformsContent() {
 
       if (!res.ok) {
         const { error } = await res.json().catch(() => ({ error: 'Unknown error' }))
-        showToast(error ?? 'Failed to start OAuth', 'error')
+        toast.error(error ?? 'Failed to start OAuth')
         return
       }
 
       const { url } = await res.json()
       window.location.href = url
     } catch {
-      showToast('Failed to start OAuth connection', 'error')
+      toast.error('Failed to start OAuth connection')
       setConnecting(null)
     }
   }
@@ -129,7 +126,7 @@ function PlatformsContent() {
     })
 
     if (!res.ok) {
-      showToast('Disconnect failed', 'error')
+      toast.error('Disconnect failed')
       setRemoving(null)
       return
     }
@@ -138,7 +135,7 @@ function PlatformsContent() {
     if (user) await loadConnections(user.id)
     await loadOAuthStatus(session)
     setRemoving(null)
-    showToast(`${platformId} disconnected`)
+    toast.success(`${platformId} disconnected`)
   }
 
   async function save(platformId: string) {
@@ -201,21 +198,11 @@ function PlatformsContent() {
     <div className="min-h-screen">
       <DashboardNav />
 
-      {/* Toast */}
-      {toast && (
-        <div className={`fixed top-4 right-4 z-50 px-4 py-3 rounded-xl text-sm font-medium shadow-lg transition-all ${
-          toast.type === 'error'
-            ? 'bg-red-900/80 text-red-200 border border-red-700'
-            : 'bg-accent/20 text-accent border border-accent/40'
-        }`}>
-          {toast.msg}
-        </div>
-      )}
-
-      <main className="max-w-2xl mx-auto px-6 py-10 space-y-4">
+      <main className="mx-auto max-w-2xl space-y-4 px-6 py-10">
         <div>
-          <h1 className="text-lg font-semibold">Platforms</h1>
-          <p className="text-sm text-ink-muted mt-1">
+          <Kicker color="pink">Destinations</Kicker>
+          <h1 className="mt-3 font-display text-2xl font-semibold text-ink">Platforms</h1>
+          <p className="mt-1 text-sm text-ink-muted">
             Connect your accounts or paste stream keys. Keys are stored encrypted and never exposed.
           </p>
         </div>
@@ -227,100 +214,27 @@ function PlatformsContent() {
           const isOAuthConnected = !!oauthConnected[p.id]
 
           return (
-            <div key={p.id} className="bg-surface border border-line rounded-2xl p-6">
-              <div className="flex items-center justify-between mb-4">
-                <div className="flex items-center gap-3">
-                  <span className="font-semibold">{p.label}</span>
-                  {isConnected && (
-                    <span className="text-xs bg-accent-soft/50 text-accent border border-accent/40 px-2 py-0.5 rounded-full">
-                      {isOAuthConnected ? 'Connected via OAuth' : 'Connected'}
-                    </span>
-                  )}
-                </div>
-                {isConnected && (
-                  <label className="flex items-center gap-2 cursor-pointer">
-                    <span className="text-xs text-ink-muted">Active</span>
-                    <button
-                      onClick={() => toggleEnabled(p.id, !conn.enabled)}
-                      className={`relative w-9 h-5 rounded-full transition-colors ${conn.enabled ? 'bg-accent' : 'bg-line-strong'}`}
-                    >
-                      <span className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${conn.enabled ? 'translate-x-4' : ''}`} />
-                    </button>
-                  </label>
-                )}
-              </div>
-
-              {p.note && <p className="text-xs text-ink-faint mb-4 leading-relaxed">{p.note}</p>}
-
-              <div className="space-y-3">
-                {/* OAuth connect button */}
-                {isOAuthPlatform && (
-                  <div>
-                    {isOAuthConnected ? (
-                      <div className="flex items-center justify-between">
-                        <span className="text-sm text-ink-muted">
-                          Stream key fetched automatically
-                        </span>
-                        <button
-                          onClick={() => disconnectOAuth(p.id)}
-                          disabled={removing === p.id}
-                          className="text-xs text-red-500 hover:text-red-400 disabled:opacity-40 transition-colors"
-                        >
-                          {removing === p.id ? 'Disconnecting…' : 'Disconnect'}
-                        </button>
-                      </div>
-                    ) : (
-                      <button
-                        onClick={() => connectOAuth(p.id)}
-                        disabled={connecting === p.id}
-                        className="w-full bg-accent hover:bg-accent-strong text-base disabled:opacity-40 px-4 py-2.5 rounded-lg text-sm font-semibold transition-colors"
-                      >
-                        {connecting === p.id ? 'Redirecting…' : `Connect with ${p.label}`}
-                      </button>
-                    )}
-                  </div>
-                )}
-
-                {/* Manual key fallback */}
-                <div>
-                  {isOAuthPlatform && (
-                    <label className="text-xs text-ink-faint block mb-1.5">
-                      {isOAuthConnected ? 'Or override with a manual stream key' : 'Or paste stream key manually'}
-                    </label>
-                  )}
-                  {!isOAuthPlatform && (
-                    <label className="text-xs text-ink-faint block mb-1.5">Stream key</label>
-                  )}
-                  <div className="flex gap-2">
-                    <input
-                      type="password"
-                      placeholder={isConnected ? '••••••••••••••••' : 'Paste your stream key'}
-                      value={streamKeys[p.id] ?? ''}
-                      onChange={e => setStreamKeys(prev => ({ ...prev, [p.id]: e.target.value }))}
-                      className="flex-1 bg-base border border-line rounded-lg px-3 py-2 text-sm placeholder-ink-faint focus:outline-none focus:border-accent transition-colors"
-                    />
-                    <button
-                      onClick={() => save(p.id)}
-                      disabled={saving === p.id || !streamKeys[p.id]?.trim()}
-                      className="bg-surface border border-line hover:border-accent text-ink disabled:opacity-40 px-4 py-2 rounded-lg text-sm font-semibold transition-colors min-w-[70px]"
-                    >
-                      {saving === p.id ? '…' : saved === p.id ? 'Saved!' : isConnected ? 'Update' : 'Save'}
-                    </button>
-                  </div>
-                </div>
-
-                {/* Manual-only disconnect */}
-                {isConnected && !isOAuthConnected && (
-                  <button
-                    onClick={() => remove(p.id)}
-                    disabled={removing === p.id}
-                    className="text-xs text-red-500 hover:text-red-400 disabled:opacity-40 transition-colors"
-                  >
-                    {removing === p.id ? 'Removing…' : 'Remove'}
-                  </button>
-                )}
-              </div>
-            </div>
+            <PlatformConnectCard
+              key={p.id}
+              id={p.id}
+              label={p.label}
+              note={p.note}
+              connected={isConnected}
+              enabled={!!conn?.enabled}
+              isOAuthPlatform={isOAuthPlatform}
+              isOAuthConnected={isOAuthConnected}
+              streamKey={streamKeys[p.id] ?? ''}
+              connecting={connecting === p.id}
+              saving={saving === p.id}
+              saved={saved === p.id}
+              removing={removing === p.id}
+              onStreamKeyChange={(v) => setStreamKeys(prev => ({ ...prev, [p.id]: v }))}
+              onToggleEnabled={(enabled) => toggleEnabled(p.id, enabled)}
+              onConnectOAuth={() => connectOAuth(p.id)}
+              onDisconnectOAuth={() => disconnectOAuth(p.id)}
+              onSave={() => save(p.id)}
+              onRemove={() => remove(p.id)}
+            />
           )
         })}
       </main>
