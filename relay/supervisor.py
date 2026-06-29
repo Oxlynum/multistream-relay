@@ -508,32 +508,34 @@ def build_preview_cmd(source: str = LOCAL_SOURCE) -> list[str]:
 def build_passthrough_cmd(out: dict, source: str = LOCAL_SOURCE) -> list[str]:
     """HEVC copy -> HLS PUT to YouTube's HLS ingest URL (no re-encode).
 
-    YouTube ingests HEVC only over HLS (its RTMP endpoint is H.264-only), and it
-    requires fragmented-MP4 (CMAF) segments for HEVC — MPEG-TS is H.264-only here.
-    `-c copy` passes the source HEVC video + AAC audio straight through untouched,
-    so YouTube gets full source quality with zero GPU encode cost.
+    YouTube ingests HEVC only over HLS (its RTMP endpoint is H.264-only), and its
+    HLS ingestion requires **MPEG-2 Transport Stream (.ts)** segments. Fragmented MP4
+    (CMAF) is NOT supported — YouTube 200-OKs every fMP4 PUT but silently drops the
+    media, so Studio shows "No data" forever regardless of the stream key. HEVC rides
+    in TS via PMT stream_type 0x24; there is no init segment and no fourcc tag.
+    `-c copy` passes the source HEVC video + AAC audio straight through untouched, so
+    YouTube gets full source quality with zero GPU encode cost.
 
-    Two bitstream fixups are REQUIRED for the mpegts(SRT)->fMP4 copy (verified live —
-    without them the muxer dies in ~5s and crash-loops, YouTube never ingests):
-      -bsf:a aac_adtstoasc : source AAC is ADTS-framed (mpegts), fMP4/CMAF needs ASC.
-                             Without it: "Operation not permitted" muxing every AAC pkt.
-      -tag:v hvc1          : YouTube needs the hvc1 tag to recognize HEVC in fMP4
-                             (ffmpeg defaults to hev1, which YouTube won't ingest).
+    Verified live 2026-06-29 (HEVC test pattern -> real stream key -> Studio went live).
+    Do NOT switch back to fmp4/CMAF — that was the long-standing "YouTube dark" bug
+    (the old comment here claimed TS was "H.264-only", which is wrong per YouTube's
+    docs). TS carries AAC as ADTS natively, so NO `aac_adtstoasc` filter (that's an
+    fMP4-ism that breaks TS); NO `-tag:v hvc1` (an MP4 fourcc — ffmpeg's "Stream HEVC
+    is not hvc1" warning is cosmetic for TS). Segment duration must stay <=5s, so the
+    OBS source must use a keyframe interval <= hls_time (2s) for clean GOP-aligned
+    `-c copy` segments. Ref: developers.google.com/youtube/v3/live/guides/hls-ingestion
     """
     return [
         "ffmpeg", "-hide_banner", "-loglevel", "warning",
         *_input_args(source),
         "-i", source,
         "-c", "copy",
-        "-bsf:a", "aac_adtstoasc",
-        "-tag:v", "hvc1",
         "-f", "hls",
         "-method", "PUT",
         "-http_persistent", "1",
         "-hls_time", "2",
         "-hls_list_size", "5",
-        "-hls_segment_type", "fmp4",
-        "-hls_fmp4_init_filename", "init.mp4",
+        "-hls_segment_type", "mpegts",
         "-hls_flags", "delete_segments+omit_endlist+independent_segments",
         out["url"],
     ]
