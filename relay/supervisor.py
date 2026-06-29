@@ -293,12 +293,13 @@ def _redact(msg: str) -> str:
     return msg
 
 
-# GPU backend pods have NO remote log surface (no SSH host exposed, no :8080 panel —
-# only the all-in-one role runs it), so an ffmpeg that fails to bind/transcode is
-# invisible: its stderr is buffered in the runner, never reaching `vastai logs`. On the
-# GPU role, mirror ffmpeg stderr to stdout (redacted) so the bridge is debuggable. Safe:
-# the GPU's outputs are RTMPS returns to the hub, never platform stream keys.
-_FFMPEG_STDERR_TO_STDOUT = os.environ.get("RELAY_ROLE", "") == "gpu"
+# GPU backend pods AND vps hubs have NO remote log surface (no :8080 panel — only the
+# all-in-one role runs it), so an ffmpeg that fails to bind/transcode is invisible: its
+# stderr is buffered in the runner, never reaching `docker logs`/`vastai logs`. On the GPU
+# role and the vps hub role, mirror ffmpeg stderr to stdout (redacted) so the
+# passthrough/bridge is debuggable. Safe: every platform stream key (incl. the YouTube HLS
+# `cid`) + SRT passphrase is registered in _SECRETS and scrubbed by _redact above.
+_FFMPEG_STDERR_TO_STDOUT = os.environ.get("RELAY_ROLE", "") in ("gpu", "vps")
 
 
 def _input_args(source: str) -> list[str]:
