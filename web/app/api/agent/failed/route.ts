@@ -4,6 +4,7 @@ import { createServerClient } from '@/lib/supabase'
 import { startProvisionRace, type RacerEntry } from '@/lib/gpu-broker'
 import { getProvider } from '@/lib/providers'
 import { teardownHub } from '@/lib/pod-teardown'
+import { podName } from '@/lib/managed-identity'
 
 // VPS-hub GPU BACKEND failure (role-aware, on the gpu_backend relay_nodes row): a GPU
 // racer reports it can't serve (self-test failed / fatal boot). Mark it failed +
@@ -228,7 +229,7 @@ export async function POST(request: NextRequest) {
   let racerWriteLock = Promise.resolve()
   const raceResult = await startProvisionRace({
     lat, lon,
-    name: `slimcast-${userId.slice(0, 8)}`,
+    name: podName(userId),
     imageTag,
     env: podEnv,
     racersN: 2,

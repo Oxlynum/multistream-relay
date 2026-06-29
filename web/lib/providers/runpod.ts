@@ -1,5 +1,6 @@
 import { createPod, getPodStatus, stopPod, destroyPod, listPods, BRIDGE_IN_PORT } from '@/lib/runpod'
 import type { GpuProvider, GpuCandidate, PodStatus, CreatedPod } from './types'
+import { ownerOfPodName } from '../managed-identity'
 
 // RunPod GPU provider — VPS-hub GPU BACKEND only (never an OBS-ingest pod).
 //
@@ -94,10 +95,13 @@ export const runpodProvider: GpuProvider = {
 
   async create({ candidate, name, imageTag, env }): Promise<CreatedPod> {
     const datacenterId = candidate.placement.datacenterId as string
+    // Provider-neutral self-identity so relay/agent.py doesn't hardcode RunPod's env
+    // names for the bridge port / self-id (Phase 2, item 5).
+    const envWithProvider = [...env, { key: 'SLIMCAST_PROVIDER', value: 'runpod' }]
     // createPod defaults ports to [`${BRIDGE_IN_PORT}/tcp`] — the bridge-in TCP port,
     // the only inbound the GPU backend needs (the RTMPS return is outbound).
     const created = await createPod({
-      name, imageTag, env,
+      name, imageTag, env: envWithProvider,
       gpuTypeId: candidate.gpuTypeId,
       cloudType: RUNPOD_CLOUD_TYPE,
       dataCenterIds: [datacenterId],
@@ -109,5 +113,24 @@ export const runpodProvider: GpuProvider = {
   getStatus: (podId): Promise<PodStatus> => getPodStatus(podId),
   stop: (podId) => stopPod(podId),
   destroy: (podId) => destroyPod(podId),
-  listInstances: () => listPods(),
+
+  // OUR pods only. RunPod's REST GET /pods returns the WHOLE account with no server-side
+  // filter (and listPods() throws without a key), so the managed-name prefix filter here
+  // is LOAD-BEARING for safety: the reaper destroys whatever this returns that has no DB
+  // row, so an unrelated account pod must never leak through. `ownerId` feeds the reaper's
+  // mid-provision guard.
+  async listInstances(): Promise<Array<{ id: string; name: string; ownerId: string | null }>> {
+    if (!process.env.RUNPOD_API_KEY) return []
+    try {
+      const pods = await listPods()
+      // Hub-EXCLUSIVE (see vast.ts): ownerOfPodName != null excludes non-slimcast pods AND
+      // hub names, and guarantees a non-null ownerId for the reaper's mid-provision guard.
+      return pods
+        .filter(p => ownerOfPodName(p.name) != null)
+        .map(p => ({ id: p.id, name: p.name, ownerId: ownerOfPodName(p.name) }))
+    } catch (err) {
+      console.error('[runpod] list pods failed:', err instanceof Error ? err.message : err)
+      return []
+    }
+  },
 }

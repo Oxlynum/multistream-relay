@@ -98,6 +98,14 @@ VAST_CONTAINER_LABEL = os.environ.get("VAST_CONTAINERLABEL", "")
 # provider_id stored in gpu_instances.racers so the cloud can match this pod.
 VAST_INSTANCE_ID = VAST_CONTAINER_LABEL[2:] if VAST_CONTAINER_LABEL.startswith("C.") else ""
 
+# Provider-neutral self-identity (Phase 2, item 5). The web side injects SLIMCAST_PROVIDER
+# at create; each provider exposes its own instance-id env. PROVIDER_ID is whichever the
+# host injected — the cloud ALSO resolves the winner from the sole-booting racer, so this
+# is a best-effort hint, never load-bearing. A new provider just needs its id read here.
+SLIMCAST_PROVIDER = os.environ.get("SLIMCAST_PROVIDER", "")
+RUNPOD_POD_ID = os.environ.get("RUNPOD_POD_ID", "")
+PROVIDER_ID = VAST_INSTANCE_ID or RUNPOD_POD_ID
+
 # Flag file written by hook.sh when OBS publishes to MediaMTX (runOnReady).
 # Cleared when OBS drops (runOnNotReady). Agent uses this to start/stop the
 # supervisor in sync with OBS instead of starting at pod boot.
@@ -597,8 +605,8 @@ def _gen_self_signed_cert() -> None:
 def _post_ready_gpu(ip: str, bridge_port: "int | None") -> "dict | None":
     """GPU backend self-reports its bridge-in address. Winner-CAS on the cloud side;
     a loser is told to self-destruct."""
-    body = {"role": "gpu", "ip": ip, "bridge_port": bridge_port, "provider_id": VAST_INSTANCE_ID}
-    log.info("Reporting gpu ready: ip=%s bridge_port=%s instance=%s", ip, bridge_port, VAST_INSTANCE_ID or "?")
+    body = {"role": "gpu", "ip": ip, "bridge_port": bridge_port, "provider_id": PROVIDER_ID}
+    log.info("Reporting gpu ready: ip=%s bridge_port=%s instance=%s", ip, bridge_port, PROVIDER_ID or "?")
     for attempt in range(5):
         resp = _api("POST", "/api/agent/ready", body)
         if resp is not None:
@@ -616,9 +624,17 @@ def main_gpu() -> None:
     /api/agent/gpu-config. KEEPS the GPU self-test (the one role that needs NVENC)."""
     ip = PUBLIC_IPADDR or _get_external_ip()
     # The provider maps our EXPOSE'd 8899/tcp to a public port and injects it as env.
-    bridge_port_s = os.environ.get("VAST_TCP_PORT_8899", "") or os.environ.get("RUNPOD_TCP_PORT_8899", "")
+    # Provider-neutral (Phase 2, item 5): try the known names first, then fall back to ANY
+    # *_TCP_PORT_8899 the host injected — so a new provider's port shows up with zero code
+    # change here (its env just has to follow the <PROVIDER>_TCP_PORT_<container> convention).
+    bridge_port_s = (
+        os.environ.get("VAST_TCP_PORT_8899", "")
+        or os.environ.get("RUNPOD_TCP_PORT_8899", "")
+        or next((v for k, v in os.environ.items() if k.endswith("_TCP_PORT_8899") and v), "")
+    )
     bridge_port = int(bridge_port_s) if bridge_port_s else None
-    log.info("GPU backend starting. ip=%s bridge_port=%s instance=%s", ip or "?", bridge_port or "?", VAST_INSTANCE_ID or "?")
+    log.info("GPU backend starting. provider=%s ip=%s bridge_port=%s instance=%s",
+             SLIMCAST_PROVIDER or "?", ip or "?", bridge_port or "?", PROVIDER_ID or "?")
 
     # GPU sanity gate — a GPU-blind host must fail fast so the broker re-races across
     # providers (this is the role that genuinely needs NVENC/NVDEC; vps skips it).

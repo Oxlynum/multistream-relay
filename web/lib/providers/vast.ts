@@ -1,4 +1,5 @@
 import type { GpuProvider, GpuCandidate, PodStatus, CreatedPod } from './types'
+import { ownerOfPodName } from '../managed-identity'
 
 // Vast.ai provider. Vast is a marketplace: you search live offers (each = a
 // specific machine with a known GPU, price, geolocation, bandwidth) and rent one.
@@ -286,6 +287,11 @@ export const vastProvider: GpuProvider = {
     const ingressUsdPerTb = Number(candidate.placement.ingressUsdPerTb ?? 0)
     const envDict: Record<string, string> = {
       ...Object.fromEntries(env.map(e => [e.key, e.value])),
+      // Provider-neutral self-identity: the pod reports which provider it is so the
+      // bridge-port / self-id reads in relay/agent.py never hardcode a provider's env
+      // names (Phase 2, item 5). The pod still reads its mapped port from Vast's own
+      // VAST_TCP_PORT_* injection; this just names the provider.
+      SLIMCAST_PROVIDER: 'vast',
       SLIMCAST_GPU_RATE_USD: String(gpuRateUsd),
       SLIMCAST_EGRESS_USD_PER_TB: String(egressUsdPerTb),
       SLIMCAST_INGRESS_USD_PER_TB: String(ingressUsdPerTb),
@@ -365,17 +371,26 @@ export const vastProvider: GpuProvider = {
     await fetch(`${BASE}/instances/${podId}/`, { method: 'DELETE', headers: authHeaders() })
   },
 
-  // All our live rentals, as { id: contract-id, name: label }. The label is the
-  // `name` we pass at create (`slimcast-<userid8>`), which the reaper matches on.
-  // The LIST endpoint returns a usable {instances:[...]} array (unlike the per-id
-  // status detail); we only need id + label here, so it's the right call.
-  async listInstances(): Promise<Array<{ id: string; name: string }>> {
+  // OUR live rentals only. Vast's `label` is the `name` we set at create
+  // (`slimcast-<userid8>`) — Vast has no separate tag system, so the name prefix IS the
+  // ownership filter (managed-identity.POD_PREFIX). FILTERING HERE IS LOAD-BEARING: the
+  // reaper destroys whatever this returns that has no DB row, so an unrelated box in the
+  // account must never appear. `ownerId` is the 8-char user prefix for the reaper's
+  // mid-provision guard.
+  async listInstances(): Promise<Array<{ id: string; name: string; ownerId: string | null }>> {
     if (!VAST_API_KEY) return []
     try {
       const res = await fetch(`${BASE_V1}/instances/`, { headers: authHeaders(), signal: AbortSignal.timeout(8000) })
       if (!res.ok) { console.error(`[vast] list instances → ${res.status}`); return [] }
       const arr = ((await res.json()).instances ?? []) as Array<{ id: number; label?: string | null }>
-      return arr.map(i => ({ id: String(i.id), name: i.label ?? '' }))
+      return arr
+        .map(i => ({ id: String(i.id), name: i.label ?? '' }))
+        // ownerOfPodName != null is hub-EXCLUSIVE: it excludes non-slimcast boxes AND hub
+        // names (HUB_PREFIX startsWith POD_PREFIX, so a raw prefix test would let a hub
+        // through with ownerId=null → the reaper's GPU pass would destroy it). This also
+        // guarantees the emitted ownerId is non-null, closing the reaper guard-skip path.
+        .filter(i => ownerOfPodName(i.name) != null)
+        .map(i => ({ ...i, ownerId: ownerOfPodName(i.name) }))
     } catch (err) {
       console.error('[vast] list instances failed:', err instanceof Error ? err.message : err)
       return []

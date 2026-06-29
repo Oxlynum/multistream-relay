@@ -1,4 +1,5 @@
 import type { VpsProvider, VpsCandidate, CreatedVps, VpsStatus } from './types'
+import { ownerOfHubName, MANAGED_BY } from '../managed-identity'
 
 // Hetzner Cloud provider — the first VPS hub backend for VPS-as-the-Hub.
 //
@@ -205,9 +206,29 @@ export const hetznerProvider: VpsProvider = {
       throw new Error(`Hetzner create → ${res.status}: ${j.error?.message ?? text.slice(0, 200)}`)
     }
     const ipv4 = j.server.public_net?.ipv4 ?? null
+    const primaryIpId = ipv4?.id != null ? String(ipv4.id) : undefined
+    // Two things on the auto-created primary IP, in ONE PUT:
+    //   (a) auto_delete=true — the FIRST-LINE defense: Hetzner releases the IP automatically
+    //       when its server is deleted. It defaults true, but we set it EXPLICITLY so the
+    //       no-leak guarantee doesn't depend on an undocumented default.
+    //   (b) managed-by:slimcast label — so releaseAux() can find the IP if it ever DOES
+    //       orphan (a server-less IP is invisible to listInstances(), which lists servers).
+    // public_net.enable_ipv4 creates the IP UNLABELED, so we tag it here. Best-effort — a
+    // failure only weakens the aux-sweep backstop; auto_delete (the default) + teardownHub's
+    // explicit release still cover the normal path, so it must never fail the provision.
+    if (primaryIpId) {
+      try {
+        await hzFetch(`/primary_ips/${primaryIpId}`, {
+          method: 'PUT',
+          body: JSON.stringify({ auto_delete: true, labels: { 'managed-by': MANAGED_BY } }),
+        })
+      } catch (err) {
+        console.error(`[hetzner] label primary_ip ${primaryIpId} failed:`, err instanceof Error ? err.message : err)
+      }
+    }
     return {
       vpsId: String(j.server.id),
-      primaryIpId: ipv4?.id != null ? String(ipv4.id) : undefined,
+      primaryIpId,
       ip: ipv4?.ip ?? null,
       costPerHr: candidate.pricePerHr,
     }
@@ -276,17 +297,48 @@ export const hetznerProvider: VpsProvider = {
   },
 
   // Label-filtered to managed-by=slimcast so the reaper only ever reconciles our
-  // own boxes (never touches anything else in the Hetzner project).
-  async listInstances(): Promise<Array<{ id: string; name: string }>> {
+  // own boxes (never touches anything else in the Hetzner project). `ownerId` is the
+  // hub-id prefix parsed from the name for the reaper's mid-spawn guard.
+  async listInstances(): Promise<Array<{ id: string; name: string; ownerId: string | null }>> {
     if (!TOKEN) return []
     try {
-      const res = await hzFetch(`/servers?label_selector=${encodeURIComponent('managed-by=slimcast')}`)
+      const res = await hzFetch(`/servers?label_selector=${encodeURIComponent(`managed-by=${MANAGED_BY}`)}`)
       if (!res.ok) { console.error(`[hetzner] list servers → ${res.status}`); return [] }
       const arr = ((await res.json()).servers ?? []) as HzServer[]
-      return arr.map(s => ({ id: String(s.id), name: s.name ?? '' }))
+      return arr.map(s => ({ id: String(s.id), name: s.name ?? '', ownerId: ownerOfHubName(s.name) }))
     } catch (err) {
       console.error('[hetzner] list servers failed:', err instanceof Error ? err.message : err)
       return []
     }
+  },
+
+  // Release LEAKED primary IPv4s — the one billable resource that survives server
+  // deletion (~€0.50/mo forever) and is INVISIBLE to listInstances() (which lists
+  // servers, not IPs). The normal path is covered three ways already (auto_delete=true,
+  // teardownHub passing primaryIpId, destroy()'s unassigned-IP check); this is the pure
+  // catchall for an IP whose server is already gone. Strictly bounded to our own
+  // (managed-by:slimcast, labeled at create) AND UNASSIGNED (assignee_id == null) IPs, so
+  // it can never touch an in-use IP or anything not ours. Returns the count released.
+  async releaseAux(): Promise<number> {
+    if (!TOKEN) return 0
+    let released = 0
+    try {
+      const res = await hzFetch(`/primary_ips?label_selector=${encodeURIComponent(`managed-by=${MANAGED_BY}`)}`)
+      if (!res.ok) { console.error(`[hetzner] list primary_ips → ${res.status}`); return 0 }
+      const ips = ((await res.json()).primary_ips ?? []) as Array<{ id: number; assignee_id?: number | null }>
+      for (const ip of ips) {
+        if (ip.assignee_id != null) continue   // assigned to a live server — leave it
+        try {
+          const dr = await hzFetch(`/primary_ips/${ip.id}`, { method: 'DELETE' })
+          if (dr.ok || dr.status === 404) released++
+          else console.error(`[hetzner] release orphan primary_ip ${ip.id} → ${dr.status}`)
+        } catch (err) {
+          console.error(`[hetzner] release primary_ip ${ip.id} failed:`, err instanceof Error ? err.message : err)
+        }
+      }
+    } catch (err) {
+      console.error('[hetzner] releaseAux failed:', err instanceof Error ? err.message : err)
+    }
+    return released
   },
 }

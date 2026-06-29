@@ -117,7 +117,10 @@ export async function GET(request: Request) {
     // in both sets); mirrors the VPS orphan loop's per-provider sweep below.
     const gpuProviders = [...new Map([...ACTIVE_PROVIDERS, ...ACTIVE_BACKEND_PROVIDERS].map(p => [p.name, p])).values()]
     for (const provider of gpuProviders) {
-      let live: Array<{ id: string; name: string }>
+      // listInstances() is already managed-filtered + carries ownerId (lib/managed-identity);
+      // the reaper no longer parses box names. A new provider gets the orphan catchall for
+      // free as long as it implements listInstances with the managed filter + ownerId.
+      let live: Array<{ id: string; name: string; ownerId: string | null }>
       try {
         live = await provider.listInstances()
       } catch (e) {
@@ -125,10 +128,8 @@ export async function GET(request: Request) {
         continue
       }
       for (const pod of live) {
-        if (!pod.name?.startsWith('slimcast-')) continue
         if (knownPodIds.has(pod.id)) continue
-        const prefix = pod.name.slice('slimcast-'.length)
-        if (knownUserPrefixes.has(prefix)) continue // row exists (mid-provision) — leave it
+        if (pod.ownerId && knownUserPrefixes.has(pod.ownerId)) continue // row exists (mid-provision) — leave it
         try {
           await provider.destroy(pod.id)
           orphans.push(`${provider.name}:${pod.id}`)
@@ -159,13 +160,13 @@ export async function GET(request: Request) {
     // (mirrors the GPU knownUserPrefixes guard) (review #14).
     const knownHubPrefixes = new Set((hubRows ?? []).map(h => (h.id as string | null)?.slice(0, 8)).filter(Boolean))
     for (const provider of ACTIVE_VPS_PROVIDERS) {
-      let live: Array<{ id: string; name: string }>
+      // listInstances() is label-filtered (managed-by:slimcast) + carries ownerId; the
+      // reaper no longer parses the hub name.
+      let live: Array<{ id: string; name: string; ownerId: string | null }>
       try { live = await provider.listInstances() } catch (e) { console.error(`[reaper] ${provider.name} listInstances failed:`, e); continue }
       for (const box of live) {
-        if (!box.name?.startsWith('slimcast-hub-')) continue
         if (knownHubIds.has(box.id)) continue
-        const namePrefix = box.name.split('-').pop()   // hubId8 tail of slimcast-hub-<region>-<hubId8>
-        if (namePrefix && knownHubPrefixes.has(namePrefix)) continue   // mid-spawn, row exists
+        if (box.ownerId && knownHubPrefixes.has(box.ownerId)) continue   // mid-spawn, row exists
         try {
           // destroy(id) without primaryIpId → hetzner.destroy() looks it up and
           // releases the IP only if already unassigned (auto_delete handles the rest).
@@ -178,6 +179,23 @@ export async function GET(request: Request) {
     }
   } catch (e) {
     console.error('[reaper] hub orphan reconcile failed:', e)
+  }
+
+  // ── Aux-resource sweep: release DETACHED billable resources (Hetzner primary IPs) ──
+  // The one billable thing that survives server deletion and has NO DB row + NO server to
+  // hang a lease on, so neither the lease sweeper nor the orphan reconcile above can see
+  // it. Each VPS provider releases its own managed + unassigned aux resources. A leaked
+  // primary IP bills ~€0.50/mo forever without this (it directly closes the catchall gap
+  // the old hetzner.ts:238 comment promised but never had).
+  let auxReleased = 0
+  try {
+    for (const provider of ACTIVE_VPS_PROVIDERS) {
+      if (!provider.releaseAux) continue
+      try { auxReleased += await provider.releaseAux() }
+      catch (e) { console.error(`[reaper] ${provider.name} releaseAux failed:`, e) }
+    }
+  } catch (e) {
+    console.error('[reaper] aux-resource sweep failed:', e)
   }
 
   // ── GPU-backend node sweep + MID-STREAM re-race (VPS-hub bridge) ───────────
@@ -291,5 +309,5 @@ export async function GET(request: Request) {
     console.error('[reaper] gpu node sweep failed:', e)
   }
 
-  return Response.json({ ok: true, orphans, orphanHubs, reapedGpuNodes, reracedGpuNodes })
+  return Response.json({ ok: true, orphans, orphanHubs, auxReleased, reapedGpuNodes, reracedGpuNodes })
 }

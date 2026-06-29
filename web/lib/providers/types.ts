@@ -76,13 +76,19 @@ export interface GpuProvider {
   stop(podId: string): Promise<void>
   destroy(podId: string): Promise<void>
 
-  // List this provider's currently-live instances (id + the name/label set at
-  // create) so the reaper can reconcile against real infrastructure and destroy
-  // any instance the DB has no row for. This is the ONLY path that catches a true
-  // orphan (created, but the row write lost a race / the function died), so every
-  // billing provider must implement it — without it, a stray rental bills forever.
+  // List this provider's currently-live instances so the reaper can reconcile against
+  // real infrastructure and destroy any instance the DB has no row for. This is the
+  // ONLY path that catches a true orphan (created, but the row write lost a race / the
+  // function died), so every billing provider must implement it — without it, a stray
+  // rental bills forever.
+  //   - MUST already be filtered to OUR boxes (managed-by:slimcast / name prefix): the
+  //     reaper destroys whatever this returns that has no DB row, so a provider that
+  //     leaks unrelated account boxes here would have them destroyed.
+  //   - `ownerId` is the 8-char user/hub prefix parsed from the managed name (or null
+  //     if absent) so the reaper's mid-provision guard can spare a box whose DB row is
+  //     still being written, WITHOUT re-parsing the name itself (lib/managed-identity).
   // Best-effort: resolve to [] (don't throw) if the provider is unreachable.
-  listInstances(): Promise<Array<{ id: string; name: string }>>
+  listInstances(): Promise<Array<{ id: string; name: string; ownerId: string | null }>>
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -162,7 +168,17 @@ export interface VpsProvider {
   // if leaked. Order: delete server, THEN release the primary IP.
   destroy(vpsId: string, opts?: { primaryIpId?: string | null }): Promise<void>
 
-  // Live servers as { id, name } (label-filtered to managed-by:slimcast) so the
-  // reaper can destroy any box the DB has no row for. Best-effort: [] on failure.
-  listInstances(): Promise<Array<{ id: string; name: string }>>
+  // Live servers (label-filtered to managed-by:slimcast) so the reaper can destroy any
+  // box the DB has no row for. `ownerId` is the hub-id prefix parsed from the name (or
+  // null) for the reaper's mid-spawn guard. Best-effort: [] on failure.
+  listInstances(): Promise<Array<{ id: string; name: string; ownerId: string | null }>>
+
+  // Release any DETACHED auxiliary billable resource this provider leaked — a resource
+  // that SURVIVES server deletion and has no DB row to drive a lease (Hetzner: a primary
+  // IPv4 whose server is already gone; ~€0.50/mo forever). listInstances() lists SERVERS,
+  // so a server-less orphan IP is invisible to it — this is its only catchall. Filtered
+  // to managed-by:slimcast + UNASSIGNED only (never touch an in-use resource). Returns the
+  // count released. Optional: a provider with no detached-resource model omits it.
+  // Best-effort: resolve (don't throw) if the provider is unreachable.
+  releaseAux?(): Promise<number>
 }

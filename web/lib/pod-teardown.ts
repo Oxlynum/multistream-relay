@@ -239,6 +239,43 @@ export async function teardownHub(
 }
 
 /**
+ * Shut off EVERY cloud box a user owns and revoke all their agent keys — the pre-delete
+ * hook for account deletion (termination-system-plan §10 Phase 2, item 6).
+ *
+ * Why this MUST run before the row delete: the profiles → gpu_instances → relay_nodes FK
+ * chain is ON DELETE CASCADE, so deleting the user's profile (or the auth user) drops the
+ * rows WITHOUT ever calling provider.destroy() — every rented GPU/box would leak, billing
+ * forever, recoverable only by the daily name-prefix orphan reconcile. Calling this first
+ * destroys the boxes while the rows (and their provider_id) still exist.
+ *
+ * It does NOT destroy a shared VPS hub: a hub has no user_id (it serves many tenants).
+ * teardownInstance logically detaches this user's tenancy; the hub scales to zero on its
+ * own via the derived-emptiness sweeper once its last live lease drops.
+ *
+ * Idempotent + best-effort: teardownInstance is itself idempotent, and a provider error
+ * never blocks the key revocation (the reaper backstops any box that survives).
+ */
+export async function teardownAllForUser(userId: string): Promise<void> {
+  // Destroys the active session's all-in-one pod OR vps_gpu backend box(es) + revokes the
+  // pod/gpu ephemeral keys, and logically detaches a shared-hub tenant.
+  try {
+    await teardownInstance(userId, 'account_deletion')
+  } catch (e) {
+    console.error(`[teardownAllForUser] session teardown failed for ${userId}:`, e)
+  }
+  // Revoke the user's OWN agent keys (user/device/pod/gpu) so nothing they issued can
+  // re-authenticate after the account is gone. CRITICALLY excludes label='vps': a SHARED
+  // hub's key is filed under whichever tenant spawned it (agent_api_keys.user_id is NOT
+  // NULL, a hub has no identity of its own), so a blanket revoke would starve a hub still
+  // serving OTHER tenants → its lease lapses → the sweeper hard-destroys it → every other
+  // tenant's stream dies. The account-delete route refuses deletion while the user hosts a
+  // hub with other live tenants (and a self-hosted/empty hub's key dying is harmless), so
+  // by here any 'vps' key the user holds is for a hub with no other tenants.
+  const supabase = createServerClient()
+  await supabase.from('agent_api_keys').delete().eq('user_id', userId).neq('label', 'vps')
+}
+
+/**
  * The ONE universal, provider-blind lease sweeper (termination-system-plan §9.4).
  * Replaces the old pod-only sweepStalePods. Covers ALL THREE billable kinds via a
  * single time-gate model — no `vps_hub_id` skip, no per-role staleness constants,

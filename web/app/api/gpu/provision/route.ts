@@ -7,6 +7,8 @@ import { teardownInstance, sweepExpiredLeases } from '@/lib/pod-teardown'
 import { checkRateLimit } from '@/lib/rate-limit'
 import { spendableTokens } from '@/lib/billing'
 import { FALLBACK_LAT, FALLBACK_LON, VPS_READINESS_TIMEOUT_MS, PROVISION_LEASE_MS } from '@/lib/datacenters'
+import { podName } from '@/lib/managed-identity'
+import { getProvider } from '@/lib/providers'
 
 // Billing master switch (shared with the heartbeat clock). When off, streaming is free
 // in dev — the payment gate below is skipped entirely.
@@ -282,7 +284,7 @@ async function runV2Race({ userId, lat, lon, imageTag, podEnv, userOutputs, supa
   // Update phase to 'requested' before kicking the race.
   await supabase.from('gpu_instances').update({ phase: 'requested' }).eq('user_id', userId)
 
-  const podName = `slimcast-${userId.slice(0, 8)}`
+  const podBoxName = podName(userId)
 
   // Serialize racer writes: both pods in a round call onRacerCreated concurrently.
   // Without this lock the second write races the first and overwrites it, leaving
@@ -291,7 +293,7 @@ async function runV2Race({ userId, lat, lon, imageTag, podEnv, userOutputs, supa
   let racerWriteLock = Promise.resolve()
   const raceResult = await startProvisionRace({
     lat, lon,
-    name: podName,
+    name: podBoxName,
     imageTag,
     env: podEnv,
     userOutputs,
@@ -303,11 +305,27 @@ async function runV2Race({ userId, lat, lon, imageTag, podEnv, userOutputs, supa
           .select('racers')
           .eq('user_id', userId)
           .maybeSingle()
-        const current = (row?.racers ?? []) as RacerEntry[]
+        if (!row) {
+          // The provision claim row was deleted mid-race (amber Cancel → DELETE /api/gpu,
+          // a provision-reclaim, or account deletion's teardownAllForUser) → this freshly
+          // created racer pod is now tracked in NO row and would be reaped NOWHERE (the
+          // daily orphan reconcile's mid-provision guard spares same-userId8 names if the
+          // user re-provisions). Destroy it here. Mirrors the vps-broker onRacerCreated guard.
+          try { await getProvider(racer.provider).destroy(racer.provider_id) } catch { /* best effort */ }
+          console.warn(`[provision/v2] claim row gone — destroyed orphan racer ${racer.provider_id}`)
+          return
+        }
+        const current = (row.racers ?? []) as RacerEntry[]
         current.push(racer)
-        await supabase.from('gpu_instances')
+        const { data: updated } = await supabase.from('gpu_instances')
           .update({ racers: current, phase: 'racing', status: 'provisioning' })
-          .eq('user_id', userId)
+          .eq('user_id', userId).select('id').maybeSingle()
+        if (!updated) {
+          // Row vanished between the read and this write (same teardown race) → the box id
+          // is now untracked → destroy it so it can't bill invisibly.
+          try { await getProvider(racer.provider).destroy(racer.provider_id) } catch { /* best effort */ }
+          console.warn(`[provision/v2] claim row vanished on write — destroyed orphan racer ${racer.provider_id}`)
+        }
       }))
     },
   })
@@ -337,7 +355,7 @@ async function runV1Cascade({ userId, lat, lon, imageTag, podEnv, userOutputs, i
 }) {
   const result = await provisionGpu({
     lat, lon,
-    name: `slimcast-${userId.slice(0, 8)}`,
+    name: podName(userId),
     imageTag,
     env: podEnv,
     userOutputs,

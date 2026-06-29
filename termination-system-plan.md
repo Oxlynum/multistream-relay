@@ -514,8 +514,9 @@ for row in (SELECT * FROM <all three tables>
 
 ## 10. Phased implementation plan
 
-### Phase 1 — Universal lease + multi-tenant-safe reaping
+### Phase 1 — Universal lease + multi-tenant-safe reaping ✅ SHIPPED 2026-06-28
 **Goal:** stop orphans, fix reconnection, kill the daily-cron dependency. This is the phase that closes the incident.
+> Shipped in migrations `000009_universal_lease.sql` + `000010_lease_hardening.sql` (after a 21-agent adversarial review). See CLAUDE.md "Universal termination lease (Phase 1)".
 
 1. **Migration** (`web/supabase/migrations/`): add `renew_deadline TIMESTAMPTZ` to `gpu_instances`, `relay_nodes`, `vps_hubs`. Backfill `renew_deadline = now() + window` for live rows. (Per-tenant hard cap `max_session_at` already exists on `gpu_instances`; no hub hard cap.)
 2. **Lease renewal:** every status/heartbeat handler (`web/app/api/agent/status/route.ts` — `handlePodStatus`, `handleVpsStatus`, `handleGpuStatus`) bumps `renew_deadline = now() + LEASE_WINDOW` for the box, and per-tenant `renew_deadline` only while that tenant's source is present (3-min grace).
@@ -530,7 +531,9 @@ for row in (SELECT * FROM <all three tables>
 - Sweeper/lease logic: a standalone `web/scripts/test-*.ts` (`npx tsx`, `node:assert`) covering: lease bump on heartbeat, tenant reaped after 3 min source-absence, box reaped after ~120 s heartbeat-absence, hub reaped when derived-empty, hub **not** reaped while a live-lease tenant exists, wedged-counter scenario now impossible.
 - `npx tsc --noEmit` gate before push.
 
-### Phase 2 — Provider universality (zero-new-code for a 2nd VPS/GPU provider)
+### Phase 2 — Provider universality (zero-new-code for a 2nd VPS/GPU provider) ✅ SHIPPED 2026-06-28
+> Shipped: migration `000011_provider_backfill.sql` + `lib/managed-identity.ts` + unified `lib/providers/index.ts` registry + `releaseAux()` + account deletion. Items 1–6 below all done; a 10-agent adversarial review confirmed 2 fixes (idempotent Stripe cancel, hub-exclusive GPU `listInstances` filter). Item 6 went beyond the plan: per the live decision it also ships a full **account-deletion feature** (dashboard Danger Zone + `/api/account/delete`, balance-forfeit-gated). See CLAUDE.md "Provider universality (Phase 2)".
+
 1. **Stamp `provider` at create, not at `/ready`** (`web/lib/vps-broker.ts`, `web/app/api/agent/ready/route.ts`): remove implicit `'vast'` fallbacks (`index.ts:38`, `vps-broker.ts:430`, `ready/route.ts:179`) — today a non-Vast box can route its destroy to Vast's API → no-op → leak.
 2. **Generic managed-by label** for the row-less orphan reconcile, replacing hard-coded `slimcast-` / `slimcast-hub-` name-prefix identity (`reap:156`, `reap:219-221`).
 3. **Unify the registry**: a single resolver keyed on `kind` + `provider` so the sweeper never branches on a provider name; collapse the three `ACTIVE_*` arrays into one declarative table.

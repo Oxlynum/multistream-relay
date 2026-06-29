@@ -65,8 +65,14 @@ async function handleGpuReady(request: NextRequest, node: NodeAuth): Promise<Res
   await supabase.from('relay_nodes').update(patch).eq('id', node.nodeId!)
 
   for (const loser of updated.filter(r => r.state === 'loser' && r.provider_id)) {
-    getProvider(loser.provider).destroy(loser.provider_id).catch(e =>
-      console.warn(`[agent/ready] gpu loser destroy ${loser.provider_id} failed:`, e))
+    // getProvider is strict and throws SYNCHRONOUSLY on a blank/unknown provider — which a
+    // trailing .catch() would NOT catch, 500-ing this hot CAS route. Wrap the resolve too.
+    try {
+      getProvider(loser.provider).destroy(loser.provider_id).catch(e =>
+        console.warn(`[agent/ready] gpu loser destroy ${loser.provider_id} failed:`, e))
+    } catch (e) {
+      console.warn(`[agent/ready] gpu loser resolve ${loser.provider} failed:`, e)
+    }
   }
   console.log(`[agent/ready] gpu node ${node.nodeId} winner=${winnerProvider || '?'}:${winnerProviderId} ip=${ip} bridge=${bridge_port}`)
   return Response.json({ winner: true })
@@ -188,6 +194,11 @@ export async function POST(request: NextRequest) {
   // provider_id if this is a v1 session where the broker already set it).
   const racers = (won.racers ?? []) as RacerEntry[]
   let winnerProviderId = won.provider_id ?? ''
+  // This is the ALL-IN-ONE pod path (gpu_instances), which is Vast-only by registry
+  // (ACTIVE_PROVIDERS=[vast]) — so 'vast' is the CORRECT default here, not the old
+  // blank→Vast leak pattern (that was the multi-provider GPU-backend path on relay_nodes,
+  // now stamped at create). gpu_instances.provider also DB-defaults to 'vast', so this ??
+  // only guards a theoretical null.
   let winnerProvider = won.provider ?? 'vast'
 
   // In the v2 race path the top-level provider_id may be '' or point to a prior
@@ -231,9 +242,15 @@ export async function POST(request: NextRequest) {
   // any that survive (they're now 'loser' in racers, so teardown will catch them).
   const losers = updatedRacers.filter(r => r.state === 'loser' && r.provider_id)
   for (const loser of losers) {
-    getProvider(loser.provider).destroy(loser.provider_id).catch(e =>
-      console.warn(`[agent/ready] loser destroy ${loser.provider_id} failed:`, e)
-    )
+    // Strict getProvider throws SYNCHRONOUSLY on a blank provider — a trailing .catch()
+    // wouldn't catch it and would 500 this CAS route. Wrap the resolve.
+    try {
+      getProvider(loser.provider).destroy(loser.provider_id).catch(e =>
+        console.warn(`[agent/ready] loser destroy ${loser.provider_id} failed:`, e)
+      )
+    } catch (e) {
+      console.warn(`[agent/ready] loser resolve ${loser.provider} failed:`, e)
+    }
   }
 
   return Response.json({ winner: true })

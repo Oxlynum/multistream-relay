@@ -19,6 +19,7 @@ import { haversineKm, startProvisionRace, type RacerEntry, type UserOutputConfig
 import { teardownHub } from '@/lib/pod-teardown'
 import { VPS_PRICE_CEILING, HUB_MAX_SESSIONS, VPS_READINESS_TIMEOUT_MS, BACKEND_PRICE_CEILING, FALLBACK_LAT, FALLBACK_LON } from '@/lib/datacenters'
 import type { VpsCandidate } from '@/lib/providers/types'
+import { podName, hubName } from '@/lib/managed-identity'
 
 type Supa = ReturnType<typeof createServerClient>
 
@@ -213,7 +214,7 @@ async function spawnHub(args: {
   try {
     created = await provider.create({
       candidate,
-      name: `slimcast-hub-${region}-${hubId.slice(0, 8)}`,
+      name: hubName(region, hubId),
       cloudInit,
       ...(HUB_SSH_KEY_IDS.length ? { sshKeyIds: HUB_SSH_KEY_IDS } : {}),
     })
@@ -293,8 +294,13 @@ export async function acquireHubOrSpawn(args: AcquireHubArgs): Promise<AcquireHu
 
   // Attach failed right after WE spawned the box → tear it down now so it doesn't
   // leak (scale-to-zero would also catch it via empty_since, but this is prompt).
+  // onlyIfEmpty: our attach can return null merely because a CONCURRENT tenant holds the
+  // hub's FOR UPDATE row lock (attach_session_to_hub uses SKIP LOCKED) and we skipped it —
+  // the claim re-validates derived occupancy under the same lock and ABORTS if that tenant
+  // committed, so we never destroy a hub someone else just joined. A genuinely-empty
+  // just-spawned hub (count 0) is still torn down.
   if (spawn.ok) {
-    await teardownHub(spawn.hubId, 'attach_failed_after_spawn')
+    await teardownHub(spawn.hubId, 'attach_failed_after_spawn', { onlyIfEmpty: true })
   }
   return { ok: false, error: 'no hub available after spawn' }
 }
@@ -372,7 +378,7 @@ export async function startGpuBackendRace(args: {
   const race = await startProvisionRace({
     lat: hubLat ?? FALLBACK_LAT,
     lon: hubLon ?? FALLBACK_LON,
-    name: `slimcast-${userId.slice(0, 8)}`,
+    name: podName(userId),
     imageTag,
     env: gpuEnv,
     userOutputs,
@@ -393,8 +399,13 @@ export async function startGpuBackendRace(args: {
         }
         const current = (row.racers ?? []) as RacerEntry[]
         current.push(racer)
+        // Stamp provider AT CREATE (Phase 2, item 1): the backend race is N=1, so the
+        // sole racer IS the eventual winner — record its provider now so the row is never
+        // left with provider='' (which getProvider rejects, and which used to silently
+        // route a RunPod box's destroy to Vast → leak). /ready re-stamps the resolved
+        // winner (same value); if it never fires, teardown still routes correctly.
         const { data: updated } = await supabase.from('relay_nodes')
-          .update({ racers: current, phase: 'racing', status: 'provisioning' })
+          .update({ racers: current, phase: 'racing', status: 'provisioning', provider: racer.provider })
           .eq('id', nodeId).select('id').maybeSingle()
         if (!updated) {
           // Node vanished between the read and this write (same CASCADE race) → the box id
@@ -450,7 +461,10 @@ export async function reraceGpuBackend(nodeId: string, supabase: Supa): Promise<
     }
   }
   if (node.provider_id && !killed.has(node.provider_id as string)) {
-    try { await getProvider((node.provider as string) || 'vast').destroy(node.provider_id as string) }
+    // Strict (no `|| 'vast'`): provider is stamped at create now, so a blank here is a bug
+    // we want to surface — the throw is caught and the box falls to the reaper's orphan
+    // reconcile (which sweeps non-Vast providers too), not silently mis-routed to Vast.
+    try { await getProvider(node.provider as string).destroy(node.provider_id as string) }
     catch (e) { console.warn(`[vps-broker] re-race dead winner destroy ${node.provider_id} failed:`, e) }
   }
 
@@ -520,7 +534,7 @@ export async function reraceGpuBackend(nodeId: string, supabase: Supa): Promise<
   const race = await startProvisionRace({
     lat: hubLat ?? FALLBACK_LAT,
     lon: hubLon ?? FALLBACK_LON,
-    name: `slimcast-${userId.slice(0, 8)}`,
+    name: podName(userId),
     imageTag,
     env: gpuEnv,
     providers: ACTIVE_BACKEND_PROVIDERS,
@@ -540,8 +554,13 @@ export async function reraceGpuBackend(nodeId: string, supabase: Supa): Promise<
         }
         const current = (row.racers ?? []) as RacerEntry[]
         current.push(racer)
+        // Stamp provider AT CREATE (Phase 2, item 1): the backend race is N=1, so the
+        // sole racer IS the eventual winner — record its provider now so the row is never
+        // left with provider='' (which getProvider rejects, and which used to silently
+        // route a RunPod box's destroy to Vast → leak). /ready re-stamps the resolved
+        // winner (same value); if it never fires, teardown still routes correctly.
         const { data: updated } = await supabase.from('relay_nodes')
-          .update({ racers: current, phase: 'racing', status: 'provisioning' })
+          .update({ racers: current, phase: 'racing', status: 'provisioning', provider: racer.provider })
           .eq('id', nodeId).select('id').maybeSingle()
         if (!updated) {
           // Node vanished between the read and this write (same CASCADE race) → the box id

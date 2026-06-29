@@ -418,6 +418,126 @@ function OutputCard({
   )
 }
 
+// ── Danger zone: delete account ───────────────────────────────────────────────
+
+function DeleteAccountSection() {
+  const router = useRouter()
+  const [open, setOpen] = useState(false)
+  const [confirmText, setConfirmText] = useState('')
+  const [forfeit, setForfeit] = useState(false)
+  const [balance, setBalance] = useState<number | null>(null)
+  const [deleting, setDeleting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  // Enabled only once the user typed DELETE and, if a balance was surfaced (the 409
+  // below), explicitly checked the forfeit box.
+  const canDelete = confirmText === 'DELETE' && (balance == null || balance === 0 || forfeit) && !deleting
+
+  async function handleDelete() {
+    setDeleting(true)
+    setError(null)
+    try {
+      const supabase = createBrowserClient()
+      const { data: { session } } = await supabase.auth.getSession()
+      if (!session) { router.push('/login'); return }
+
+      const res = await fetch('/api/account/delete', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${session.access_token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ forfeitBalance: forfeit }),
+      })
+
+      if (res.status === 409) {
+        const b = await res.json().catch(() => ({}))
+        if (b.error === 'hosting_shared_hub') {
+          // The user spawned a shared streaming server other people are still using.
+          setError('Your streaming server is currently shared with other active streams. Try again in a few minutes once it’s idle.')
+          return
+        }
+        // Purchased tokens remain — surface the balance and require explicit forfeit.
+        setBalance(Number(b.balance ?? 0))
+        setError('You still have a token balance. Check the box below to confirm you’re forfeiting it, then delete.')
+        return
+      }
+      if (!res.ok) {
+        const b = await res.json().catch(() => ({}))
+        setError(b.error === 'subscription_cancel_failed'
+          ? 'Couldn’t cancel your subscription. Open billing, cancel there, then try again.'
+          : 'Something went wrong. Please try again.')
+        return
+      }
+
+      await supabase.auth.signOut()
+      router.push('/')
+    } catch {
+      setError('Something went wrong. Please try again.')
+    } finally {
+      setDeleting(false)
+    }
+  }
+
+  return (
+    <div className="bg-surface border border-red-900/50 rounded-2xl overflow-hidden">
+      <button
+        onClick={() => setOpen(v => !v)}
+        className="w-full flex items-center justify-between px-5 py-4 hover:bg-red-950/20 transition-colors"
+      >
+        <div>
+          <div className="text-sm font-semibold text-left text-red-400">Delete account</div>
+          <div className="text-xs text-ink-faint mt-0.5 text-left">Permanently remove your account and all data</div>
+        </div>
+        <span className={`text-ink-faint text-xs transition-transform ${open ? 'rotate-180' : ''}`}>▾</span>
+      </button>
+
+      {open && (
+        <div className="px-5 pb-5 border-t border-red-900/40 pt-4 space-y-4">
+          <div className="text-xs text-ink-muted leading-relaxed">
+            This <span className="text-red-400 font-medium">permanently deletes</span> your account: stream keys,
+            platform connections, and history. Any active stream is stopped, its server destroyed, and any
+            subscription canceled immediately. This cannot be undone.
+          </div>
+
+          {balance != null && balance > 0 && (
+            <label className="flex items-start gap-2.5 rounded-xl bg-red-950/20 border border-red-900/40 px-3 py-2.5 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={forfeit}
+                onChange={e => setForfeit(e.target.checked)}
+                className="mt-0.5 accent-red-500"
+              />
+              <span className="text-xs text-ink-muted">
+                I understand I’m forfeiting my remaining <span className="text-ink font-medium">{formatTokens(balance)}</span> —
+                they’re non-refundable and will be lost.
+              </span>
+            </label>
+          )}
+
+          <div>
+            <div className="text-xs text-ink-faint mb-1.5">Type <span className="font-mono text-ink-muted">DELETE</span> to confirm</div>
+            <input
+              type="text"
+              value={confirmText}
+              onChange={e => setConfirmText(e.target.value)}
+              placeholder="DELETE"
+              className="w-full bg-base border border-line rounded-lg px-3 py-2 text-sm font-mono text-ink focus:outline-none focus:border-red-500 transition-colors"
+            />
+          </div>
+
+          {error && <div className="text-xs text-red-400">{error}</div>}
+
+          <button
+            onClick={handleDelete}
+            disabled={!canDelete}
+            className="bg-red-600 hover:bg-red-500 disabled:opacity-40 disabled:cursor-not-allowed px-4 py-2 rounded-lg text-sm font-semibold text-white transition-colors"
+          >
+            {deleting ? 'Deleting…' : 'Permanently delete my account'}
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function SettingsPage() {
@@ -698,6 +818,9 @@ export default function SettingsPage() {
             </div>
           )}
         </div>
+
+        {/* Danger zone — delete account */}
+        <DeleteAccountSection />
 
       </main>
     </div>
