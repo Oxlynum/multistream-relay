@@ -14,7 +14,7 @@ import {
 } from '../lib/managed-identity'
 import {
   getProvider, getVpsProvider, resolveProvider,
-  ACTIVE_PROVIDERS, ACTIVE_BACKEND_PROVIDERS, ACTIVE_VPS_PROVIDERS,
+  ACTIVE_GPU_PROVIDERS, ACTIVE_VPS_PROVIDERS,
 } from '../lib/providers'
 
 let passed = 0
@@ -107,12 +107,10 @@ check('resolveProvider dispatches by kind', () => {
 
 console.log('registry-derived ACTIVE sets:')
 
-check('ACTIVE_PROVIDERS (all-in-one) = [vast]', () => {
-  assert.deepEqual(ACTIVE_PROVIDERS.map(p => p.name), ['vast'])
-})
-
-check('ACTIVE_BACKEND_PROVIDERS = [vast, runpod]', () => {
-  assert.deepEqual(ACTIVE_BACKEND_PROVIDERS.map(p => p.name).sort(), ['runpod', 'vast'])
+check('ACTIVE_GPU_PROVIDERS (single GPU role) = [vast, runpod]', () => {
+  // The all-in-one vs backend role split is gone: there is ONE GPU role now, and both
+  // Vast and RunPod are interchangeable behind the mpegts-over-TCP hub bridge.
+  assert.deepEqual(ACTIVE_GPU_PROVIDERS.map(p => p.name).sort(), ['runpod', 'vast'])
 })
 
 check('ACTIVE_VPS_PROVIDERS = [hetzner]', () => {

@@ -1,7 +1,7 @@
 import { createServerClient } from '@/lib/supabase'
 import { sweepExpiredLeases } from '@/lib/pod-teardown'
 import { reraceGpuBackend } from '@/lib/vps-broker'
-import { ACTIVE_PROVIDERS, ACTIVE_BACKEND_PROVIDERS, ACTIVE_VPS_PROVIDERS, getProvider } from '@/lib/providers'
+import { ACTIVE_GPU_PROVIDERS, ACTIVE_VPS_PROVIDERS, getProvider } from '@/lib/providers'
 import type { RacerEntry } from '@/lib/gpu-broker'
 
 // The DEMOTED-TO-FLOOR backstop (termination-system-plan §9.4). The primary reaper
@@ -110,12 +110,11 @@ export async function GET(request: Request) {
     ])
     const knownUserPrefixes = new Set((allRows ?? []).map(r => r.user_id?.slice(0, 8)).filter(Boolean))
 
-    // Sweep EVERY GPU provider that can hold a box — the all-in-one set (Vast) AND the
-    // VPS-hub backend set (Vast + RunPod). Without RunPod here, a row-less RunPod GPU
-    // backend orphan (create() succeeded but the racers write lost a race / the function
-    // died) is never listed and bills forever (landmine #4/#5). Deduped by name (Vast is
-    // in both sets); mirrors the VPS orphan loop's per-provider sweep below.
-    const gpuProviders = [...new Map([...ACTIVE_PROVIDERS, ...ACTIVE_BACKEND_PROVIDERS].map(p => [p.name, p])).values()]
+    // Sweep EVERY GPU provider that can hold a box (Vast + RunPod). Without RunPod here, a
+    // row-less RunPod GPU backend orphan (create() succeeded but the racers write lost a
+    // race / the function died) is never listed and bills forever (landmine #4/#5).
+    // Mirrors the VPS orphan loop's per-provider sweep below.
+    const gpuProviders = ACTIVE_GPU_PROVIDERS
     for (const provider of gpuProviders) {
       // listInstances() is already managed-filtered + carries ownerId (lib/managed-identity);
       // the reaper no longer parses box names. A new provider gets the orphan catchall for

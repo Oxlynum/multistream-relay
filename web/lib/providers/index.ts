@@ -18,16 +18,16 @@ import type { GpuProvider, VpsProvider } from './types'
 // + fixed ports + a different destroy signature). The REGISTRY unifies REGISTRATION
 // and RESOLUTION, not the interfaces.
 //
-// `roles` declares which active set a GPU provider belongs to:
-//   - 'all-in-one': the legacy OBS→SRT pod (needs UDP ingest → Vast only today).
-//   - 'backend':    the VPS-hub GPU backend (mpegts-over-TCP bridge → TCP-only RunPod
-//                   is viable here too).
-// VPS providers have one implicit role (hub); `roles` is unused for them.
+// `roles` declares which active set a GPU provider belongs to. There is now ONE GPU
+// role — 'gpu': the VPS-hub GPU backend that receives an mpegts-over-TCP bridge on
+// :8899 and returns one H.264 stream. Because the bridge is TCP (not SRT/UDP), Vast
+// and RunPod are interchangeable backends here — a TCP-only host is fine. VPS
+// providers have one implicit role (hub); `roles` is unused for them.
 // ─────────────────────────────────────────────────────────────────────────────
 
 export type ProviderKind = 'gpu' | 'vps'
 
-type GpuRole = 'all-in-one' | 'backend'
+type GpuRole = 'gpu'
 
 interface RegistryEntry {
   kind: ProviderKind
@@ -36,11 +36,10 @@ interface RegistryEntry {
 }
 
 const REGISTRY: RegistryEntry[] = [
-  // SRT ingest (UDP) is the ONLY OBS→pod transport, so an all-in-one GPU provider is
-  // eligible only if its hosts forward UDP. Vast.ai is the sole one today. RunPod is
-  // TCP-only → backend role only (the hub bridge is TCP, which lifts the UDP cage).
-  { kind: 'gpu', provider: vastProvider, roles: ['all-in-one', 'backend'] },
-  { kind: 'gpu', provider: runpodProvider, roles: ['backend'] },
+  // The GPU backend ingests an mpegts-over-TCP bridge on :8899 from the hub (SRT is
+  // OBS→hub only), so a TCP-only host qualifies — Vast and RunPod are interchangeable.
+  { kind: 'gpu', provider: vastProvider, roles: ['gpu'] },
+  { kind: 'gpu', provider: runpodProvider, roles: ['gpu'] },
   // VPS hubs (VPS-as-the-Hub). Hetzner first; Vultr later is one more entry here.
   { kind: 'vps', provider: hetznerProvider, roles: [] },
 ]
@@ -50,8 +49,7 @@ function gpuProvidersWithRole(role: GpuRole): GpuProvider[] {
 }
 
 // Active sets, DERIVED from the single registry above (no separately-maintained arrays).
-export const ACTIVE_PROVIDERS: GpuProvider[] = gpuProvidersWithRole('all-in-one')
-export const ACTIVE_BACKEND_PROVIDERS: GpuProvider[] = gpuProvidersWithRole('backend')
+export const ACTIVE_GPU_PROVIDERS: GpuProvider[] = gpuProvidersWithRole('gpu')
 export const ACTIVE_VPS_PROVIDERS: VpsProvider[] =
   REGISTRY.filter(e => e.kind === 'vps').map(e => e.provider as VpsProvider)
 

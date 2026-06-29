@@ -13,7 +13,7 @@
 
 import { createServerClient } from '@/lib/supabase'
 import { generateApiKey, hashApiKey } from '@/lib/agent-auth'
-import { getVpsProvider, getProvider, ACTIVE_VPS_PROVIDERS, ACTIVE_BACKEND_PROVIDERS } from '@/lib/providers'
+import { getVpsProvider, getProvider, ACTIVE_VPS_PROVIDERS, ACTIVE_GPU_PROVIDERS } from '@/lib/providers'
 import { buildCloudInit } from '@/lib/cloud-init'
 import { haversineKm, startProvisionRace, type RacerEntry, type UserOutputConfig } from '@/lib/gpu-broker'
 import { teardownHub } from '@/lib/pod-teardown'
@@ -382,8 +382,7 @@ export async function startGpuBackendRace(args: {
     imageTag,
     env: gpuEnv,
     userOutputs,
-    providers: ACTIVE_BACKEND_PROVIDERS,
-    mode: 'backend',
+    providers: ACTIVE_GPU_PROVIDERS,
     maxPricePerHr: BACKEND_PRICE_CEILING,
     racersN: 1,
     onRacerCreated: async (racer: RacerEntry) => {
@@ -537,8 +536,7 @@ export async function reraceGpuBackend(nodeId: string, supabase: Supa): Promise<
     name: podName(userId),
     imageTag,
     env: gpuEnv,
-    providers: ACTIVE_BACKEND_PROVIDERS,
-    mode: 'backend',
+    providers: ACTIVE_GPU_PROVIDERS,
     maxPricePerHr: BACKEND_PRICE_CEILING,
     racersN: 1,
     onRacerCreated: async (racer: RacerEntry) => {

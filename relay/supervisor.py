@@ -1,24 +1,24 @@
 """
-supervisor.py — builds and manages FFmpeg processes for streaming fan-out.
+supervisor.py — builds and manages the FFmpeg processes for the SlimCast relay.
 
-Architecture (grouped transcode + tee fan-out):
-  Pulls the live HEVC feed from the local MediaMTX SRT loopback and runs at most
-  three kinds of process:
+There is ONE path from OBS to a GPU: OBS -> SRT -> trusted VPS hub -> mpegts-over-TLS
+bridge -> GPU backend (HEVC decode -> H.264 encode) -> RTMPS return to the hub -> the
+hub fans out to the platforms. Stream keys never reach the GPU. Two roles share this
+file (selected per process by RELAY_ROLE):
 
-    1. Landscape group : 1 NVDEC decode -> 1 NVENC H.264 encode -> tee fan-out to
-                         every enabled landscape platform (Twitch/Kick/…).
-    2. Portrait group  : 1 NVDEC decode -> crop (user zoom/position) -> scale 9:16
-                         -> 1 NVENC H.264 encode -> tee fan-out to every enabled
-                         portrait platform (TikTok / YouTube vertical / FB Reels).
-    3. Passthrough     : per-output HEVC copy -> HLS (YouTube landscape only).
+  gpu (RELAY_ROLE=gpu) — GPU backend. One mpegts-over-TLS input from the hub -> NVDEC
+      decode -> one NVENC H.264 encode PER ORIENTATION -> one RTMPS return per
+      orientation to the hub. A single ffmpeg (one decode, N encodes); the hub owns the
+      platform tee. See build_gpu_transcode_cmd.
 
-  This replaces the old "one full transcode per platform" model. Instead of N
-  decodes + N encodes, we do at most 2 decodes + 2 encodes regardless of how many
-  platforms share each orientation — the encode happens once and the FFmpeg `tee`
-  muxer copies the finished bitstream to each destination (`onfail=ignore` so one
-  platform dropping never disturbs the others).
+  vps (RELAY_ROLE=vps) — card-less trusted hub, one Supervisor per tenant. Builds:
+      passthrough (HEVC `-c copy` -> YouTube HLS) and ertmp (HEVC -> Twitch Enhanced
+      RTMP) directly from the tenant feed (no NVENC on the hub); plus, when the tenant
+      has a GPU backend, source_forward (push the tenant HEVC to the GPU bridge) and
+      deliver (tee the GPU's H.264 return to every transcode platform). See
+      build_passthrough_cmd, build_ertmp_cmd, build_source_forward_cmd, build_deliver_cmd.
 
-Each group runs in its own thread, captures FFmpeg stderr into a ring buffer, and
+Each runner runs in its own thread, captures FFmpeg stderr into a ring buffer, and
 auto-restarts with exponential backoff while it is supposed to be running.
 """
 
@@ -347,13 +347,6 @@ def _full_rtmp_url(out: dict) -> str:
     return url.rstrip("/") + "/" + key
 
 
-PLATFORM_MAX_BITRATE: dict[str, int] = {
-    "twitch": 8000,
-    "kick": 8000,
-    "youtube": 9000,
-    "tiktok": 4500,
-}
-
 # Source resolution (must match OBS output — used for crop math).
 SOURCE_WIDTH = int(os.environ.get("SOURCE_WIDTH", "1920"))
 SOURCE_HEIGHT = int(os.environ.get("SOURCE_HEIGHT", "1080"))
@@ -448,61 +441,7 @@ def _tee_targets(outputs: list[dict]) -> str:
     return "|".join(parts)
 
 
-def _group_bitrate(outputs: list[dict]) -> int:
-    """A tee group shares one encode, so the bitrate is the smallest platform cap
-    in the group (the largest the weakest platform will accept)."""
-    vals = []
-    for o in outputs:
-        cap = PLATFORM_MAX_BITRATE.get(o.get("name", ""), 8000)
-        vals.append(min(int(o.get("bitrate_kbps", cap)), cap))
-    return min(vals) if vals else 6000
-
-
-def _group_fps(outputs: list[dict]) -> int:
-    return min((int(o.get("fps", 60)) for o in outputs), default=60)
-
-
 _RES_HEIGHT = {"720p": 720, "1080p": 1080, "1440p": 1440}
-
-
-def _group_max_height(outputs: list[dict]) -> int:
-    """Resolution cap for the group, as a pixel height. A tee group shares one
-    encode, so the most-restrictive output wins (smallest height). Used by the
-    budget controller's downscale tiers — the agent rewrites each output's
-    `resolution` before apply(), so this reflects any active throttle. Defaults to
-    the source height when unset (→ no scaling)."""
-    heights = [_RES_HEIGHT.get(o.get("resolution") or "", 0) for o in outputs]
-    heights = [h for h in heights if h > 0]
-    return min(heights) if heights else SOURCE_HEIGHT
-
-
-def build_preview_cmd(source: str = LOCAL_SOURCE) -> list[str]:
-    """H.264 preview transcode for the dashboard HLS player.
-
-    Browsers cannot decode HEVC in HLS.js (or most non-Safari browsers), so we
-    transcode the incoming HEVC SRT feed to H.264 and push it to MediaMTX via
-    RTMP. MediaMTX then serves it as HLS on :8888 under <key>_preview, which is
-    what the Vercel HLS proxy fetches for the dashboard preview player.
-
-    Uses scale_cuda to 720p — the dashboard preview doesn't need full resolution
-    and the lower bitrate reduces NVENC load on the shared GPU.
-    """
-    ingest_key = os.environ.get("SLIMCAST_INGEST_KEY", "live").strip() or "live"
-    return [
-        "ffmpeg", "-hide_banner", "-loglevel", "warning",
-        "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
-        *_input_args(source),
-        "-i", source,
-        "-map", "0:v", "-map", "0:a",
-        "-vf", "scale_cuda=-2:720",
-        "-c:v", "h264_nvenc",
-        "-preset", "p4", "-tune", "hq",
-        "-rc", "cbr", "-b:v", "1500k", "-maxrate", "1500k", "-bufsize", "3000k",
-        "-profile:v", "high", "-g", "60",
-        "-c:a", "aac", "-b:a", "64k", "-ar", "48000", "-ac", "2",
-        "-f", "flv",
-        f"rtmp://127.0.0.1:1935/{ingest_key}_preview",
-    ]
 
 
 def build_passthrough_cmd(out: dict, source: str = LOCAL_SOURCE) -> list[str]:
@@ -580,61 +519,6 @@ def build_ertmp_cmd(out: dict, source: str = LOCAL_SOURCE) -> list[str]:
         f"'{ingest_url}'"
     )
     return ["bash", "-c", pipeline]
-
-
-def build_group_cmd(
-    outputs: list[dict],
-    orientation: str,
-    crop: dict | None = None,
-    source: str = LOCAL_SOURCE,
-) -> list[str]:
-    """
-    One decode -> one NVENC H.264 encode -> tee fan-out to every output in the group.
-
-    Landscape: NVDEC -> (optional scale_cuda downscale) -> NVENC, entirely on GPU.
-    Portrait : NVDEC -> hwdownload -> crop (user framing) -> scale -> NVENC.
-
-    Resolution downscaling is the budget controller's deepest throttle lever (the
-    agent caps each output's `resolution` before apply()): a lower target both cuts
-    egress and frees NVENC headroom. We only ever downscale, never upscale past the
-    source — there's no detail to invent above SOURCE_HEIGHT.
-    """
-    bv = _group_bitrate(outputs)
-    fps = _group_fps(outputs)
-    max_h = _group_max_height(outputs)
-
-    cmd = [
-        "ffmpeg", "-hide_banner", "-loglevel", "warning",
-        "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
-        *_input_args(source),
-        "-i", source,
-    ]
-
-    cmd += ["-map", "0:v", "-map", "0:a"]
-
-    if orientation == "portrait":
-        cw, ch, cx, cy = portrait_crop_rect(crop)
-        # Portrait canvas is 9:16; a sub-1080 cap shrinks the long edge to match
-        # (e.g. 720p → 720×1280) so the encode + egress drop together.
-        if max_h <= 720:
-            pw, ph = 720, 1280
-        else:
-            pw, ph = PORTRAIT_WIDTH, PORTRAIT_HEIGHT
-        vf = (
-            f"hwdownload,format=nv12,"
-            f"crop={cw}:{ch}:{cx}:{cy},"
-            f"scale={pw}:{ph}"
-        )
-        cmd += ["-vf", vf]
-    elif max_h < SOURCE_HEIGHT:
-        # Landscape stays entirely on-GPU: scale_cuda operates on the CUDA surfaces
-        # the NVDEC decoder already produced (hwaccel_output_format=cuda). -2 keeps
-        # the source aspect ratio with an even width NVENC accepts.
-        cmd += ["-vf", f"scale_cuda=-2:{max_h}"]
-
-    cmd += _encode_flags(bv, fps)
-    cmd += ["-flush_packets", "1", "-f", "tee", _tee_targets(outputs)]
-    return cmd
 
 
 def build_gpu_transcode_cmd(
@@ -872,24 +756,24 @@ class OutputRunner:
         return list(self._logs)
 
 
-def plan_runners(cfg: dict, source: str = LOCAL_SOURCE, role: str = "all-in-one") -> dict[str, dict]:
+def plan_runners(cfg: dict, source: str = LOCAL_SOURCE, role: str = "vps") -> dict[str, dict]:
     """
     Translate a desired config into the set of runners we should have.
 
     Returns { key: {"cmd", "platforms", "mode"} }. Keys are stable so apply() can
     diff against currently-running processes:
-      passthrough:<platform>   one HEVC copy per passthrough output
-      group:landscape          shared landscape H.264 encode + tee
-      group:portrait           shared portrait (cropped) H.264 encode + tee
+      passthrough:<platform>   one HEVC copy per passthrough/ertmp output (hub)
+      source_forward           push the tenant HEVC to the GPU bridge (hub)
+      deliver:<orientation>    tee the GPU's H.264 return to its platforms (hub)
+      gpu:transcode            the GPU backend's single decode -> N-encode runner
 
     `source` is the loopback URL each runner reads (per-tenant on a multi-tenant VPS
-    hub; defaults to the module-global LOCAL_SOURCE so the all-in-one path is
-    unchanged). `role`:
-      'all-in-one' (default) — GPU pod: transcode groups + GPU preview + passthrough/ertmp.
-      'vps'                  — card-less hub: passthrough + ertmp ONLY (no NVENC). The
-                               GPU preview + transcode groups are skipped (they'd
-                               crash-loop on a CPU box); a tenant transcode output is
-                               dropped here (it belongs on the Phase-2 GPU backend).
+    hub; defaults to the module-global LOCAL_SOURCE). `role`:
+      'vps' (default) — card-less trusted hub (no NVENC): passthrough + ertmp directly,
+                        plus source_forward + deliver once the tenant's GPU backend is up.
+      'gpu'           — GPU backend: a single transcode runner driven by gpu-config
+                        (`groups` + `return` URLs); one decode -> N encodes -> RTMPS
+                        returns to the hub. No passthrough/ertmp here.
     """
     # GPU BACKEND role: a single transcode runner driven by gpu-config (per-orientation
     # `groups` + `return` URLs), NOT the per-platform `outputs` set. One decode → N
@@ -912,13 +796,9 @@ def plan_runners(cfg: dict, source: str = LOCAL_SOURCE, role: str = "all-in-one"
         }
 
     outputs = [o for o in cfg.get("outputs", []) if o.get("enabled")]
-    crop = cfg.get("crop") or {}
 
     passthrough = [o for o in outputs if o.get("mode") == "passthrough"]
     ertmp = [o for o in outputs if o.get("mode") == "ertmp"]
-    transcode = [o for o in outputs if o.get("mode") not in ("passthrough", "ertmp")]
-    landscape = [o for o in transcode if o.get("orientation", "landscape") != "portrait"]
-    portrait = [o for o in transcode if o.get("orientation") == "portrait"]
 
     plan: dict[str, dict] = {}
 
@@ -934,31 +814,6 @@ def plan_runners(cfg: dict, source: str = LOCAL_SOURCE, role: str = "all-in-one"
             "cmd": build_ertmp_cmd(o, source),
             "platforms": [o["name"]],
             "mode": "ertmp",
-        }
-
-    # GPU work (transcode tee groups + the H.264 preview) only on GPU roles. A
-    # card-less VPS hub has no NVENC/CUDA, so these are skipped entirely there.
-    if role != "vps":
-        if landscape:
-            plan["group:landscape"] = {
-                "cmd": build_group_cmd(landscape, "landscape", crop, source),
-                "platforms": [o["name"] for o in landscape],
-                "mode": "landscape",
-            }
-
-        if portrait:
-            plan["group:portrait"] = {
-                "cmd": build_group_cmd(portrait, "portrait", crop, source),
-                "platforms": [o["name"] for o in portrait],
-                "mode": "portrait",
-            }
-
-        # Preview transcode so the dashboard HLS player gets H.264 (browsers can't
-        # decode the HEVC OBS sends). GPU-only (h264_nvenc + scale_cuda) → GPU roles only.
-        plan["preview"] = {
-            "cmd": build_preview_cmd(source),
-            "platforms": [],
-            "mode": "preview",
         }
 
     # VPS transcode bridge: when this tenant has a GPU backend (cfg.bridge present, set
@@ -992,10 +847,10 @@ def plan_runners(cfg: dict, source: str = LOCAL_SOURCE, role: str = "all-in-one"
 class Supervisor:
     """Owns all OutputRunners and applies config changes."""
 
-    def __init__(self, source: str = LOCAL_SOURCE, role: str = "all-in-one"):
+    def __init__(self, source: str = LOCAL_SOURCE, role: str = "vps"):
         # Per-instance loopback source + role. On a multi-tenant VPS hub each tenant
-        # gets its own Supervisor(source=<its read URL>, role='vps'); the all-in-one
-        # pod uses the defaults so its behavior is byte-for-byte unchanged.
+        # gets its own Supervisor(source=<its read URL>, role='vps'); the GPU backend
+        # uses Supervisor(source=<bridge listener>, role='gpu').
         self.source = source
         self.role = role
         self.runners: dict[str, OutputRunner] = {}
@@ -1080,23 +935,6 @@ class Supervisor:
         with self.lock:
             r = self.runners.get(name)
             return r.logs() if r else []
-
-
-# ── Active-supervisor singleton ───────────────────────────────────────────────
-# agent.py calls set_active() after creating its Supervisor so that app.py
-# (running in the same process via an in-process uvicorn thread) can call
-# get_active() and serve the *live* pipeline's logs and status — not a
-# separate, empty Supervisor instance (the old dual-supervisor gap).
-_active: "Supervisor | None" = None
-
-
-def set_active(s: "Supervisor") -> None:
-    global _active
-    _active = s
-
-
-def get_active() -> "Supervisor | None":
-    return _active
 
 
 # Convenience for ad-hoc CLI use: `python supervisor.py` runs from config.json.

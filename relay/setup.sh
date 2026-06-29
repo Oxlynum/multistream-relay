@@ -37,7 +37,7 @@ fi
 echo "==> Python deps"
 pip3 install -r requirements.txt
 
-chmod +x start.sh hook.sh run.sh 2>/dev/null || true
+chmod +x hook.sh run.sh 2>/dev/null || true
 
 if [[ ! -f relay.env ]]; then
   echo "==> Generating credentials"

@@ -98,10 +98,9 @@ export async function listPods(): Promise<Array<{ id: string; name: string }>> {
 
 // PodStatus-compatible (lib/providers/types.ts). For the backend role the meaningful
 // public port is the BRIDGE-IN (8899); `port` carries it (falling back to any 1935).
-// srtPort is intentionally null — a bridge GPU has no SRT ingest.
 export async function getPodStatus(podId: string): Promise<{
   status: string; ip: string | null; port: number | null; hlsPort: number | null
-  dataCenterId: string | null; srtPort: number | null
+  dataCenterId: string | null
 }> {
   const data = await gqlRequest<{ pod: GqlPod }>(
     `query { pod(input: {podId: "${podId}"}) { id desiredStatus machine { dataCenterId } runtime { ports { ip isIpPublic privatePort publicPort } } } }`,
@@ -116,6 +115,5 @@ export async function getPodStatus(podId: string): Promise<{
     port: bridgeObj?.publicPort ?? null,   // the mapped bridge-in TCP port
     hlsPort: null,
     dataCenterId: pod?.machine?.dataCenterId ?? null,
-    srtPort: null,
   }
 }

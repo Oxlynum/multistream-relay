@@ -559,6 +559,7 @@ export default function SettingsPage() {
   const [platforms, setPlatforms] = useState<PlatformConfig[]>([])
   const [outputSettings, setOutputSettings] = useState<OutputSettingsMap>({})
   const [has2kAddon, setHas2kAddon] = useState(false)
+  const [primaryPlatform, setPrimaryPlatform] = useState<string | null>(null)
   const [pricing, setPricing] = useState<PricingBreakdown | null>(null)
   const [pricingLoading, setPricingLoading] = useState(true)
   const [loaded, setLoaded] = useState(false)
@@ -612,6 +613,7 @@ export default function SettingsPage() {
         const body = await settingsRes.json()
         setOutputSettings(body.output_settings ?? {})
         setHas2kAddon(body.has_2k_addon ?? false)
+        setPrimaryPlatform(body.primary_platform ?? null)
       }
 
       if (pricingRes.ok) {
@@ -662,6 +664,18 @@ export default function SettingsPage() {
       body: JSON.stringify({ [platformId]: { resolution } }),
     })
     setSaving(null)
+    await loadPricing(headers)
+  }
+
+  // Primary platform: the user's main streaming destination (or none).
+  async function setPrimary(platformId: string | null) {
+    setPrimaryPlatform(platformId)
+    const headers = await authHeader()
+    if (!headers) return
+    await fetch('/api/output-settings', {
+      method: 'PATCH', headers,
+      body: JSON.stringify({ primary_platform: platformId }),
+    })
     await loadPricing(headers)
   }
 
@@ -747,6 +761,35 @@ export default function SettingsPage() {
             Per-output resolution and bitrate. Changes apply within ~10s, even mid-stream.
             Resolution and frame rate in OBS override these per-output settings.
           </p>
+        </div>
+
+        {/* Primary platform */}
+        <div className="rounded-2xl border border-line bg-surface px-5 py-4">
+          <div className="text-sm font-semibold text-ink">Primary platform</div>
+          <div className="mt-0.5 text-xs text-ink-faint">
+            Your main destination — the output your stream is built around.
+          </div>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <SegButton active={primaryPlatform === null} onClick={() => setPrimary(null)}>
+              None
+            </SegButton>
+            {connectedPlatforms.map(platformId => {
+              const meta = PLATFORM_META[platformId]
+              if (!meta) return null
+              return (
+                <SegButton
+                  key={platformId}
+                  active={primaryPlatform === platformId}
+                  onClick={() => setPrimary(platformId)}
+                >
+                  <span className="inline-flex items-center gap-1.5">
+                    <PlatformIcon platform={platformId as PlatformKey} className="h-3.5 w-3.5" />
+                    {meta.label}
+                  </span>
+                </SegButton>
+              )
+            })}
+          </div>
         </div>
 
         {/* Output cards */}

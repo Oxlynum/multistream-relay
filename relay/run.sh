@@ -13,4 +13,4 @@ else
   export RELAY_STOP_GRACE=20
 fi
 
-./start.sh
+exec python3 agent.py

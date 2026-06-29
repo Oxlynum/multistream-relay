@@ -23,11 +23,9 @@ each choice.
 |---|---|
 | `PLAN.md` | Architecture, tuning, OBS settings, caveats |
 | `supervisor.py` | Builds + supervises one FFmpeg process per platform |
-| `app.py` | FastAPI control-panel API (auth, config, start/stop, status, logs) |
 | `static/index.html` | The control-panel UI |
-| `mediamtx.yml` | Ingest server config (enhanced-RTMP HEVC → loopback RTSP) |
 | `config.example.json` | Starter config; copied to `config.json` on first run |
-| `Dockerfile` / `docker-compose.yml` / `start.sh` | Deployment |
+| `Dockerfile` / `docker-compose.yml` | Deployment |
 
 ---
 

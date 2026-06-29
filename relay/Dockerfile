@@ -48,7 +48,7 @@ COPY requirements.txt .
 RUN pip3 install --no-cache-dir -r requirements.txt
 
 COPY . .
-RUN chmod +x start.sh hook.sh 2>/dev/null || true
+RUN chmod +x hook.sh run.sh 2>/dev/null || true
 
 # 1935/tcp = RTMP readiness beacon (broker's MediaMTX-liveness probe; OBS does NOT
 #   publish here) ; 8080 = control panel (debug)
@@ -65,9 +65,15 @@ RUN chmod +x start.sh hook.sh 2>/dev/null || true
 #   HEVC here as mpegts-over-TLS for NVDEC. TCP, so it comes free from EXPOSE on Vast
 #   AND works on TCP-only providers (RunPod) — the bridge is what lets the GPU catalog
 #   span beyond Vast. Unused by the all-in-one + vps roles.
-EXPOSE 1935 8080 8888 8899 8890/udp 8889/udp
+# Only the GPU-backend bridge-in port. On Vast/RunPod the GPU role needs solely this
+# (TCP) port publicly mapped — and Vast maps TCP EXPOSE ports from the host's scarce
+# direct-port pool, so keeping EXPOSE to ONE port lets the broker accept hosts with as
+# few as 1 direct port (lib/providers/vast.ts MIN_DIRECT_PORTS). The hub (Hetzner) does
+# NOT rely on EXPOSE — its SRT/RTMP/return ports are published via explicit `-p` in
+# cloud-init — so dropping 1935/8888/UDP here is safe for the hub.
+EXPOSE 8899
 
-# agent.py is the production entrypoint.
-# It handles pairing with Vercel, starting MediaMTX, and polling config.
-# start.sh remains for local development / debugging.
+# agent.py is the production entrypoint. It dispatches on RELAY_ROLE:
+#   vps → multi-tenant hub (SRT ingest + MediaMTX + per-tenant Supervisors)
+#   gpu → GPU backend (mpegts-over-TLS bridge on :8899 → NVDEC/NVENC transcode → RTMPS return)
 CMD ["python3", "agent.py"]

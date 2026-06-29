@@ -30,7 +30,18 @@ const MIN_DOWNLOAD_MBPS = 300   // host pulls the multi-GB relay image on every 
                                 // slow download → cold-start blows the readiness window
                                 // (verified: 801 Mbps host mapped RTMP in ~83s)
 const MIN_RELIABILITY = 0.95    // host uptime score (reliability2)
-const MIN_DIRECT_PORTS = 3      // need RTMP (1935) + SRT (8890/udp) + UDP probe (8889/udp)
+// The GPU backend's ONLY public inbound is the hub→GPU mpegts-over-TLS bridge on
+// 8899/tcp. Vast maps a container's TCP EXPOSE ports from the host's pool of
+// `direct_port_count` forwardable ports (UDP EXPOSE is NOT auto-mapped). The gpu-role
+// relay image EXPOSEs exactly ONE TCP port (8899), so we need ≥1 direct port to
+// guarantee 8899 is publicly mappable. WITHOUT this floor a 0-direct-port host
+// (CGNAT/residential — common in the widened consumer-Ampere pool) wins the race,
+// boots, passes the NVENC self-test, but never gets VAST_TCP_PORT_8899 injected → the
+// hub can never connect the bridge → transcode stays dark AND the GPU bills uselessly
+// (it heartbeats, so it dodges the lease sweeper + cron reaper). If the gpu image ever
+// EXPOSEs N TCP ports again, raise this to N (Vast picks WHICH ports map, not us).
+// RunPod needs no equivalent: its create() explicitly requests 8899/tcp on SECURE.
+const MIN_DIRECT_PORTS = 1
 
 // Bandwidth cost is the make-or-break for a streaming workload: Vast bills per TB
 // (RunPod doesn't), and host rates range $0.001–$40/TB. So we price offers ALL-IN
@@ -178,32 +189,19 @@ function gpuKeyOf(name: string): string {
 export const vastProvider: GpuProvider = {
   name: 'vast',
 
-  async listCandidates({ maxPricePerHr, needsProfessionalGpu, mode }) {
+  async listCandidates({ maxPricePerHr, needsProfessionalGpu }) {
     if (!VAST_API_KEY) return []
-    // Backend (GPU bridge) mode receives an mpegts-over-TCP bridge, NOT OBS's UDP
-    // SRT — so it needs only the bridge-in TCP port (+ a beacon), not the all-in-one
-    // RTMP + SRT(udp) + probe(udp) trio. Relax the direct-port floor accordingly.
-    const minPorts = mode === 'backend' ? 2 : MIN_DIRECT_PORTS
     // Vast machines are consumer GPUs (3-session NVENC cap on older drivers). For
     // users who need >3 simultaneous encodes we can't guarantee it, so skip Vast.
     if (needsProfessionalGpu) return []
 
-    // datacenter:{eq:true} = Vast's datacenter-grade hosts (the secure-cloud analog
-    // of RunPod): clean networking, including working OUTBOUND to the platform
-    // ingests (consumer/residential hosts often block it — a pod can receive OBS but
-    // fail to deliver to Twitch). ~61 of ~499 offers are datacenter.
-    //
-    // datacenter:{eq:true} for BOTH modes. We tried widening SRT to all static-IP
-    // hosts for proximity, but it backfired: verifying each host means BOOTING it +
-    // probing (~60-70s), and the wider pool has many hosts that fail the UDP/outbound
-    // probe, so the broker cascades host-by-host and blows the 5-min provision budget.
-    // Datacenter hosts pass UDP + outbound on the FIRST try (fast provision), and the
-    // only cost — distance — doesn't matter over SRT (its buffer absorbs the jitter).
-    // datacenter filter removed 2026-06-27: the entire datacenter pool became RTX 5090
-    // (Blackwell) which fails NVENC-in-container even on whole-GPU rentals. The 46
-    // consumer Ampere whole-GPU hosts (RTX 3060-3090, cc=860, gpu_frac=1.0) are the
-    // only viable pool. direct_port_count>=3 screens out residential NAT hosts; the
-    // broker v2 /failed cascade handles the rare host that blocks outbound to Twitch.
+    // No datacenter:{eq:true} filter: the datacenter pool became all RTX 5090
+    // (Blackwell), which fails NVENC-in-container even on whole-GPU rentals. The
+    // consumer Ampere/Turing whole-GPU hosts (cc>=750, gpu_frac=1.0) are the viable
+    // pool. The GPU is a bridge BACKEND now — it receives mpegts-over-TCP on :8899
+    // (free from the Dockerfile EXPOSE), never OBS's SRT/UDP — so there's no UDP port
+    // map and no direct-port-count screen; the broker v2 /failed cascade handles the
+    // rare host that blocks outbound to the platforms.
     const q: Record<string, unknown> = {
       verified: { eq: true }, rentable: { eq: true }, rented: { eq: false },
       num_gpus: { eq: 1 }, dph_total: { lte: maxPricePerHr }, type: 'on-demand',
@@ -224,7 +222,7 @@ export const vastProvider: GpuProvider = {
       o.reliability2 >= MIN_RELIABILITY &&
       o.inet_up >= MIN_UPLOAD_MBPS &&
       o.inet_down >= MIN_DOWNLOAD_MBPS &&
-      o.direct_port_count >= minPorts &&
+      o.direct_port_count >= MIN_DIRECT_PORTS &&                     // bridge :8899 must be host-mappable
       (o.internet_up_cost_per_tb ?? 0) <= MAX_EGRESS_COST_PER_TB &&  // reject bandwidth gougers
       allInPricePerHr(o) <= maxPricePerHr &&                          // all-in, not just GPU
       !MACHINE_DENYLIST.has(o.machine_id) &&
@@ -267,16 +265,12 @@ export const vastProvider: GpuProvider = {
     return candidates
   },
 
-  async create({ candidate, name, imageTag, env, mode }): Promise<CreatedPod> {
+  async create({ candidate, name, imageTag, env }): Promise<CreatedPod> {
     const offerId = candidate.placement.offerId as number
-    // Port mapping: Vast auto-forwards TCP EXPOSE ports but NOT UDP EXPOSE ports.
-    // Verified live: relay image (EXPOSE 1935 8080 8890/udp 8889/udp) → Vast only
-    // mapped 1935/tcp and 8080/tcp; 8890/udp and 8889/udp were absent.
-    // UDP ports require explicit `-p HOST:CONTAINER/udp` entries in the env dict —
-    // Vast passes these as additional `docker run -p` flags. Verified live with
-    // nginx:alpine + {"-p 8890:8890/udp":"1","-p 8889:8889/udp":"1"} → both UDP
-    // ports appeared in the instance ports dict within ~15s.
-    // TCP ports (1935, 8080) come free from EXPOSE; no -p flags needed for them.
+    // The GPU is a bridge BACKEND: its only ingress is mpegts-over-TCP on :8899,
+    // which Vast auto-forwards from the Dockerfile EXPOSE (TCP EXPOSE ports come free,
+    // no `-p` flags needed). No UDP port maps — OBS never reaches the GPU directly;
+    // the trusted VPS hub is the sole SRT ingest and bridges to the GPU over TCP.
     // Cost inputs for the pod's budget-throttle controller. Only known here (the
     // offer's live prices), so we inject them at create rather than from a static
     // env. The pod combines these with measured /proc/net/dev bytes to compute its
@@ -295,14 +289,6 @@ export const vastProvider: GpuProvider = {
       SLIMCAST_GPU_RATE_USD: String(gpuRateUsd),
       SLIMCAST_EGRESS_USD_PER_TB: String(egressUsdPerTb),
       SLIMCAST_INGRESS_USD_PER_TB: String(ingressUsdPerTb),
-      // UDP port maps are for the ALL-IN-ONE OBS→SRT ingest only. The GPU BACKEND
-      // (mode='backend') receives an mpegts-over-TCP bridge and needs NO UDP — its
-      // bridge-in TCP port (8899) comes free from the Dockerfile EXPOSE. Omitting
-      // these is exactly the cage that banned RunPod; backend mode lifts it.
-      ...(mode === 'backend' ? {} : {
-        '-p 8890:8890/udp': '1',   // SRT ingest — OBS → pod
-        '-p 8889:8889/udp': '1',   // UDP echo probe — broker readiness gate
-      }),
       // NOTE: the relay Dockerfile already bakes NVIDIA_VISIBLE_DEVICES=all +
       // NVIDIA_DRIVER_CAPABILITIES=compute,video,utility, and a live test proved
       // setting them here too does NOT fix a GPU-blind host — the driver libs
@@ -337,7 +323,7 @@ export const vastProvider: GpuProvider = {
     // Use the v1 LIST endpoint — /api/v0/instances/ was deprecated by Vast and now
     // returns {"error":"deprecated_endpoint"}, so getStatus silently saw every pod
     // as "terminated" (empty list → inst not found). v1 uses the same instances[]
-    // array structure; port keys are identical ('1935/tcp', '8890/udp', etc.).
+    // array structure; port keys are identical ('1935/tcp', '8888/tcp', etc.).
     const res = await fetch(`${BASE_V1}/instances/`, { headers: authHeaders(), signal: AbortSignal.timeout(8000) })
     if (!res.ok) return { status: 'unknown', ip: null, port: null, hlsPort: null, dataCenterId: null }
     const arr = ((await res.json()).instances ?? []) as Array<{
@@ -349,16 +335,12 @@ export const vastProvider: GpuProvider = {
     const ip = inst.public_ipaddr ?? null
     const rtmp = inst.ports?.['1935/tcp']?.[0]?.HostPort
     const hls = inst.ports?.['8888/tcp']?.[0]?.HostPort
-    const srt = inst.ports?.['8890/udp']?.[0]?.HostPort       // SRT ingest (UDP)
-    const udpProbe = inst.ports?.['8889/udp']?.[0]?.HostPort  // UDP echo for the forwarding check
     return {
       status: inst.cur_state ?? inst.actual_status ?? 'unknown',
       ip: rtmp && ip ? ip : null,      // ready only once the RTMP port is mapped
       port: rtmp ? Number(rtmp) : null,
       hlsPort: hls ? Number(hls) : null,
       dataCenterId: null,              // Vast has no datacenter id; placement is by offer
-      srtPort: srt ? Number(srt) : null,
-      udpProbePort: udpProbe ? Number(udpProbe) : null,
     }
   },
 

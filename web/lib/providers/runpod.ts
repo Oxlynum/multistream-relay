@@ -67,8 +67,8 @@ export const runpodProvider: GpuProvider = {
 
   // Cartesian (affordable catalog GPUs) × (secure datacenters), each stamped with the
   // DC's coordinates. The broker ranks by distance to the hub and creates nearest-first;
-  // a dry DC fails fast on create() and the broker cascades. RunPod is backend-only, so
-  // the 'mode' is effectively always 'backend' here (it's never an SRT-ingest pod).
+  // a dry DC fails fast on create() and the broker cascades. RunPod is a GPU bridge
+  // BACKEND — it only ever receives the hub's mpegts-over-TCP bridge, never an SRT ingest.
   async listCandidates({ maxPricePerHr, needsProfessionalGpu }) {
     if (!process.env.RUNPOD_API_KEY) return []
     const gpus = GPU_CATALOG

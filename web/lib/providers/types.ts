@@ -42,14 +42,13 @@ export interface PodStatus {
   port: number | null          // public mapped port for the RTMP beacon (1935/tcp)
   hlsPort: number | null       // public mapped port for the HLS preview server (8888)
   dataCenterId: string | null  // location the pod landed in, if the provider reports it (null on Vast)
-  srtPort?: number | null      // public mapped UDP port for SRT ingest (8890/udp); null if not mapped
-  udpProbePort?: number | null // public mapped UDP echo port (8889/udp) used to verify the host forwards UDP
 }
 
 // A cloud GPU provider. Vast.ai is implemented today (see vast.ts); the broker
-// ranks across every active provider. The only requirements: deterministic
-// placement (put the pod where listCandidates said), and UDP-capable hosts (SRT
-// ingest is the only OBS→pod transport).
+// ranks across every active provider. The only requirement: deterministic
+// placement (put the pod where listCandidates said). The GPU ingests an
+// mpegts-over-TCP bridge on :8899 from the VPS hub (SRT is OBS→hub only), so a
+// TCP-only host is fine — no UDP forwarding required.
 export interface GpuProvider {
   name: string
 
@@ -58,18 +57,13 @@ export interface GpuProvider {
   //   its real geolocation and price.
   // Best-effort: should resolve to [] (not throw) if the provider is unreachable,
   // so one provider being down never blocks the others.
-  // `mode` distinguishes the legacy all-in-one pod (OBS ingests SRT/UDP directly →
-  // needs UDP ports) from the VPS-hub GPU BACKEND (receives an mpegts-over-TCP bridge
-  // → no UDP, fewer ports, tiny in-region egress). Defaults to 'all-in-one' so the
-  // existing path is unchanged.
-  listCandidates(opts: { maxPricePerHr: number; needsProfessionalGpu: boolean; mode?: 'all-in-one' | 'backend' }): Promise<GpuCandidate[]>
+  listCandidates(opts: { maxPricePerHr: number; needsProfessionalGpu: boolean }): Promise<GpuCandidate[]>
 
   create(args: {
     candidate: GpuCandidate
     name: string
     imageTag: string
     env: PodEnv[]
-    mode?: 'all-in-one' | 'backend'
   }): Promise<CreatedPod>
 
   getStatus(podId: string): Promise<PodStatus>

@@ -19,13 +19,14 @@ export async function GET(request: Request) {
   const supabase = createServerClient()
   const { data: profile } = await supabase
     .from('profiles')
-    .select('output_settings, has_2k_addon')
+    .select('output_settings, has_2k_addon, primary_platform')
     .eq('id', userId)
     .single()
 
   return Response.json({
     output_settings: (profile?.output_settings as OutputSettingsMap) ?? {},
     has_2k_addon: profile?.has_2k_addon ?? false,
+    primary_platform: profile?.primary_platform ?? null,
   })
 }
 
@@ -34,6 +35,17 @@ export async function PATCH(request: Request) {
   if (!userId) return Response.json({ error: 'Unauthorized' }, { status: 401 })
 
   const body = await request.json().catch(() => ({})) as Record<string, OutputSettings>
+
+  // primary_platform is a sibling scalar (not a per-platform entry) — validate it separately.
+  const primaryProvided = body != null && typeof body === 'object' && 'primary_platform' in body
+  const primaryPlatform = primaryProvided ? (body as Record<string, unknown>).primary_platform : undefined
+  if (
+    primaryProvided &&
+    primaryPlatform !== null &&
+    (typeof primaryPlatform !== 'string' || !KNOWN_PLATFORMS.has(primaryPlatform))
+  ) {
+    return Response.json({ error: 'Invalid primary_platform' }, { status: 400 })
+  }
 
   // Validate and sanitize the incoming per-platform settings
   const sanitized: OutputSettingsMap = {}
@@ -62,7 +74,7 @@ export async function PATCH(request: Request) {
     sanitized[platform] = entry
   }
 
-  if (Object.keys(sanitized).length === 0) {
+  if (Object.keys(sanitized).length === 0 && !primaryProvided) {
     return Response.json({ error: 'No valid settings provided' }, { status: 400 })
   }
 
@@ -78,12 +90,19 @@ export async function PATCH(request: Request) {
   const existing = (profile?.output_settings as OutputSettingsMap) ?? {}
   const merged = { ...existing, ...sanitized }
 
+  const updatePayload: Record<string, unknown> = { output_settings: merged }
+  if (primaryProvided) updatePayload.primary_platform = primaryPlatform
+
   const { error } = await supabase
     .from('profiles')
-    .update({ output_settings: merged })
+    .update(updatePayload)
     .eq('id', userId)
 
   if (error) return Response.json({ error: error.message }, { status: 500 })
 
-  return Response.json({ ok: true, output_settings: merged })
+  return Response.json({
+    ok: true,
+    output_settings: merged,
+    ...(primaryProvided ? { primary_platform: primaryPlatform } : {}),
+  })
 }
