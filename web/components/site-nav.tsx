@@ -2,15 +2,24 @@
 
 import { useState, useEffect } from 'react'
 import Link from 'next/link'
+import { Menu } from 'lucide-react'
 import { Logo } from './logo'
 import { createBrowserClient } from '@/lib/supabase'
+import { Button, buttonVariants } from '@/components/ui/button'
+import {
+  Sheet,
+  SheetContent,
+  SheetTrigger,
+  SheetHeader,
+  SheetTitle,
+} from '@/components/ui/sheet'
+import { cn } from '@/lib/utils'
 
 const LINKS = [
   { href: '/#how', label: 'How it works' },
   { href: '/features', label: 'Features' },
   { href: '/pricing', label: 'Pricing' },
-  { href: '/#compare', label: 'Compare' },
-  { href: '/#faq', label: 'FAQ' },
+  { href: '/faq', label: 'FAQ' },
 ]
 
 export function SiteNav() {
@@ -20,96 +29,111 @@ export function SiteNav() {
 
   useEffect(() => {
     const supabase = createBrowserClient()
-    
+
     supabase.auth.getSession().then(({ data: { session } }: { data: { session: unknown } }) => {
       setIsLoggedIn(!!session)
       setLoading(false)
     })
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event: unknown, session: unknown) => {
-      setIsLoggedIn(!!session)
-    })
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(
+      (_event: unknown, session: unknown) => setIsLoggedIn(!!session),
+    )
 
     return () => subscription.unsubscribe()
   }, [])
 
   return (
-    <header className="sticky top-0 z-50 border-b border-line/70 bg-base/80 backdrop-blur-xl">
-      <nav className="max-w-6xl mx-auto flex items-center justify-between px-6 h-16">
+    <header className="sticky top-0 z-50 border-b border-line/70 bg-bg/80 backdrop-blur-xl">
+      <nav className="mx-auto flex h-16 max-w-6xl items-center justify-between px-6">
         <Logo />
 
-        <div className="hidden md:flex items-center gap-8 text-sm">
+        <div className="hidden items-center gap-8 text-sm md:flex">
           {LINKS.map(l => (
-            <a key={l.href} href={l.href} className="text-ink-muted hover:text-ink transition-colors">
+            <a
+              key={l.href}
+              href={l.href}
+              className="text-ink-muted transition-colors hover:text-ink"
+            >
               {l.label}
             </a>
           ))}
         </div>
 
-        <div className="hidden md:flex items-center gap-3 text-sm min-w-[180px] justify-end">
+        <div className="hidden min-w-[200px] items-center justify-end gap-2 md:flex">
           {loading ? null : isLoggedIn ? (
-            <Link
-              href="/dashboard"
-              className="bg-surface border border-line-strong hover:border-accent hover:text-accent text-ink px-5 py-2 rounded-lg font-medium transition-all"
-            >
+            <Link href="/dashboard" className={buttonVariants({ variant: 'secondary' })}>
               Dashboard
             </Link>
           ) : (
             <>
-              <Link href="/login" className="text-ink-muted hover:text-ink transition-colors px-3 py-1.5 font-medium">
+              <Link href="/login" className={buttonVariants({ variant: 'ghost' })}>
                 Log in
               </Link>
-              <Link
-                href="/signup"
-                className="bg-accent hover:bg-accent-strong text-base font-semibold px-5 py-2 rounded-lg transition-all glow-accent"
-              >
-                Get started
+              <Link href="/signup" className={cn(buttonVariants(), 'shadow-glow')}>
+                Start free
               </Link>
             </>
           )}
         </div>
 
-        <button
-          onClick={() => setOpen(o => !o)}
-          className="md:hidden text-ink-muted hover:text-ink p-2 -mr-2"
-          aria-label="Toggle menu"
-        >
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            {open ? <path d="M6 6l12 12M6 18L18 6" strokeLinecap="round" /> : <path d="M4 7h16M4 12h16M4 17h16" strokeLinecap="round" />}
-          </svg>
-        </button>
+        {/* Mobile */}
+        <Sheet open={open} onOpenChange={setOpen}>
+          <SheetTrigger
+            render={
+              <Button variant="ghost" size="icon" className="md:hidden" aria-label="Open menu" />
+            }
+          >
+            <Menu className="h-5 w-5" />
+          </SheetTrigger>
+          <SheetContent side="right" className="w-72 border-line bg-bg">
+            <SheetHeader>
+              <SheetTitle className="text-left">
+                <Logo href={null} />
+              </SheetTitle>
+            </SheetHeader>
+            <div className="mt-2 flex flex-col gap-1 px-4">
+              {LINKS.map(l => (
+                <a
+                  key={l.href}
+                  href={l.href}
+                  onClick={() => setOpen(false)}
+                  className="rounded-lg px-3 py-2.5 text-sm text-ink-muted transition-colors hover:bg-surface hover:text-ink"
+                >
+                  {l.label}
+                </a>
+              ))}
+            </div>
+            <div className="mt-4 flex flex-col gap-2 px-4">
+              {loading ? null : isLoggedIn ? (
+                <Link
+                  href="/dashboard"
+                  onClick={() => setOpen(false)}
+                  className={cn(buttonVariants(), 'w-full')}
+                >
+                  Go to Dashboard
+                </Link>
+              ) : (
+                <>
+                  <Link
+                    href="/login"
+                    onClick={() => setOpen(false)}
+                    className={cn(buttonVariants({ variant: 'secondary' }), 'w-full')}
+                  >
+                    Log in
+                  </Link>
+                  <Link
+                    href="/signup"
+                    onClick={() => setOpen(false)}
+                    className={cn(buttonVariants(), 'w-full shadow-glow')}
+                  >
+                    Start free
+                  </Link>
+                </>
+              )}
+            </div>
+          </SheetContent>
+        </Sheet>
       </nav>
-
-      {open && (
-        <div className="md:hidden border-t border-line bg-base px-6 py-4 space-y-3">
-          {LINKS.map(l => (
-            <a
-              key={l.href}
-              href={l.href}
-              onClick={() => setOpen(false)}
-              className="block text-ink-muted hover:text-ink transition-colors py-1"
-            >
-              {l.label}
-            </a>
-          ))}
-          <div className="flex gap-3 pt-2">
-            {loading ? null : isLoggedIn ? (
-              <Link href="/dashboard" className="flex-1 text-center border border-line-strong hover:bg-surface hover:text-accent rounded-lg py-2.5 text-sm font-medium transition-colors">
-                Go to Dashboard
-              </Link>
-            ) : (
-              <>
-                <Link href="/login" className="flex-1 text-center border border-line-strong hover:bg-surface rounded-lg py-2.5 text-sm font-medium transition-colors">
-                  Log in
-                </Link>
-                <Link href="/signup" className="flex-1 text-center bg-accent text-base font-semibold rounded-lg py-2.5 text-sm glow-accent transition-all">
-                  Get started
-                </Link>
-              </>
-            )}
-          </div>
-        </div>
-      )}
     </header>
   )
 }

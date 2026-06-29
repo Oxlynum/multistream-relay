@@ -1,137 +1,289 @@
 @import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
 
-/* ── SlimCast design system — infra-grade slate + teal ──────────────────── */
+@custom-variant dark (&:is(.dark *));
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   SlimCast design system — "Creator Energy, Premium Grade"
+   Space-black canvas · signature violet→pink→cyan aurora · broadcast-coded live.
+   App is DARK-ONLY: :root and .dark carry the same palette so the .dark variant
+   (and class="dark" on <html>) always resolves correctly.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+:root {
+  --radius: 0.875rem;
+
+  /* ── shadcn semantic tokens (dark palette) ── */
+  --background: #0a0a12;
+  --foreground: #f5f4fb;
+  --card: #14141f;
+  --card-foreground: #f5f4fb;
+  --popover: #1c1c2b;
+  --popover-foreground: #f5f4fb;
+  --primary: #7c5cfc;            /* brand violet */
+  --primary-foreground: #0a0a12; /* dark text on bright violet → AA */
+  --secondary: #1c1c2b;
+  --secondary-foreground: #f5f4fb;
+  --muted: #14141f;
+  --muted-foreground: #a2a1b8;
+  --accent: #1c1c2b;             /* shadcn "accent" = a SURFACE, not the brand color */
+  --accent-foreground: #f5f4fb;
+  --destructive: #fb4e5a;
+  --destructive-foreground: #0a0a12;
+  --border: #262635;
+  --input: #3a3a52;
+  --ring: #7c5cfc;
+
+  --chart-1: #7c5cfc;
+  --chart-2: #22d3ee;
+  --chart-3: #ff5da2;
+  --chart-4: #34d399;
+  --chart-5: #fbbf24;
+
+  --sidebar: #0e0e18;
+  --sidebar-foreground: #f5f4fb;
+  --sidebar-primary: #7c5cfc;
+  --sidebar-primary-foreground: #0a0a12;
+  --sidebar-accent: #1c1c2b;
+  --sidebar-accent-foreground: #f5f4fb;
+  --sidebar-border: #262635;
+  --sidebar-ring: #7c5cfc;
+
+  /* ── signature gradients + glows ── */
+  --gradient-brand: linear-gradient(115deg, #7c5cfc 0%, #c247e6 46%, #ff5da2 78%, #22d3ee 100%);
+  --gradient-brand-quiet: linear-gradient(120deg, #7c5cfc 0%, #6a45f0 100%);
+  --gradient-live: linear-gradient(120deg, #22d3ee 0%, #7c5cfc 100%);
+  --shadow-glow: 0 0 0 1px rgba(124, 92, 252, 0.35), 0 10px 40px -10px rgba(124, 92, 252, 0.5);
+  --shadow-live: 0 0 0 1px rgba(255, 59, 107, 0.35), 0 0 32px -6px rgba(255, 59, 107, 0.45);
+}
+
+.dark {
+  --background: #0a0a12;
+  --foreground: #f5f4fb;
+  --card: #14141f;
+  --card-foreground: #f5f4fb;
+  --popover: #1c1c2b;
+  --popover-foreground: #f5f4fb;
+  --primary: #7c5cfc;
+  --primary-foreground: #0a0a12;
+  --secondary: #1c1c2b;
+  --secondary-foreground: #f5f4fb;
+  --muted: #14141f;
+  --muted-foreground: #a2a1b8;
+  --accent: #1c1c2b;
+  --accent-foreground: #f5f4fb;
+  --destructive: #fb4e5a;
+  --destructive-foreground: #0a0a12;
+  --border: #262635;
+  --input: #3a3a52;
+  --ring: #7c5cfc;
+  --chart-1: #7c5cfc;
+  --chart-2: #22d3ee;
+  --chart-3: #ff5da2;
+  --chart-4: #34d399;
+  --chart-5: #fbbf24;
+  --sidebar: #0e0e18;
+  --sidebar-foreground: #f5f4fb;
+  --sidebar-primary: #7c5cfc;
+  --sidebar-primary-foreground: #0a0a12;
+  --sidebar-accent: #1c1c2b;
+  --sidebar-accent-foreground: #f5f4fb;
+  --sidebar-border: #262635;
+  --sidebar-ring: #7c5cfc;
+}
+
+/* ── Map shadcn vars into Tailwind theme namespace (inline = live var() → dark works) ── */
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 12px);
+  --radius-3xl: calc(var(--radius) + 24px);
+}
+
+/* ── Brand tokens + fonts (plain @theme → bg-brand / text-cyan / font-display generate,
+      fonts resolve at RUNTIME against the next/font classNames on <html>) ── */
 @theme {
-  /* Surfaces - Deep Professional Navy/Blue */
-  --color-base: #020617; /* Very deep blue-black */
-  --color-surface: #0a0f1e; /* Slightly lighter navy */
-  --color-elevated: #111827; /* Elevated navy */
-  --color-line: #1e293b;
-  --color-line-strong: #334155;
+  --color-bg: #0a0a12;
+  --color-bg-subtle: #0e0e18;
+  --color-surface: #14141f;
+  --color-surface-2: #1c1c2b;
+  --color-surface-3: #262638;
+  --color-line: #262635;
+  --color-line-strong: #3a3a52;
 
-  /* Brand accent - Digital Green */
-  --color-accent: #10b981; /* Emerald 500 */
-  --color-accent-strong: #059669; /* Emerald 600 */
-  --color-accent-soft: rgba(16, 185, 129, 0.15); /* Soft emerald */
-  --color-accent-glow: rgba(16, 185, 129, 0.4);
+  --color-brand: #7c5cfc;
+  --color-brand-strong: #6a45f0;
+  --color-cyan: #22d3ee;
+  --color-pink: #ff5da2;
 
-  /* Text */
-  --color-ink: #f8fafc;
-  --color-ink-muted: #94a3b8;
-  --color-ink-faint: #475569;
+  --color-live: #ff3b6b;
+  --color-success: #34d399;
+  --color-warning: #fbbf24;
+  --color-danger: #fb4e5a;
 
-  --font-sans: var(--font-geist-sans), "Inter", ui-sans-serif, system-ui, sans-serif;
-  --font-mono: var(--font-geist-mono), "Fira Code", ui-monospace, "SF Mono", monospace;
+  --color-ink: #f5f4fb;
+  --color-ink-muted: #a2a1b8;
+  --color-ink-faint: #6a6982;
+
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-display: var(--font-space-grotesk), ui-sans-serif, system-ui, sans-serif;
+  --font-heading: var(--font-space-grotesk), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-jetbrains), ui-monospace, "SF Mono", monospace;
 }
 
 @layer base {
+  * {
+    @apply border-border;
+  }
   html {
     color-scheme: dark;
+    -webkit-text-size-adjust: 100%;
   }
   body {
-    background-color: var(--color-base);
-    color: var(--color-ink);
-    font-family: var(--font-sans);
-    -webkit-font-smoothing: antialiased;
+    @apply bg-bg text-ink font-sans antialiased;
     text-rendering: optimizeLegibility;
   }
   ::selection {
-    background-color: rgba(45, 212, 191, 0.25);
+    background: rgba(124, 92, 252, 0.3);
+    color: #fff;
+  }
+  :focus-visible {
+    @apply outline-none ring-2 ring-brand ring-offset-2;
+    --tw-ring-offset-color: var(--color-bg);
+  }
+  /* Headings default to the display grotesk */
+  h1, h2, h3 {
+    font-family: var(--font-display);
   }
 }
 
+/* ═══════════════════════════════════════════════════════════════════════════
+   Signature utilities (aurora text, ambient aurora bg, marquee, live pulse)
+   ═══════════════════════════════════════════════════════════════════════════ */
 @layer utilities {
-  /* Eyebrow / mono kicker label */
-  .kicker {
-    font-family: var(--font-mono);
-    font-size: 0.7rem;
-    letter-spacing: 0.18em;
-    text-transform: uppercase;
-    color: var(--color-accent);
-  }
-
-  /* Faint engineering grid backdrop */
-  .bg-grid {
-    background-image:
-      linear-gradient(to right, rgba(139, 151, 168, 0.06) 1px, transparent 1px),
-      linear-gradient(to bottom, rgba(139, 151, 168, 0.06) 1px, transparent 1px);
-    background-size: 60px 60px;
-    animation: grid-drift 15s linear infinite;
-  }
-
-  @keyframes grid-drift {
-    0% {
-      background-position: 0px 0px;
-    }
-    100% {
-      background-position: 60px 60px;
-    }
-  }
-
-  /* Floating animation for images */
-  .animate-float {
-    animation: float 6s ease-in-out infinite;
-  }
-  .animate-float-delayed {
-    animation: float 6s ease-in-out 3s infinite;
-  }
-
-  @keyframes float {
-    0% { transform: translateY(0px); }
-    50% { transform: translateY(-15px); }
-    100% { transform: translateY(0px); }
-  }
-
-  /* Radial fade mask for grid/glow sections */
-  .mask-fade {
-    -webkit-mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, #000 40%, transparent 100%);
-    mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, #000 40%, transparent 100%);
-  }
-
-  .text-gradient {
-    background: linear-gradient(135deg, #ffffff 0%, #94a3b8 100%);
+  /* Aurora gradient text — the hero brand device */
+  .text-aurora {
+    background: var(--gradient-brand);
+    background-size: 200% 200%;
     -webkit-background-clip: text;
     background-clip: text;
     color: transparent;
+    animation: aurora-pan 8s ease-in-out infinite;
+  }
+  @keyframes aurora-pan {
+    0%, 100% { background-position: 0% 50%; }
+    50% { background-position: 100% 50%; }
   }
 
-  .text-gradient-accent {
-    background: linear-gradient(135deg, #10b981 0%, #34d399 100%);
-    -webkit-background-clip: text;
-    background-clip: text;
-    color: transparent;
+  /* Ambient drifting aurora — hero + final CTA only */
+  .aurora-bg {
+    position: relative;
+    overflow: hidden;
+    isolation: isolate;
   }
-
-  .glow-accent {
-    box-shadow: 0 0 0 1px rgba(16, 185, 129, 0.3), 0 0 40px -8px rgba(16, 185, 129, 0.4);
-    transition: box-shadow 0.3s ease, transform 0.3s ease;
-  }
-
-  .glow-accent:hover {
-    box-shadow: 0 0 0 1px rgba(16, 185, 129, 0.5), 0 0 60px -8px rgba(16, 185, 129, 0.6);
-    transform: translateY(-2px);
-  }
-
-  /* Glassmorphism utility */
-  .glass {
-    background: rgba(10, 15, 30, 0.6);
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
-    border: 1px solid rgba(255, 255, 255, 0.05);
-  }
-
-  /* Animated live pulse dot */
-  .pulse-dot::before {
+  .aurora-bg::before {
     content: "";
     position: absolute;
-    inset: 0;
-    border-radius: 9999px;
-    background-color: currentColor;
-    opacity: 0.55;
-    animation: pulse-ring 2s cubic-bezier(0, 0, 0.2, 1) infinite;
+    inset: -25% -10% auto -10%;
+    height: 150%;
+    background:
+      radial-gradient(40% 50% at 20% 20%, rgba(124, 92, 252, 0.22), transparent 70%),
+      radial-gradient(38% 45% at 80% 15%, rgba(255, 93, 162, 0.16), transparent 70%),
+      radial-gradient(45% 55% at 60% 80%, rgba(34, 211, 238, 0.14), transparent 70%);
+    filter: blur(40px);
+    pointer-events: none;
+    z-index: -1;
+    animation: aurora-drift 22s ease-in-out infinite alternate;
   }
-  @keyframes pulse-ring {
+  @keyframes aurora-drift {
+    from { transform: translate3d(-2%, -1%, 0) scale(1); }
+    to { transform: translate3d(3%, 2%, 0) scale(1.08); }
+  }
+
+  /* Brand glow + gradient fills */
+  .shadow-glow { box-shadow: var(--shadow-glow); }
+  .shadow-live { box-shadow: var(--shadow-live); }
+  .bg-gradient-brand { background-image: var(--gradient-brand); }
+  .bg-gradient-brand-quiet { background-image: var(--gradient-brand-quiet); }
+  .bg-gradient-live { background-image: var(--gradient-live); }
+
+  /* Faint dotted broadcast grid (optional section texture) */
+  .bg-dotgrid {
+    background-image: radial-gradient(rgba(124, 92, 252, 0.10) 1px, transparent 1px);
+    background-size: 28px 28px;
+    -webkit-mask-image: radial-gradient(ellipse 70% 60% at 50% 0%, #000 35%, transparent 100%);
+    mask-image: radial-gradient(ellipse 70% 60% at 50% 0%, #000 35%, transparent 100%);
+  }
+
+  /* Platform-logo marquee */
+  .animate-marquee {
+    animation: marquee 32s linear infinite;
+  }
+  @keyframes marquee {
+    from { transform: translateX(0); }
+    to { transform: translateX(-50%); }
+  }
+
+  /* Broadcast live-pulse ring (LiveDot) */
+  .animate-ping-slow {
+    animation: ping-slow 2s cubic-bezier(0, 0, 0.2, 1) infinite;
+  }
+  @keyframes ping-slow {
     0% { transform: scale(1); opacity: 0.7; }
-    100% { transform: scale(3); opacity: 0; }
+    100% { transform: scale(2.6); opacity: 0; }
+  }
+
+  /* Scroll-entrance: fade + rise */
+  .animate-rise {
+    animation: rise 0.6s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  }
+  @keyframes rise {
+    from { opacity: 0; transform: translateY(12px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .text-aurora,
+    .aurora-bg::before,
+    .animate-marquee,
+    .animate-ping-slow,
+    .animate-rise {
+      animation: none !important;
+    }
   }
 }

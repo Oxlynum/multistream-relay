@@ -1,305 +1,394 @@
+import type { ReactNode } from 'react'
 import Link from 'next/link'
 import Image from 'next/image'
+
 import { SiteNav } from '@/components/site-nav'
 import { SiteFooter } from '@/components/site-footer'
+import { Kicker } from '@/components/ui/kicker'
+import { GradientText } from '@/components/ui/gradient-text'
+import { AuroraBackground } from '@/components/ui/aurora-background'
+import { LiveDot } from '@/components/ui/live-dot'
+import { StatTile } from '@/components/marketing/stat-tile'
+import { FeatureCard } from '@/components/marketing/feature-card'
+import { StepCard } from '@/components/marketing/step-card'
+import { PlatformMarquee } from '@/components/marketing/platform-marquee'
+import { PlatformIcon, PLATFORM_META, type PlatformKey } from '@/components/platform-icon'
+import { buttonVariants } from '@/components/ui/button'
+import { cn } from '@/lib/utils'
 
-const PLATFORMS = ['Twitch', 'YouTube', 'Kick', 'TikTok']
+const PLATFORMS: PlatformKey[] = ['twitch', 'youtube', 'kick', 'tiktok']
+
+const SUBHEAD =
+  'Push one HEVC feed from OBS. SlimCast transcodes it on a cloud GPU and goes live on Twitch, YouTube, Kick, and TikTok at once — no second PC, no config files, no terminal.'
 
 const STEPS = [
   {
     n: '01',
     title: 'Paste your stream keys',
-    body: 'Add the platforms you want once in the dashboard. We store them encrypted — you never touch an RTMP URL again.',
+    body: 'Add your platforms once in the dashboard. Keys are stored AES-256-GCM encrypted — you never touch an RTMP URL again.',
   },
   {
     n: '02',
     title: 'Install the OBS plugin',
-    body: 'One double-click on Mac or Windows. The SlimCast panel appears inside OBS. Paste your API key a single time.',
+    body: 'One double-click on Mac or Windows. The SlimCast panel appears inside OBS; paste your API key a single time.',
   },
   {
     n: '03',
-    title: 'Hit “Start Streaming”',
+    title: 'Hit Start Streaming',
     body: 'SlimCast spins up a cloud GPU in ~45 seconds, then sends your feed live to every platform automatically.',
   },
   {
     n: '04',
     title: 'Stop when you’re done',
-    body: 'Ending the stream tears the GPU down instantly. You’re billed by the second — nothing runs idle.',
+    body: 'Ending the stream tears the GPU down instantly. No idle billing — nothing runs when you’re not live.',
   },
 ]
 
 const FEATURES = [
   {
     title: 'HEVC uplink',
-    body: 'Push H.265 from OBS and send ~40% less data upstream. Built for creators whose upload can’t handle five H.264 streams.',
+    body: 'Push one H.265 feed from OBS and send ~40% less data upstream than parallel H.264 streams.',
   },
   {
-    title: 'Hardware GPU transcode',
-    body: 'A dedicated NVENC GPU transcodes your feed per-platform — Twitch at 1080p60, TikTok in portrait — with zero load on your PC.',
+    title: 'Cloud GPU transcode',
+    body: 'A dedicated NVENC/NVDEC GPU transcodes your feed per platform — zero load on your PC.',
   },
   {
-    title: 'Five platforms at once',
-    body: 'Twitch, YouTube, Kick, and TikTok simultaneously from a single OBS output. No second encoder, no second PC.',
+    title: 'Four platforms at once',
+    body: 'Twitch, YouTube, Kick, and TikTok simultaneously from a single OBS output.',
   },
   {
     title: 'Per-platform tuning',
-    body: 'Set bitrate, frame rate, and orientation independently for each destination. TikTok gets portrait, Twitch gets full 8 Mbps.',
+    body: 'Independent bitrate, frame rate, and orientation for each destination — TikTok in portrait, Twitch at full quality.',
   },
   {
-    title: 'Auto-restart & failover',
-    body: 'If a platform connection drops, SlimCast reconnects it automatically with backoff — the rest of your stream never blinks.',
+    title: 'Quality auto-adjust',
+    body: 'If your bandwidth dips, SlimCast steps quality down smoothly and recovers — your stream never face-plants.',
   },
   {
-    title: 'Pay per second',
-    body: '$2/hour billed to the second. No subscription, no minimums. The GPU only exists while you’re actually live.',
+    title: 'Twitch HEVC passthrough',
+    body: 'Eligible Twitch accounts get HEVC passed through untouched — maximum quality per bit, automatically.',
   },
 ]
 
-const TRUST = [
-  { stat: '1080p60', label: 'Max output quality, every platform' },
-  { stat: '~45s', label: 'Cold start from click to live' },
-  { stat: '5', label: 'Platforms fanned out in parallel' },
-  { stat: '0', label: 'Terminal commands, configs, or RTMP URLs' },
+const CHECKLIST = [
+  'Hardware NVENC decode + encode — zero load on your PC',
+  'Per-output supervisor with automatic reconnect & backoff',
+  'Stream keys encrypted at rest (AES-256-GCM), injected only at stream time',
+  'SRT internal loopback preserves temporal-layered HEVC cleanly',
 ]
 
+const STATS = [
+  { value: '1080p60', label: 'Standard output · 2K add-on available' },
+  { value: '~45s', label: 'Cold start from click to live' },
+  { value: '4', label: 'Platforms fanned out in parallel' },
+  { value: '0', label: 'Idle billing — torn down the instant you stop' },
+]
 
+const SECTION_HEADING =
+  'font-display text-[clamp(1.875rem,3.5vw,2.75rem)] font-bold tracking-[-0.015em] text-ink'
 
-function Check() {
+/* ── Core-flow building blocks ─────────────────────────────────────────── */
+
+function FlowNode({
+  label,
+  title,
+  body,
+  featured = false,
+  children,
+}: {
+  label: string
+  title: string
+  body: string
+  featured?: boolean
+  children?: ReactNode
+}) {
   return (
-    <svg viewBox="0 0 20 20" className="w-5 h-5 text-accent inline" fill="currentColor" aria-label="yes">
-      <path fillRule="evenodd" d="M16.7 5.3a1 1 0 0 1 0 1.4l-7.5 7.5a1 1 0 0 1-1.4 0L3.3 10a1 1 0 1 1 1.4-1.4l3.3 3.3 6.8-6.8a1 1 0 0 1 1.4 0z" clipRule="evenodd" />
-    </svg>
+    <div
+      className={cn(
+        'flex-1 rounded-2xl border bg-surface p-7 text-center transition-all',
+        featured
+          ? 'border-brand/40 shadow-glow lg:-translate-y-1'
+          : 'border-line hover:border-line-strong',
+      )}
+    >
+      <div
+        className={cn(
+          'font-mono text-xs font-semibold tracking-[0.2em] uppercase',
+          featured ? 'text-cyan' : 'text-brand',
+        )}
+      >
+        {label}
+      </div>
+      <h3 className="mt-3 font-display text-lg font-semibold text-ink">{title}</h3>
+      <p className="mx-auto mt-2 max-w-xs text-sm leading-relaxed text-ink-muted">{body}</p>
+      {children}
+    </div>
   )
 }
 
-function Cross() {
+/* Gradient connector carrying a pulsing brand LiveDot — the literal "signal."
+   Vertical on mobile (stacked nodes), horizontal on desktop. */
+function FlowConnector() {
   return (
-    <svg viewBox="0 0 20 20" className="w-4 h-4 text-ink-faint inline" fill="currentColor" aria-label="no">
-      <path d="M6 6l8 8M14 6l-8 8" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-    </svg>
+    <div
+      aria-hidden
+      className="flex shrink-0 items-center justify-center self-center py-2 lg:w-20 lg:py-0"
+    >
+      <div className="relative h-12 w-px bg-gradient-to-b from-brand/10 via-brand to-cyan/50 lg:h-px lg:w-full lg:bg-gradient-to-r">
+        <span className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2">
+          <LiveDot color="brand" size={9} />
+        </span>
+      </div>
+    </div>
   )
 }
 
-function Cell({ value }: { value: string | boolean }) {
-  if (value === true) return <Check />
-  if (value === false) return <Cross />
-  return <span className="text-sm text-ink-muted">{value}</span>
+function CheckItem({ children }: { children: ReactNode }) {
+  return (
+    <li className="flex items-start gap-3">
+      <svg
+        viewBox="0 0 20 20"
+        fill="currentColor"
+        aria-hidden
+        className="mt-0.5 h-5 w-5 shrink-0 text-success"
+      >
+        <path
+          fillRule="evenodd"
+          clipRule="evenodd"
+          d="M16.7 5.3a1 1 0 0 1 0 1.4l-7.5 7.5a1 1 0 0 1-1.4 0L3.3 10a1 1 0 1 1 1.4-1.4l3.3 3.3 6.8-6.8a1 1 0 0 1 1.4 0z"
+        />
+      </svg>
+      <span className="text-sm leading-relaxed text-ink-muted">{children}</span>
+    </li>
+  )
 }
 
 export default function Home() {
   return (
-    <div className="min-h-screen flex flex-col">
+    <div className="flex min-h-screen flex-col">
       <SiteNav />
 
       <main className="flex-1">
-        {/* ── Hero ─────────────────────────────────────────────── */}
-        <section className="relative overflow-hidden">
-          <div className="absolute inset-0 bg-grid mask-fade pointer-events-none opacity-40" />
-          <div className="absolute -top-40 left-1/2 -translate-x-1/2 w-[800px] h-[600px] bg-accent-soft/40 rounded-full blur-[140px] pointer-events-none" />
-          <div className="absolute top-20 left-1/2 -translate-x-1/2 w-[400px] h-[400px] bg-accent/20 rounded-full blur-[100px] pointer-events-none mix-blend-screen" />
-
-          <div className="relative max-w-4xl mx-auto px-6 pt-24 pb-20 text-center">
-            <div className="inline-flex items-center gap-2 rounded-full border border-line bg-surface/80 glass px-4 py-1.5 text-xs font-medium text-ink-muted mb-8 shadow-sm">
-              <span className="relative inline-flex w-2 h-2 text-accent">
-                <span className="pulse-dot" />
-                <span className="relative w-2 h-2 rounded-full bg-accent" />
+        {/* ── Hero ──────────────────────────────────────────────── */}
+        <AuroraBackground as="section" className="relative overflow-hidden border-b border-line">
+          <div className="mx-auto max-w-6xl px-6 pt-20 pb-20 md:pt-28 md:pb-24">
+            <div className="mx-auto flex max-w-3xl flex-col items-center text-center">
+              {/* Solid status pill — no alpha, no blur (over the aurora) */}
+              <span className="inline-flex items-center gap-2.5 rounded-full border border-line bg-surface px-4 py-1.5 text-xs font-medium">
+                <LiveDot color="live" size={8} />
+                <span className="text-ink">Streaming infrastructure for creators</span>
               </span>
-              <span className="text-ink">Next-gen infrastructure</span> <span className="opacity-50">|</span> <span>Multistream relay</span>
+
+              <h1 className="mt-7 font-display text-[clamp(2.75rem,6.5vw,4.75rem)] leading-[1.02] font-bold tracking-[-0.02em] text-ink">
+                One stream up.
+                <GradientText as="span" className="block">
+                  Four platforms live.
+                </GradientText>
+              </h1>
+
+              <p className="mt-6 max-w-2xl text-lg leading-relaxed text-ink-muted">{SUBHEAD}</p>
+
+              <div className="mt-9 flex flex-col items-center gap-3 sm:flex-row sm:justify-center">
+                <Link
+                  href="/signup"
+                  className={cn(
+                    buttonVariants({ variant: 'default' }),
+                    'h-12 rounded-xl px-7 text-base font-semibold shadow-glow',
+                  )}
+                >
+                  Start free — 2 free tokens
+                </Link>
+                <a
+                  href="#how"
+                  className={cn(
+                    buttonVariants({ variant: 'outline' }),
+                    'h-12 rounded-xl px-7 text-base font-semibold',
+                  )}
+                >
+                  See how it works
+                </a>
+              </div>
+
+              <p className="mt-5 text-xs text-ink-faint">
+                Free during early access · account verification required
+              </p>
             </div>
 
-            <h1 className="text-5xl md:text-7xl font-extrabold tracking-tight leading-[1.1] mb-6">
-              <span className="text-gradient">One stream in.</span>
-              <br />
-              <span className="text-gradient-accent">Every platform live.</span>
-            </h1>
+            {/* Hero showcase — a live "program monitor": telemetry bar + LIVE chip.
+                Solid surfaces + selective glow only (no translucency, no blur). */}
+            <div className="relative mx-auto mt-16 max-w-5xl md:mt-20">
+              <div
+                aria-hidden
+                className="pointer-events-none absolute -inset-4 -z-10 bg-gradient-brand opacity-20 blur-3xl"
+              />
+              <div className="relative overflow-hidden rounded-2xl border border-line bg-surface shadow-live">
+                {/* Telemetry bar */}
+                <div className="flex items-center justify-between gap-3 border-b border-line px-4 py-2.5">
+                  <span className="flex items-center gap-2.5">
+                    <LiveDot color="cyan" size={7} />
+                    <span className="font-mono text-[0.7rem] font-semibold tracking-[0.2em] text-ink-faint uppercase">
+                      SRT · NVENC
+                    </span>
+                  </span>
+                  <span aria-hidden className="flex items-center gap-1.5">
+                    {PLATFORMS.map((p) => (
+                      <span
+                        key={p}
+                        className="h-2 w-2 rounded-full"
+                        style={{ backgroundColor: PLATFORM_META[p].tint }}
+                      />
+                    ))}
+                  </span>
+                </div>
 
-            <p className="text-lg text-ink-muted max-w-2xl mx-auto mb-9 leading-relaxed">
-              Push a single HEVC stream from OBS. SlimCast transcodes it on a cloud GPU and
-              goes live on Twitch, YouTube, Kick, and TikTok at once — no second PC,
-              no config files, no terminal.
-            </p>
+                <div className="relative p-2">
+                  <Image
+                    src="/dashboard-preview.jpg"
+                    alt="SlimCast dashboard"
+                    width={1920}
+                    height={1080}
+                    priority
+                    className="h-auto w-full rounded-xl"
+                  />
+                  <span className="absolute top-4 left-4 inline-flex items-center gap-2 rounded-full border border-line-strong bg-bg px-3 py-1.5 text-xs font-semibold tracking-wider text-ink uppercase shadow-sm">
+                    <LiveDot color="live" size={7} />
+                    LIVE
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </AuroraBackground>
 
-            <div className="flex flex-wrap gap-4 justify-center mt-4">
-              <Link
-                href="/signup"
-                className="bg-accent text-base text-base font-semibold px-8 py-3.5 rounded-lg transition-all glow-accent flex items-center gap-2"
-              >
-                Start free — 2 hours included
-                <span className="font-mono text-sm opacity-80">→</span>
-              </Link>
-              <a
-                href="#how"
-                className="glass border border-line-strong hover:border-accent hover:text-accent hover:bg-surface/50 text-ink px-8 py-3.5 rounded-lg font-semibold transition-all"
-              >
-                See how it works
-              </a>
+        {/* ── Platform marquee band ─────────────────────────────── */}
+        <PlatformMarquee />
+
+        {/* ── How it works ──────────────────────────────────────── */}
+        <section id="how" className="scroll-mt-20 py-24 md:py-32">
+          <div className="mx-auto max-w-6xl px-6">
+            <div className="mx-auto max-w-2xl text-center">
+              <Kicker>Setup</Kicker>
+              <h2 className={cn('mt-4', SECTION_HEADING)}>Live in four steps.</h2>
             </div>
 
-            <div className="mt-8 text-xs text-ink-faint">
-              Account verification required · Cancel anytime
-            </div>
-
-            {/* platform strip */}
-            <div className="mt-14 flex flex-wrap items-center justify-center gap-x-8 gap-y-3 mb-16">
-              {PLATFORMS.map(p => (
-                <span key={p} className="text-sm font-medium text-ink-faint uppercase tracking-wider">{p}</span>
+            <div className="mt-14 grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
+              {STEPS.map((s) => (
+                <StepCard key={s.n} n={s.n} title={s.title} body={s.body} />
               ))}
             </div>
+          </div>
+        </section>
 
-            <div className="relative max-w-5xl mx-auto mt-16 animate-float z-10">
-              <div className="absolute inset-0 bg-accent/20 blur-[100px] -z-10 rounded-full" />
-              <div className="rounded-2xl border border-line/50 shadow-2xl shadow-accent/10 glass overflow-hidden p-2 bg-surface/50">
-                <Image 
-                  src="/dashboard-preview.jpg" 
-                  alt="SlimCast Dashboard Preview" 
-                  width={1920} 
-                  height={1080} 
-                  className="rounded-xl w-full h-auto object-cover opacity-90 hover:opacity-100 transition-opacity duration-500"
-                  priority
+        {/* ── Core flow band ────────────────────────────────────── */}
+        <section className="relative border-y border-line bg-bg-subtle py-24 md:py-32">
+          <div aria-hidden className="pointer-events-none absolute inset-0 bg-dotgrid opacity-60" />
+          <div className="relative mx-auto max-w-6xl px-6">
+            <div className="mx-auto max-w-3xl text-center">
+              <Kicker color="cyan">Under the hood</Kicker>
+              <h2 className={cn('mt-4', SECTION_HEADING)}>
+                {"A broadcast GPU that only exists while you're live."}
+              </h2>
+            </div>
+
+            <div className="mt-16 flex flex-col items-stretch lg:flex-row lg:items-center">
+              <FlowNode label="Your PC" title="OBS on your PC" body="One HEVC feed out." />
+              <FlowConnector />
+              <FlowNode
+                featured
+                label="SlimCast"
+                title="SlimCast GPU · NVENC"
+                body="Decode HEVC, re-encode per platform in parallel."
+              />
+              <FlowConnector />
+              <FlowNode
+                label="Your audience"
+                title="4 platforms live"
+                body="Twitch, YouTube, Kick, and TikTok — each tuned to its own limits."
+              >
+                <div className="mt-4 flex items-center justify-center gap-3">
+                  {PLATFORMS.map((p) => (
+                    <span key={p} style={{ color: PLATFORM_META[p].tint }}>
+                      <PlatformIcon platform={p} className="h-5 w-5" />
+                    </span>
+                  ))}
+                </div>
+              </FlowNode>
+            </div>
+          </div>
+        </section>
+
+        {/* ── Features grid ─────────────────────────────────────── */}
+        <section className="py-24 md:py-32">
+          <div className="mx-auto max-w-6xl px-6">
+            <div className="mx-auto max-w-2xl text-center">
+              <Kicker color="pink">Capabilities</Kicker>
+              <h2 className={cn('mt-4', SECTION_HEADING)}>Everything your multistream needs.</h2>
+            </div>
+
+            <div className="mt-14 grid gap-5 md:grid-cols-2 lg:grid-cols-3">
+              {FEATURES.map((f, i) => (
+                <FeatureCard
+                  key={f.title}
+                  title={f.title}
+                  body={f.body}
+                  index={String(i + 1).padStart(2, '0')}
                 />
-              </div>
-            </div>
-          </div>
-        </section>
-
-        {/* ── Core Infrastructure ────────────────────────────── */}
-        <section className="max-w-5xl mx-auto px-6 py-20">
-          <div className="text-center mb-12">
-            <div className="kicker mb-3">Core Infrastructure</div>
-            <h2 className="text-3xl font-bold tracking-tight">Hardware-accelerated multiplexing</h2>
-            <p className="text-ink-muted mt-3 max-w-2xl mx-auto">
-              Transmit a single source feed. Our infrastructure manages concurrent transcoding and distribution.
-            </p>
-          </div>
-
-          <div className="flex flex-col md:flex-row items-stretch justify-center gap-6 mt-8 relative">
-            <div className="absolute top-1/2 left-0 w-full h-px bg-gradient-to-r from-transparent via-accent/30 to-transparent -translate-y-1/2 hidden md:block" />
-            
-            {/* OBS */}
-            <div className="flex-1 rounded-2xl glass border border-line/50 p-8 text-center relative z-10 transition-transform duration-300 hover:-translate-y-1 hover:shadow-xl hover:shadow-accent/5">
-              <div className="kicker mb-4">You</div>
-              <div className="text-xl font-semibold mb-2 text-ink">OBS on your PC</div>
-              <p className="text-sm text-ink-muted">One HEVC stream out. Same effort as streaming to a single platform.</p>
-            </div>
-
-            <div className="flex items-center justify-center text-accent/50 md:px-2 relative z-10 hidden md:flex">
-              <span className="font-mono text-xl animate-pulse">→</span>
-            </div>
-
-            {/* SlimCast GPU */}
-            <div className="flex-1 rounded-2xl glass border border-accent/40 bg-accent-soft p-8 text-center glow-accent relative z-10 scale-105">
-              <div className="kicker mb-4">SlimCast</div>
-              <div className="text-xl font-semibold mb-2 text-ink">Cloud GPU transcode</div>
-              <p className="text-sm text-ink-muted">Hardware NVENC decodes HEVC and re-encodes H.264 per platform, in parallel.</p>
-            </div>
-
-            <div className="flex items-center justify-center text-accent/50 md:px-2 relative z-10 hidden md:flex">
-              <span className="font-mono text-xl animate-pulse">→</span>
-            </div>
-
-            {/* Platforms */}
-            <div className="flex-1 rounded-2xl glass border border-line/50 p-8 text-center relative z-10 transition-transform duration-300 hover:-translate-y-1 hover:shadow-xl hover:shadow-accent/5">
-              <div className="kicker mb-4">Your audience</div>
-              <div className="text-xl font-semibold mb-2 text-ink">5 platforms live</div>
-              <p className="text-sm text-ink-muted">Twitch, YouTube, Kick &amp; TikTok — each tuned to its own limits.</p>
-            </div>
-          </div>
-        </section>
-
-        {/* ── How it works ────────────────────────────────────── */}
-        <section id="how" className="border-y border-line bg-surface/40">
-          <div className="max-w-5xl mx-auto px-6 py-20">
-            <div className="text-center mb-14">
-              <div className="kicker mb-3">Setup</div>
-              <h2 className="text-3xl font-bold tracking-tight">Live in four steps</h2>
-              <p className="text-ink-muted mt-3">From signup to streaming everywhere — no documentation required.</p>
-            </div>
-
-            <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-6">
-              {STEPS.map((s, i) => (
-                <div key={s.n} className="rounded-2xl glass border border-line/50 p-8 transition-all duration-300 hover:border-accent/30 hover:-translate-y-1 hover:shadow-lg hover:shadow-accent/5 relative overflow-hidden group">
-                  <div className="absolute top-0 right-0 p-6 opacity-5 text-8xl font-bold font-mono group-hover:opacity-10 transition-opacity -mr-4 -mt-4 text-accent">{s.n}</div>
-                  <div className="font-mono text-accent text-sm mb-5 opacity-80">{s.n} / 04</div>
-                  <div className="text-lg font-semibold mb-3 text-ink">{s.title}</div>
-                  <p className="text-sm text-ink-muted leading-relaxed">{s.body}</p>
-                </div>
               ))}
             </div>
           </div>
         </section>
 
-        {/* ── Features ─────────────────────────────────────────── */}
-        <section className="max-w-5xl mx-auto px-6 py-20">
-          <div className="text-center mb-14">
-            <div className="kicker mb-3">Capabilities</div>
-            <h2 className="text-3xl font-bold tracking-tight">Built like infrastructure</h2>
-            <p className="text-ink-muted mt-3 max-w-2xl mx-auto">
-              Everything a serious multistream needs, and nothing you have to think about.
-            </p>
-          </div>
-
-          <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
-            {FEATURES.map(f => (
-              <div key={f.title} className="rounded-2xl glass border border-line/50 p-8 transition-all duration-300 hover:border-accent/40 hover:-translate-y-1 hover:shadow-xl hover:shadow-accent/10">
-                <div className="text-lg font-semibold mb-3 text-ink flex items-center gap-3">
-                  <span className="w-1.5 h-1.5 rounded-full bg-accent inline-block"></span>
-                  {f.title}
-                </div>
-                <p className="text-sm text-ink-muted leading-relaxed">{f.body}</p>
-              </div>
-            ))}
-          </div>
-        </section>
-
-        {/* ── Trust / tech ─────────────────────────────────────── */}
-        <section id="trust" className="border-y border-line bg-surface/40">
-          <div className="max-w-5xl mx-auto px-6 py-20">
-            <div className="grid lg:grid-cols-2 gap-12 items-center">
+        {/* ── Trust / tech ──────────────────────────────────────── */}
+        <section
+          id="trust"
+          className="scroll-mt-20 border-y border-line bg-bg-subtle py-24 md:py-32"
+        >
+          <div className="mx-auto max-w-6xl px-6">
+            <div className="grid items-start gap-12 lg:grid-cols-2 lg:gap-16">
+              {/* Left: claim + checklist */}
               <div>
-                <div className="kicker mb-3">Under the hood</div>
-                <h2 className="text-3xl font-bold tracking-tight mb-4">Enterprise-grade distribution</h2>
-                <p className="text-ink-muted leading-relaxed mb-6">
-                  SlimCast operates on dedicated cloud GPUs utilizing hardware NVENC encoding. Your 
-                  source HEVC feed is decoded and concurrently re-encoded per platform using 
-                  optimized settings. The supervisor service monitors outputs and seamlessly reconnects 
-                  dropped endpoints. Stream keys remain encrypted at rest and are injected securely 
-                  only during active broadcasts.
+                <Kicker color="cyan">Enterprise-grade</Kicker>
+                <h2 className={cn('mt-4', SECTION_HEADING)}>
+                  Built like broadcast infrastructure.
+                </h2>
+                <p className="mt-5 max-w-xl text-base leading-relaxed text-ink-muted">
+                  Every stream runs on a dedicated cloud GPU with hardware NVENC decode and encode. A
+                  per-output supervisor watches each destination and reconnects on its own — so a
+                  hiccup on one platform never touches the rest.
                 </p>
-                <ul className="space-y-3 text-sm">
-                  {[
-                    'Hardware NVENC decode + encode — zero load on your PC',
-                    'Per-output supervisor with automatic reconnect & backoff',
-                    'Stream keys encrypted at rest, injected only at stream time',
-                    'SRT internal loopback preserves temporal-layered HEVC cleanly',
-                  ].map(item => (
-                    <li key={item} className="flex items-start gap-3">
-                      <span className="text-accent mt-0.5"><Check /></span>
-                      <span className="text-ink-muted">{item}</span>
-                    </li>
+                <ul className="mt-8 space-y-4">
+                  {CHECKLIST.map((item) => (
+                    <CheckItem key={item}>{item}</CheckItem>
                   ))}
                 </ul>
               </div>
 
-              <div className="space-y-12">
-                <div className="grid grid-cols-2 gap-5">
-                  {TRUST.map(t => (
-                    <div key={t.label} className="rounded-2xl glass border border-line/50 p-8 transition-all duration-300 hover:border-accent/20">
-                      <div className="text-4xl font-bold text-gradient-accent mb-2 font-mono tracking-tight">{t.stat}</div>
-                      <div className="text-sm text-ink-muted leading-relaxed">{t.label}</div>
-                    </div>
+              {/* Right: scoreboard + plugin program-monitor */}
+              <div>
+                <div className="grid grid-cols-2 gap-4">
+                  {STATS.map((s) => (
+                    <StatTile key={s.label} value={s.value} label={s.label} />
                   ))}
                 </div>
 
-                <div className="relative animate-float-delayed z-10 hidden md:block">
-                  <div className="absolute inset-0 bg-accent/10 blur-[80px] -z-10 rounded-full" />
-                  <div className="rounded-2xl border border-line/50 shadow-2xl shadow-accent/5 glass overflow-hidden p-2 bg-surface/50">
-                    <Image 
-                      src="/obs-plugin-preview.jpg" 
-                      alt="SlimCast OBS Plugin" 
-                      width={1200} 
-                      height={900} 
-                      className="rounded-xl w-full h-auto object-cover opacity-90 hover:opacity-100 transition-opacity duration-500"
-                    />
+                <div className="mt-4 hidden md:block">
+                  <div className="overflow-hidden rounded-2xl border border-line bg-surface shadow-lg">
+                    <div className="flex items-center gap-2.5 border-b border-line px-4 py-2.5">
+                      <LiveDot color="cyan" size={7} />
+                      <span className="font-mono text-[0.7rem] font-semibold tracking-[0.2em] text-ink-faint uppercase">
+                        OBS plugin
+                      </span>
+                    </div>
+                    <div className="p-2">
+                      <Image
+                        src="/obs-plugin-preview.jpg"
+                        alt="SlimCast OBS plugin"
+                        width={1200}
+                        height={900}
+                        className="h-auto w-full rounded-xl"
+                      />
+                    </div>
                   </div>
                 </div>
               </div>
@@ -307,28 +396,51 @@ export default function Home() {
           </div>
         </section>
 
-
-
-        {/* ── Final CTA ────────────────────────────────────────── */}
-        <section className="relative overflow-hidden">
-          <div className="absolute inset-0 bg-grid mask-fade pointer-events-none opacity-20" />
-          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[500px] bg-accent/10 rounded-full blur-[140px] pointer-events-none" />
-          <div className="relative max-w-2xl mx-auto px-6 py-28 text-center glass rounded-3xl border border-line/50 m-6 mb-12 shadow-2xl shadow-base">
-            <h2 className="text-4xl md:text-5xl font-extrabold tracking-tight mb-6 text-gradient">
-              Go live everywhere tonight.
-            </h2>
-            <p className="text-ink-muted text-lg mb-10 max-w-xl mx-auto">
-              Two free hours are waiting in your account. Set up your streaming infrastructure in minutes.
-            </p>
-            <Link
-              href="/signup"
-              className="inline-flex items-center gap-3 bg-accent text-base font-semibold px-10 py-4 rounded-xl transition-all glow-accent"
-            >
-              Create your account
-              <span className="font-mono text-sm opacity-80">→</span>
-            </Link>
+        {/* ── Pricing teaser ────────────────────────────────────── */}
+        <section className="py-24 md:py-32">
+          <div className="mx-auto max-w-4xl px-6">
+            <div className="flex flex-col items-center gap-6 rounded-2xl border border-line bg-surface p-8 text-center md:flex-row md:justify-between md:p-10 md:text-left">
+              <div>
+                <h2 className="font-display text-2xl font-semibold text-ink md:text-3xl">
+                  {"Free while we're in early access."}
+                </h2>
+                <p className="mt-2 text-ink-muted">
+                  When billing turns on: pay-as-you-go tokens ($2 each) or $20/mo.
+                </p>
+              </div>
+              <Link
+                href="/pricing"
+                className={cn(
+                  buttonVariants({ variant: 'outline' }),
+                  'h-12 shrink-0 rounded-xl px-7 text-base font-semibold',
+                )}
+              >
+                See pricing
+              </Link>
+            </div>
           </div>
         </section>
+
+        {/* ── Final CTA ─────────────────────────────────────────── */}
+        <AuroraBackground as="section" className="relative overflow-hidden border-t border-line">
+          <div className="mx-auto max-w-3xl px-6 py-28 text-center md:py-36">
+            <h2 className="font-display text-[clamp(2.25rem,5vw,3.5rem)] font-bold tracking-[-0.02em]">
+              <GradientText>Go live everywhere tonight.</GradientText>
+            </h2>
+            <p className="mt-5 text-lg text-ink-muted">Two free tokens are waiting.</p>
+            <div className="mt-9 flex justify-center">
+              <Link
+                href="/signup"
+                className={cn(
+                  buttonVariants({ variant: 'default' }),
+                  'h-12 rounded-xl px-8 text-base font-semibold shadow-glow',
+                )}
+              >
+                Create your account
+              </Link>
+            </div>
+          </div>
+        </AuroraBackground>
       </main>
 
       <SiteFooter />

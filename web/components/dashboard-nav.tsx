@@ -4,6 +4,8 @@ import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import { createBrowserClient } from '@/lib/supabase'
 import { Logo } from './logo'
+import { Button } from '@/components/ui/button'
+import { cn } from '@/lib/utils'
 
 const TABS = [
   { href: '/dashboard', label: 'Overview' },
@@ -24,29 +26,27 @@ export function DashboardNav() {
   }
 
   return (
-    <header className="border-b border-line bg-base/80 backdrop-blur-xl sticky top-0 z-40">
-      <div className="max-w-5xl mx-auto px-6">
-        <div className="flex items-center justify-between h-16">
+    <header className="sticky top-0 z-40 border-b border-line bg-bg/80 backdrop-blur-xl">
+      <div className="mx-auto max-w-5xl px-6">
+        <div className="flex h-16 items-center justify-between">
           <Logo href="/" />
-          <button
-            onClick={signOut}
-            className="text-sm text-ink-muted hover:text-ink transition-colors"
-          >
+          <Button variant="ghost" size="sm" onClick={signOut}>
             Sign out
-          </button>
+          </Button>
         </div>
-        <nav className="flex gap-1 -mb-px">
+        <nav className="-mb-px flex gap-1 overflow-x-auto">
           {TABS.map(t => {
             const active = pathname === t.href
             return (
               <Link
                 key={t.href}
                 href={t.href}
-                className={`px-4 py-3 text-sm border-b-2 transition-colors ${
+                className={cn(
+                  'whitespace-nowrap border-b-2 px-4 py-3 text-sm transition-colors',
                   active
-                    ? 'border-accent text-ink font-medium'
-                    : 'border-transparent text-ink-muted hover:text-ink'
-                }`}
+                    ? 'border-brand font-medium text-ink'
+                    : 'border-transparent text-ink-muted hover:text-ink',
+                )}
               >
                 {t.label}
               </Link>
