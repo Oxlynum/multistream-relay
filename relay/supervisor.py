@@ -437,13 +437,19 @@ def _tee_targets(outputs: list[dict]) -> str:
         url = _full_rtmp_url(o)
         if not _tee_safe(url):
             continue
-        # fifo_options is a nested AVOptions list: its sub-options are ':'-separated,
-        # and inside a tee slave that ':' MUST be escaped as '\:' (the tee parser splits
-        # slave options on unescaped ':'). A comma is NOT a fifo separator — using one
-        # made the fifo muxer read queue_size="512,drop_pkts_on_overflow=1" → "Invalid
-        # argument", killing the whole tee (every platform dark). Verified on
-        # jellyfin-ffmpeg 7.1.4-3 + the live VPS-hub deliver tee (2026-06-29).
-        parts.append(f"[f=flv:onfail=ignore:use_fifo=1:fifo_options=queue_size=512\\:drop_pkts_on_overflow=1]{url}")
+        # use_fifo=1 runs each platform output in its own thread with a bounded queue,
+        # so one platform's TCP backpressure can't stall the shared read of the GPU
+        # return stream. Pass ONLY queue_size: jellyfin-ffmpeg 7.1.4-3's tee parser does
+        # NOT keep a 2nd nested fifo_option bound to the fifo muxer — drop_pkts_on_overflow
+        # leaks to the wrapped flv muxer → "Unknown option 'drop_pkts_on_overflow'" →
+        # "All tee outputs failed" → every platform dark (confirmed on the LIVE hub
+        # 2026-06-29; the leak survived every ':'/'\:'/'\\:' escaping that worked in
+        # isolated ffmpeg, so it is NOT a simple escape bug). A comma fails differently
+        # (fifo reads queue_size="512,drop…" → Invalid argument). queue_size is a single
+        # key=value with no separator to mis-parse → robust. The 512-frame (~8s) queue
+        # absorbs short stalls; on sustained overflow the fifo blocks (acceptable for now
+        # — re-add drop-on-overflow only with an escaping proven on the LIVE relay).
+        parts.append(f"[f=flv:onfail=ignore:use_fifo=1:fifo_options=queue_size=512]{url}")
     return "|".join(parts)
 
 
