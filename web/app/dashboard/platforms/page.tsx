@@ -145,19 +145,34 @@ function PlatformsContent() {
     setSaving(platformId)
     const supabase = createBrowserClient()
     const { data: { session } } = await supabase.auth.getSession()
-    if (!session) return
+    if (!session) { setSaving(null); router.push('/login'); return }
 
-    await fetch('/api/platforms', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${session.access_token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ platform: platformId, stream_key: key }),
-    })
+    let res: Response
+    try {
+      res = await fetch('/api/platforms', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${session.access_token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ platform: platformId, stream_key: key }),
+      })
+    } catch {
+      setSaving(null)
+      toast.error('Network error — stream key not saved')
+      return
+    }
+
+    if (!res.ok) {
+      const { error } = await res.json().catch(() => ({ error: null }))
+      setSaving(null)
+      toast.error(error ?? 'Failed to save stream key')
+      return
+    }
 
     const { data: { user } } = await supabase.auth.getUser()
     if (user) await loadConnections(user.id)
     setStreamKeys(prev => ({ ...prev, [platformId]: '' }))
     setSaving(null)
     setSaved(platformId)
+    toast.success('Stream key saved')
     setTimeout(() => setSaved(null), 2000)
   }
 
@@ -165,12 +180,18 @@ function PlatformsContent() {
     setRemoving(platformId)
     const supabase = createBrowserClient()
     const { data: { session } } = await supabase.auth.getSession()
-    if (!session) return
+    if (!session) { setRemoving(null); return }
 
-    await fetch(`/api/platforms/${platformId}`, {
+    const res = await fetch(`/api/platforms/${platformId}`, {
       method: 'DELETE',
       headers: { Authorization: `Bearer ${session.access_token}` },
-    })
+    }).catch(() => null)
+
+    if (!res?.ok) {
+      setRemoving(null)
+      toast.error('Failed to remove platform')
+      return
+    }
 
     setConnections(prev => {
       const next = { ...prev }
@@ -185,11 +206,16 @@ function PlatformsContent() {
     const { data: { session } } = await supabase.auth.getSession()
     if (!session) return
 
-    await fetch(`/api/platforms/${platformId}`, {
+    const res = await fetch(`/api/platforms/${platformId}`, {
       method: 'PATCH',
       headers: { Authorization: `Bearer ${session.access_token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ enabled }),
-    })
+    }).catch(() => null)
+
+    if (!res?.ok) {
+      toast.error('Failed to update — try again')
+      return
+    }
 
     setConnections(prev => ({ ...prev, [platformId]: { ...prev[platformId], enabled } }))
   }
