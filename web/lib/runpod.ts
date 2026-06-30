@@ -27,11 +27,19 @@ interface GqlPod {
   }
 }
 
+// Every RunPod call is bounded by an 8s timeout. Without it a single hung RunPod
+// endpoint stalls the whole GPU-backend race fan-out (provision can sit to maxDuration)
+// AND can wedge the serial teardown/sweep loop behind it — leaking real GPU billing for
+// every box queued after the stuck call (enterprise-audit SPIN-02 / REL-02 / COST-01).
+// AbortSignal.timeout throws a TimeoutError, surfaced as the catch below / by callers.
+const REQUEST_TIMEOUT_MS = 8000
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     method,
     headers: { Authorization: `Bearer ${RUNPOD_API_KEY}`, 'Content-Type': 'application/json' },
     body: body ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   })
   const text = await res.text()
   if (!res.ok) throw new Error(`RunPod ${method} ${path} → ${res.status}: ${text.slice(0, 800)}`)
@@ -49,6 +57,7 @@ async function gqlRequest<T>(query: string): Promise<T> {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ query }),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   })
   const body = (await res.json()) as { data?: T; errors?: Array<{ message: string }> }
   if (body.errors?.length) throw new Error(`RunPod GraphQL: ${body.errors[0].message}`)

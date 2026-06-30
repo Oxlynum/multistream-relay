@@ -2,6 +2,24 @@ import { createServerClient } from '@/lib/supabase'
 import { authenticateAgent } from '@/lib/agent-auth'
 import { spendableTokens } from '@/lib/billing'
 
+// OBS→hub SRT receive buffer, in MICROSECONDS (enterprise-audit STREAM-01).
+//
+// The `latency=` URL option on the OBS/libsrt CALLER is parsed in microseconds on the
+// builds in use — so the old `latency=5000` was a 5 MILLISECOND buffer, not the "5s" the
+// comment claimed. Evidence: a live transatlantic session (RTT 140–324 ms) broke its SRT
+// link at ~12 min — the signature of a buffer below one RTT (a retransmit can't complete
+// before the TSBPD delivery deadline). 2_000_000 µs = 2 s is a generous interim that sits
+// well above the worst-case RTT; over-buffering only adds delay, and every platform buffers
+// seconds downstream, so the extra latency is invisible to viewers.
+//
+// SRT negotiates the effective latency = MAX(caller, listener), so setting the caller here
+// pins the floor regardless of MediaMTX's default. CAVEAT: a newer FFmpeg patch flips this
+// option to milliseconds — if the OBS/ffmpeg build is ever upgraded, RE-CONFIRM the unit
+// (read the negotiated value off MediaMTX) before trusting this constant, or 2_000_000 ms
+// would be a 33-min buffer. TODO (P1): make this per-RTT dynamic — clamp(4×RTT, 0.8–4 s) —
+// driven by the libsrt `RTT [..ms]` stat the plugin already sees.
+const SRT_LATENCY_US = 2_000_000
+
 // Polled by the OBS plugin (user API key) to check GPU state.
 // Also accepts a Supabase session token for the dashboard.
 export async function GET(request: Request) {
@@ -89,14 +107,17 @@ export async function GET(request: Request) {
   // SRT uplink: when the pod has an SRT port, the plugin should publish SRT instead
   // of RTMP. The streamid carries the per-pod ingest path (publish:<key>), so the
   // key both routes the publish and gates access — same secret as the RTMP path.
-  // latency=5000 → 5s jitter buffer (SRT negotiates MAX(caller,listener); OBS is
-  // caller). When the pod has a per-pod passphrase, append it so OBS publishes an
-  // AES-encrypted uplink (MediaMTX requires the same passphrase to accept it).
+  // latency is in microseconds (see SRT_LATENCY_US above for the unit rationale); SRT
+  // negotiates MAX(caller,listener) and OBS is the caller. When the pod has a per-pod
+  // passphrase, append it so OBS publishes an AES-encrypted uplink (MediaMTX requires
+  // the same passphrase to accept it).
   const srtUrl = instance.ip_address && instance.srt_port && instance.ingest_key
-    ? `srt://${instance.ip_address}:${instance.srt_port}?streamid=publish:${instance.ingest_key}&latency=5000` +
+    ? `srt://${instance.ip_address}:${instance.srt_port}?streamid=publish:${instance.ingest_key}&latency=${SRT_LATENCY_US}` +
       (instance.srt_passphrase ? `&passphrase=${instance.srt_passphrase}&pbkeylen=16` : '')
     : null
-  console.log(`[gpu/status] effectiveStatus=${effectiveStatus} streaming=${instance.streaming} ip=${instance.ip_address} port=${instance.ingest_port} hls_port=${instance.hls_port ?? 'null'} srt_port=${instance.srt_port ?? 'null'} key=${instance.ingest_key ? instance.ingest_key.slice(0,8)+'…' : 'null'} rtmp_url=${server}`)
+  // Do NOT log any part of ingest_key — it is the SRT/RTMP publish credential and this
+  // line runs on every dock poll (SEC-04). A boolean presence flag is enough to debug.
+  console.log(`[gpu/status] effectiveStatus=${effectiveStatus} streaming=${instance.streaming} ip=${instance.ip_address} port=${instance.ingest_port} hls_port=${instance.hls_port ?? 'null'} srt_port=${instance.srt_port ?? 'null'} has_key=${!!instance.ingest_key} rtmp_url=${server}`)
 
   return Response.json({
     status: effectiveStatus,

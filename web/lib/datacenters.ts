@@ -25,6 +25,22 @@ export const BACKEND_PRICE_CEILING = 1.00
 // (phase='ended') — the hub passthrough outputs keep serving; no direct-to-GPU fallback.
 export const GPU_BOOT_ATTEMPTS = 4
 
+// How many GPU-backend hosts to boot in parallel per race round (enterprise-audit
+// SPIN-06). N>1 would HEDGE the bad-NVENC tail on Vast's consumer pool (two hosts boot
+// concurrently, first to POST /api/agent/ready wins the CAS, loser self-destructs), so a
+// single dud host no longer costs a full ~30s self-test + /failed round-trip before the
+// next host is even created — at a cost of ~2× GPU-seconds during the brief boot overlap.
+//
+// PINNED AT 1 until the winner-resolution is made N-safe. lib/gpu-ready.ts
+// promoteGpuNodeReady resolves a RunPod winner (which self-reports an EMPTY provider_id)
+// by assuming `booting.length === 1` — true only at N=1. At N>1 a RunPod winner matches no
+// racer, can be tagged 'loser', and the loser-destroy loop tears down the box that just
+// won the CAS (box leak + self-kill). Enabling N=2 requires a provider-agnostic per-racer
+// token: inject a unique SLIMCAST_RACER_ID at create, store it on the RacerEntry, echo it
+// in the GPU's /ready body, and match on it in promoteGpuNodeReady (touches the relay →
+// needs a redeploy). Bump this to 2 ONLY after that lands.
+export const GPU_BACKEND_RACERS = 1
+
 // Default location when the request carries no geo headers (local dev, VPNs):
 // central US minimizes worst-case latency for an unknown US user.
 export const FALLBACK_LAT = 39.0

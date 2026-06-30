@@ -184,7 +184,9 @@ export async function GET(
     // the raw HEVC that OBS sends.
     const podUrl = `http://${instance.ip_address}:${instance.hls_port}/${instance.ingest_key}_preview/${segment}${podSearch ? `?${podSearch}` : ''}`
 
-    console.log(`[hls-proxy] ${segment} uid=${userId.slice(0, 8)} → ${podUrl}`)
+    // Log the host + segment but NOT podUrl — it embeds ingest_key (the publish secret)
+    // in its path, and this runs per HLS segment fetch (SEC-04).
+    console.log(`[hls-proxy] ${segment} uid=${userId.slice(0, 8)} → ${instance.ip_address}:${instance.hls_port}`)
 
     let podRes: Response
     try {

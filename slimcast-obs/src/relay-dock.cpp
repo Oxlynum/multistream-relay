@@ -771,6 +771,16 @@ void RelayDock::onGpuStatusUpdated(GpuInfo info)
 
     render(info);
 
+    // Adaptive poll cadence (enterprise-audit SPIN-05/UX-04): poll fast (1.5s) while a
+    // launch/resume is in flight so each provisioning→running→streaming transition is
+    // detected promptly instead of up to 5s late, and relax back to 5s once idle/live to
+    // spare the API. Self-correcting every tick; setInterval reschedules the live timer.
+    {
+        const int desiredPoll = (m_autoLaunching || m_resumingStream) ? 1500 : 5000;
+        if (m_pollTimer->interval() != desiredPoll)
+            m_pollTimer->setInterval(desiredPoll);
+    }
+
     // Agent paired → status flips 'provisioning' → 'running'. That means
     // MediaMTX is up and RTMP is accepting. Set OBS's URL and start streaming.
     if (m_autoLaunching && info.status == "running") {
@@ -1306,6 +1316,10 @@ void RelayDock::onGoLiveClicked()
     m_shuttingDown  = false;
     m_autoLaunching = true;
     m_launchStartMs = QDateTime::currentMSecsSinceEpoch();
+    // Switch to the fast launch cadence immediately (enterprise-audit SPIN-05/UX-04) so the
+    // first provisioning→running transition is caught ~1.5s after it happens, not on the
+    // next 5s boundary. onGpuStatusUpdated keeps it in sync and relaxes it back when idle.
+    if (m_pollTimer) m_pollTimer->setInterval(1500);
     // Don't start the timeout yet — it covers the "waiting for agent to pair"
     // phase only. The provision HTTP call has its own 3-min network timeout.
     // We start m_launchTimeout in onGpuProvisioned once the pod exists.
@@ -1470,7 +1484,7 @@ void RelayDock::onAutoConfigure()
         "  •  Encoder  →  %2 (HEVC)\n"
         "  •  Rate control  →  CBR @ %3 kbps\n"
         "  •  Dynamic bitrate  →  On\n"
-        "  •  B-frames  →  Off\n"
+        "  •  B-frames  →  On (2)\n"
         "  •  Keyframe interval  →  2s   ·   Profile  →  main\n\n"
         "Apply these now?")
         .arg(platform, encName).arg(bitrate);
@@ -1528,10 +1542,15 @@ void RelayDock::applyRecommendedSettings(const QString &encId, int bfFamily, int
         obs_data_set_int(enc, "bitrate", bitrate);
         obs_data_set_int(enc, "keyint_sec", 2);
         obs_data_set_string(enc, "profile", "main");
-        // Disable B-frames using whichever key this encoder family reads.
-        if (bfFamily == BF_VT_BOOL)      obs_data_set_bool(enc, "bframes", false);
-        else if (bfFamily == BF_QSV_INT) obs_data_set_int(enc, "bframes", 0);
-        else                             obs_data_set_int(enc, "bf", 0);
+        // Enable 2 B-frames (industry standard; matches the GPU transcode's -bf 2)
+        // using whichever key this encoder family reads. Apple VT's "bframes" bool
+        // turns on its default hierarchical (temporal-layered) B-frames — SRT carries
+        // that cleanly (it's why the internal loopback hop is SRT, not RTSP). If a
+        // future Apple-VT temporal-layer regression surfaces on the passthrough, scope
+        // this back to the non-VT families rather than disabling it everywhere.
+        if (bfFamily == BF_VT_BOOL)      obs_data_set_bool(enc, "bframes", true);
+        else if (bfFamily == BF_QSV_INT) obs_data_set_int(enc, "bframes", 2);
+        else                             obs_data_set_int(enc, "bf", 2);
         obs_data_save_json_safe(enc, jsonPath.toUtf8().constData(), "tmp", "bak");
         obs_data_release(enc);
     }

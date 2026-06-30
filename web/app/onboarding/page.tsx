@@ -28,6 +28,7 @@ export default function OnboardingPage() {
   const [step, setStep] = useState(0)
   const [streamKeys, setStreamKeys] = useState<Record<string, string>>({})
   const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState('')
   const [token, setToken] = useState<string | null>(null)
   const [apiKey, setApiKey] = useState<string | null>(null)
   const [apiKeyCopied, setApiKeyCopied] = useState(false)
@@ -84,19 +85,39 @@ export default function OnboardingPage() {
   async function savePlatforms() {
     if (!token || connectedCount === 0) return
     setSaving(true)
-    await Promise.all(
-      Object.entries(streamKeys)
-        .filter(([, key]) => key.trim())
-        .map(([platform, key]) =>
-          fetch('/api/platforms', {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ platform, stream_key: key.trim() }),
-          })
-        )
+    setSaveError('')
+    const entries = Object.entries(streamKeys).filter(([, key]) => key.trim())
+    // allSettled + per-key res.ok: a plain Promise.all treated any non-2xx as success
+    // (fetch only rejects on a network error, not an HTTP error) and advanced the wizard,
+    // SILENTLY LOSING the stream key at the highest-stakes funnel step (enterprise-audit UX-02).
+    const results = await Promise.allSettled(
+      entries.map(([platform, key]) =>
+        fetch('/api/platforms', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ platform, stream_key: key.trim() }),
+        }).then(async res => {
+          if (!res.ok) {
+            const body = await res.json().catch(() => ({}))
+            throw new Error(body.error ?? `HTTP ${res.status}`)
+          }
+        }),
+      ),
     )
     setSaving(false)
-    setStep(1) // Move to Secure Account
+    const failed = entries
+      .map(([platform], i) => ({ platform, result: results[i] }))
+      .filter(x => x.result.status === 'rejected')
+    if (failed.length) {
+      const labelOf = (id: string) => PLATFORMS.find(p => p.id === id)?.label ?? id
+      // Stay on this step with actionable messaging — do NOT advance and drop the keys.
+      setSaveError(
+        `Couldn't save ${failed.map(f => labelOf(f.platform)).join(', ')}. ` +
+        `Your keys weren't lost — check them and try again.`,
+      )
+      return
+    }
+    setStep(1) // all keys persisted → Move to Secure Account
   }
 
   async function handleSetupPayment() {
@@ -166,6 +187,12 @@ export default function OnboardingPage() {
                 </CardContent>
               </Card>
             ))}
+
+            {saveError && (
+              <Alert variant="destructive">
+                <AlertDescription>{saveError}</AlertDescription>
+              </Alert>
+            )}
 
             <div className="flex gap-3 pt-2">
               <Button

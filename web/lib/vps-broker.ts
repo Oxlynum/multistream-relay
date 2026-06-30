@@ -17,7 +17,7 @@ import { getVpsProvider, getProvider, ACTIVE_VPS_PROVIDERS, ACTIVE_GPU_PROVIDERS
 import { buildCloudInit } from '@/lib/cloud-init'
 import { haversineKm, startProvisionRace, type RacerEntry, type UserOutputConfig } from '@/lib/gpu-broker'
 import { teardownHub } from '@/lib/pod-teardown'
-import { VPS_PRICE_CEILING, HUB_MAX_SESSIONS, VPS_READINESS_TIMEOUT_MS, BACKEND_PRICE_CEILING, FALLBACK_LAT, FALLBACK_LON } from '@/lib/datacenters'
+import { VPS_PRICE_CEILING, HUB_MAX_SESSIONS, VPS_READINESS_TIMEOUT_MS, BACKEND_PRICE_CEILING, FALLBACK_LAT, FALLBACK_LON, GPU_BACKEND_RACERS } from '@/lib/datacenters'
 import type { VpsCandidate } from '@/lib/providers/types'
 import { podName, hubName } from '@/lib/managed-identity'
 
@@ -384,7 +384,7 @@ export async function startGpuBackendRace(args: {
     userOutputs,
     providers: ACTIVE_GPU_PROVIDERS,
     maxPricePerHr: BACKEND_PRICE_CEILING,
-    racersN: 1,
+    racersN: GPU_BACKEND_RACERS,
     onRacerCreated: async (racer: RacerEntry) => {
       await (racerWriteLock = racerWriteLock.then(async () => {
         const { data: row } = await supabase.from('relay_nodes').select('racers').eq('id', nodeId).maybeSingle()
@@ -538,7 +538,7 @@ export async function reraceGpuBackend(nodeId: string, supabase: Supa): Promise<
     env: gpuEnv,
     providers: ACTIVE_GPU_PROVIDERS,
     maxPricePerHr: BACKEND_PRICE_CEILING,
-    racersN: 1,
+    racersN: GPU_BACKEND_RACERS,
     onRacerCreated: async (racer: RacerEntry) => {
       await (racerWriteLock = racerWriteLock.then(async () => {
         const { data: row } = await supabase.from('relay_nodes').select('racers').eq('id', nodeId).maybeSingle()
