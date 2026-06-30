@@ -24,6 +24,8 @@
 #include <QCursor>
 #include <QMouseEvent>
 #include <QUrl>
+#include <QDesktopServices>
+#include <QAbstractButton>
 #include <QTimer>
 #include <QMainWindow>
 #include <QProcess>
@@ -755,6 +757,7 @@ void RelayDock::onObsStreamingStopped()
 void RelayDock::onGpuStatusUpdated(GpuInfo info)
 {
     m_lastGpuInfo = info;
+    m_statusKnown = true;   // entitlement (has2kAddon) is now trustworthy for the Go-Live gate
 
     // If OBS opens and finds a pod already in 'provisioning' state (e.g. from a
     // previous Go Live that was interrupted or whose dock timed out), auto-resume
@@ -932,6 +935,7 @@ void RelayDock::render(const GpuInfo &info)
         m_lockCheck->setChecked(true);
     m_wasStreaming = info.streaming;
 
+    m_has2kAddon = info.has2kAddon;
     updateIngestLabel();
     // Append estimated time remaining during provisioning phases.
     if (m_autoLaunching && m_ingestLabel) {
@@ -979,8 +983,11 @@ void RelayDock::updateIngestLabel()
 {
     obs_video_info ovi;
     QString base;
+    int outW = 0, outH = 0;   // OBS scaled output resolution (0 = couldn't read it)
     if (obs_get_video_info(&ovi) && ovi.fps_den > 0) {
         int fps = (int)std::lround((double)ovi.fps_num / (double)ovi.fps_den);
+        outW = (int)ovi.output_width;
+        outH = (int)ovi.output_height;
         base = QString("%1×%2 · %3 fps")
             .arg(ovi.output_width).arg(ovi.output_height).arg(fps);
     } else {
@@ -1002,6 +1009,14 @@ void RelayDock::updateIngestLabel()
         }
     }
 
+    // A >1080p OBS output with no 2K add-on exceeds the account's entitlement: the
+    // transcoded platforms (Twitch/Kick/TikTok) cap output at 1080p so the extra
+    // resolution is downscaled (wasted upload), while YouTube HEVC passthrough would
+    // pass the 2K source straight through (un-entitled delivery). Either way it's a
+    // mismatch — warn so the user enables the add-on or drops OBS to 1080p.
+    // m_has2kAddon comes from /api/gpu/status (account entitlement).
+    const bool over1080NoAddon = outH > 1080 && !m_has2kAddon;
+
     if (!isHevc) {
         m_ingestLabel->setText(base + " · ⚠ Switch encoder to H265");
         m_ingestLabel->setStyleSheet(
@@ -1009,6 +1024,14 @@ void RelayDock::updateIngestLabel()
         m_ingestLabel->setToolTip(
             "SlimCast requires H265 (HEVC) — H264 breaks the relay.\n"
             "OBS Settings → Output → Streaming → Encoder → Apple VT H265");
+    } else if (over1080NoAddon) {
+        m_ingestLabel->setText(base + " · ⚠ 2K needs the add-on");
+        m_ingestLabel->setStyleSheet(
+            QString("color:%1; font-size:11px").arg(C_WARN));
+        m_ingestLabel->setToolTip(
+            QString("OBS is outputting %1×%2 (2K), but your plan streams up to 1080p.\n"
+                    "Enable the 2K add-on in your SlimCast dashboard to stream above "
+                    "1080p, or set OBS output to 1920×1080.").arg(outW).arg(outH));
     } else {
         m_ingestLabel->setText(base);
         m_ingestLabel->setStyleSheet(
@@ -1269,6 +1292,14 @@ void RelayDock::onGoLiveClicked()
         return;
     }
 
+    // 2K entitlement gate (fresh launch only): block or downscale a >1080p OBS output
+    // when the account lacks the add-on — BEFORE we provision, so a non-entitled 2K/4K
+    // stream never rents a GPU or runs up bridge/decode cost on our VPS.
+    if (!passes2kGate()) {
+        render(m_lastGpuInfo);
+        return;
+    }
+
     m_shuttingDown  = false;
     m_autoLaunching = true;
     m_launchStartMs = QDateTime::currentMSecsSinceEpoch();
@@ -1277,6 +1308,76 @@ void RelayDock::onGoLiveClicked()
     // We start m_launchTimeout in onGpuProvisioned once the pod exists.
     m_api->provisionGpu();
     render(m_lastGpuInfo);
+}
+
+// Go-Live gate: a >1080p OBS output with no 2K add-on would burn upload + GPU decode
+// without ever reaching a platform at 2K. One window — offer to downscale to 1080p
+// ("b"), upgrade, or cancel; the last two block the launch ("a"). Returns true to
+// proceed with provisioning.
+bool RelayDock::passes2kGate()
+{
+    // Only gate once a status poll has landed (entitlement trustworthy) and the
+    // account lacks the add-on. Unknown/entitled → never gate.
+    if (!m_statusKnown || m_has2kAddon)
+        return true;
+
+    obs_video_info ovi;
+    if (!obs_get_video_info(&ovi) || ovi.output_height <= 1080)
+        return true;   // ≤1080p (or can't read it) → nothing to gate
+
+    const int outW = (int)ovi.output_width;
+    const int outH = (int)ovi.output_height;
+
+    QMessageBox box(this);
+    box.setIcon(QMessageBox::Warning);
+    box.setWindowTitle("2K needs the add-on");
+    box.setText(QString("OBS is set to output %1×%2 (2K).").arg(outW).arg(outH));
+    box.setInformativeText(
+        "Your plan streams up to 1080p, so a 2K source would just burn extra upload "
+        "and GPU time without reaching your platforms at 2K.\n\n"
+        "Stream at 1080p now, or enable the 2K add-on to go higher.");
+    QPushButton *downscaleBtn = box.addButton("Stream at 1080p", QMessageBox::AcceptRole);
+    QPushButton *upgradeBtn   = box.addButton("Get the 2K add-on", QMessageBox::ActionRole);
+    box.addButton("Cancel", QMessageBox::RejectRole);
+    box.setDefaultButton(downscaleBtn);
+    box.exec();
+
+    QAbstractButton *clicked = box.clickedButton();
+    if (clicked == upgradeBtn) {
+        QDesktopServices::openUrl(QUrl("https://slimcast-oxlynum.vercel.app/dashboard"));
+        return false;   // they're off to upgrade — don't launch at 2K
+    }
+    if (clicked == downscaleBtn) {
+        if (downscaleOutputTo1080())
+            return true;   // capped to 1080p → safe to provision
+        QMessageBox::warning(this, "SlimCast",
+            "Couldn't switch OBS to 1080p automatically (a recording or output may be "
+            "active).\nSet OBS Settings → Video → Output (Scaled) Resolution to "
+            "1920×1080, then Start again.");
+        return false;
+    }
+    return false;   // Cancel / closed → don't launch
+}
+
+// Pin OBS's scaled output resolution to 1080p (height), preserving aspect ratio and
+// the base canvas. obs_reset_video can only run with no active output, so this is a
+// pre-stream operation (the gate runs before we provision/start). Returns false if it
+// couldn't apply (e.g. a recording/output is active).
+bool RelayDock::downscaleOutputTo1080()
+{
+    if (obs_frontend_streaming_active() || obs_frontend_recording_active())
+        return false;
+
+    obs_video_info ovi;
+    if (!obs_get_video_info(&ovi) || ovi.output_height == 0)
+        return false;
+
+    const double aspect = (double)ovi.output_width / (double)ovi.output_height;
+    uint32_t newW = ((uint32_t)std::lround(1080.0 * aspect)) & ~1u;   // even width
+    if (newW == 0) newW = 1920;
+    ovi.output_width  = newW;
+    ovi.output_height = 1080;
+    return obs_reset_video(&ovi) == OBS_VIDEO_SUCCESS;
 }
 
 // Dispatcher for the single main button: Go Live | Cancel | Stop Stream.
@@ -1388,10 +1489,10 @@ void RelayDock::onAutoConfigure()
 }
 
 // Persist the recommended encoder config to the active profile. Encoder-specific
-// settings live in <profile>/streamEncoder.json; the encoder id, output mode and
-// dynamic-bitrate flag live in the profile's basic config. The streaming service
-// is switched to Custom, preserving any SlimCast URL/key already present (Go Live
-// fills these in when it provisions a pod).
+// settings live in <profile>/streamEncoder.json; the encoder id and output mode
+// live in the profile's basic config. The streaming service is switched to Custom,
+// preserving any SlimCast URL/key already present (Go Live fills these in when it
+// provisions a pod).
 void RelayDock::applyRecommendedSettings(const QString &encId, int bfFamily, int bitrate)
 {
     // 1) Encoder settings JSON — merge into any existing file so we don't wipe
@@ -1414,11 +1515,14 @@ void RelayDock::applyRecommendedSettings(const QString &encId, int bfFamily, int
         obs_data_release(enc);
     }
 
-    // 2) Profile config — output mode, encoder selection, dynamic bitrate.
+    // 2) Profile config — output mode, encoder selection.
+    //    NB: we deliberately do NOT touch OBS's "DynamicBitrate" flag. It's an
+    //    RTMP/TCP-only congestion feature and a no-op over SRT (our ingest path),
+    //    so writing it just left the user's setting in a misleading state. SlimCast
+    //    does its own live bitrate adaptation server-side via applyIngestThrottle().
     if (config_t *cfg = obs_frontend_get_profile_config()) {
         config_set_string(cfg, "Output", "Mode", "Advanced");
         config_set_string(cfg, "AdvOut", "Encoder", encId.toUtf8().constData());
-        config_set_bool(cfg, "Output", "DynamicBitrate", true);
         config_set_bool(cfg, "AdvOut", "ApplyServiceSettings", false);  // keep our CBR/bitrate
         config_set_bool(cfg, "AdvOut", "Rescale", false);               // stream at canvas res
         config_save_safe(cfg, "tmp", nullptr);
