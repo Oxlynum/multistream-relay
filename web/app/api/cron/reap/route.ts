@@ -1,8 +1,10 @@
+import { after } from 'next/server'
 import { createServerClient } from '@/lib/supabase'
 import { sweepExpiredLeases } from '@/lib/pod-teardown'
 import { reraceGpuBackend } from '@/lib/vps-broker'
 import { ACTIVE_GPU_PROVIDERS, ACTIVE_VPS_PROVIDERS, getProvider } from '@/lib/providers'
 import { nodeTokenOfPodName } from '@/lib/managed-identity'
+import { sendAlert, captureError } from '@/lib/observability'
 import type { RacerEntry } from '@/lib/gpu-broker'
 
 // The DEMOTED-TO-FLOOR backstop (termination-system-plan §9.4). The primary reaper
@@ -44,7 +46,10 @@ export async function GET(request: Request) {
   // This supersedes the old per-pod staleness loop AND the Clock B hub lifecycle loop
   // (both of which read the now-removed session_count). Heartbeats drive it in real
   // time; this daily call is purely the backstop for a fully-idle fleet.
-  await sweepExpiredLeases()
+  // force:true — the floor must NOT be throttled and must NOT arm the recovery freeze (an
+  // idle fleet's huge inter-beat gap is not a recovering herd; arming would freeze this very
+  // sweep and leak a dead-but-rowed hub). It still defers if a heartbeat just armed a freeze.
+  await sweepExpiredLeases({ force: true })
 
   const now = Date.now()
 
@@ -327,5 +332,37 @@ export async function GET(request: Request) {
     console.error('[reaper] gpu node sweep failed:', e)
   }
 
-  return Response.json({ ok: true, orphans, orphanHubs, auxReleased, reapedGpuNodes, reracedGpuNodes })
+  // ── REL-03: consume the reaper's own payload — alert on leaks + cost overruns ──
+  // Before this, the reaper RETURNED its findings but nothing read them (no alert, no
+  // dashboard). Now a daily digest fires when the reaper actually destroyed orphans/leaked
+  // IPs (orphans existing AT ALL means something is leaking — the operator must know) or
+  // any live box is burning above the cost tripwire (margin alarm — the user's stated
+  // concern). Inert unless SLIMCAST_ALERT_WEBHOOK is set; ≤1 alert per daily run.
+  let overCostCount = 0
+  try {
+    const tripwire = Number(process.env.SLIMCAST_COST_ALERT_USD_HR ?? '2.0')
+    const [{ count: gpuOver }, { count: hubOver }] = await Promise.all([
+      supabase.from('gpu_instances').select('id', { count: 'exact', head: true })
+        .neq('status', 'stopped').gt('cost_usd_hr', tripwire),
+      supabase.from('vps_hubs').select('id', { count: 'exact', head: true })
+        .neq('status', 'ended').gt('cost_usd_hr', tripwire),
+    ])
+    overCostCount = (gpuOver ?? 0) + (hubOver ?? 0)
+  } catch (e) {
+    captureError('reaper.cost_scan', e)
+  }
+
+  const leakCount = orphans.length + orphanHubs.length + auxReleased + reapedGpuNodes.length
+  if (leakCount > 0 || overCostCount > 0) {
+    after(() => sendAlert('SlimCast reaper digest', {
+      orphan_gpus_destroyed: orphans.length,
+      orphan_hubs_destroyed: orphanHubs.length,
+      leaked_ips_released: auxReleased,
+      dead_gpu_nodes_reaped: reapedGpuNodes.length,
+      gpu_nodes_reraced: reracedGpuNodes.length,
+      boxes_over_cost_tripwire: overCostCount,
+    }))
+  }
+
+  return Response.json({ ok: true, orphans, orphanHubs, auxReleased, reapedGpuNodes, reracedGpuNodes, overCostCount })
 }

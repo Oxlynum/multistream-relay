@@ -1,6 +1,9 @@
 import { createServerClient } from '@/lib/supabase'
 import { getProvider, getVpsProvider } from '@/lib/providers'
-import { HUB_IDLE_GRACE_MS, MAX_SESSION_GRACE_S, SWEEP_GRACE_MS, PROVISION_LEASE_MS } from '@/lib/datacenters'
+import {
+  HUB_IDLE_GRACE_MS, MAX_SESSION_GRACE_S, SWEEP_GRACE_MS, PROVISION_LEASE_MS,
+  SWEEP_THROTTLE_MS, CONTROL_PLANE_OUTAGE_MS, REAP_RECOVERY_GRACE_MS,
+} from '@/lib/datacenters'
 import type { RacerEntry } from '@/lib/gpu-broker'
 
 // The single, idempotent way to destroy a user's SESSION. Used by manual stop
@@ -282,10 +285,19 @@ export async function teardownAllForUser(userId: string): Promise<void> {
  * no daily-cron dependency.
  *
  * Heartbeat-driven: every live relay's status POST fires this (pod, hub AND gpu
- * roles), so any one live box drives reaping of the dead ones within ~1 beat. It
- * reuses the idempotent teardownInstance / teardownHub, so concurrent invocations
- * are safe (the DELETE/claim is the gate). The daily cron keeps calling it too, as
- * the all-idle floor (nothing live to drive the sweep).
+ * roles), so any one live box drives reaping of the dead ones within ~1 throttle
+ * window. It reuses the idempotent teardownInstance / teardownHub, so concurrent
+ * invocations are safe (the DELETE/claim is the gate). The daily cron keeps calling
+ * it too, as the all-idle floor (nothing live to drive the sweep).
+ *
+ * THROTTLED + RECOVERY-GATED (enterprise-audit SCALE-01 / CORR-01): try_begin_sweep()
+ * is an atomic single-row CAS that (a) lets only ONE beat per SWEEP_THROTTLE_MS window
+ * actually run — so this runs ~once / window regardless of fleet size (the old design
+ * ran it on EVERY beat from EVERY box → O(N²) DB load), and (b) freezes reaping for one
+ * recovery grace after a control-plane outage so a recovering heartbeat herd re-renews
+ * its leases before any reap (the old design mass-false-reaped the whole fleet on the
+ * first beat after a >210s Vercel blip). The reaping queries are also index-driven
+ * (targeted at actionable rows, not a full-fleet scan) using the …000002 lease indexes.
  *
  * The lease itself is what tolerates reconnection: a box lease rides the
  * datacenter→Vercel link (user jitter can't trip it), and a tenant reconnect lease
@@ -293,9 +305,47 @@ export async function teardownAllForUser(userId: string): Promise<void> {
  * stream the way the old single 150s threshold (doubling as reconnect-tolerance AND
  * orphan-reaping) could.
  */
-export async function sweepExpiredLeases(): Promise<void> {
+// opts.force = a FLOOR caller (the daily cron, provision-time cleanup), NOT a heartbeat.
+// Floor callers must never be throttled (the cron is the guaranteed all-idle floor) and must
+// never ARM the recovery freeze — an idle fleet has a huge inter-beat gap that is NOT a
+// recovering herd, so arming there would freeze the floor's own sweep and leak a dead-but-
+// rowed hub until traffic resumes (the orphaned-Hetzner incident class). They DO still
+// respect a freeze a real heartbeat just armed, so a floor sweep landing inside a genuine
+// control-plane recovery still defers (CORR-01 intact). Heartbeat callers omit force.
+export async function sweepExpiredLeases(opts?: { force?: boolean }): Promise<void> {
   const supabase = createServerClient()
   const now = Date.now()
+
+  // ── 0. THROTTLE + RECOVERY GATE (SCALE-01 / CORR-01).
+  if (opts?.force) {
+    // Floor caller: no throttle, no arming — but respect a heartbeat-armed freeze.
+    const { data: frozen } = await supabase.rpc('reap_freeze_active')
+    if (frozen === true) {
+      console.log('[sweep] active recovery freeze — floor sweep deferring reaps this cycle')
+      return
+    }
+  } else {
+    // Heartbeat caller: one atomic CAS decides whether THIS beat runs the sweep and whether
+    // reaping is frozen:
+    //   - no row / should_sweep=false → another beat owns this throttle window → skip. This
+    //     makes sweep frequency ~constant instead of O(fleet) — without it, N concurrent
+    //     boxes each fire a full sweep every ~10s (O(N²) DB storm).
+    //   - reap_frozen=true → the control plane just recovered from an outage longer than the
+    //     box-dead threshold (BOX_LEASE + SWEEP_GRACE ≈ 210s) → skip ALL reaping for one
+    //     recovery grace so the re-beating herd renews every lease first (else the first beat
+    //     back would mass-false-reap the whole fleet — CORR-01).
+    const { data: gate } = await supabase.rpc('try_begin_sweep', {
+      p_throttle_ms: SWEEP_THROTTLE_MS,
+      p_outage_ms: CONTROL_PLANE_OUTAGE_MS,
+      p_recovery_ms: REAP_RECOVERY_GRACE_MS,
+    })
+    const g = (gate as Array<{ should_sweep: boolean; reap_frozen: boolean }> | null)?.[0]
+    if (!g?.should_sweep) return   // throttled out — another beat owns this window
+    if (g.reap_frozen) {
+      console.log('[sweep] control-plane recovery freeze active — skipping reaps this cycle')
+      return
+    }
+  }
 
   // ── 1. gpu_instances — legacy pods (box lease) AND hub tenants (reconnect lease).
   // No vps_hub_id skip: a hub tenant whose OBS source has been absent past its
@@ -306,10 +356,23 @@ export async function sweepExpiredLeases(): Promise<void> {
   // anything is destroyed (review #1). expectLeaseBefore re-validates atomically at the
   // DELETE so a laggard that re-beats mid-sweep is spared.
   const sweepThresholdIso = new Date(now - SWEEP_GRACE_MS).toISOString()
-  const { data: insts } = await supabase
+  // Index-driven (SCALE-01): fetch ONLY actionable rows instead of the whole fleet —
+  // lease past the settle threshold, OR 12h cap blown, OR never-paired past the boot
+  // window. Backed by the …000002 partial index on (renew_deadline) where status<>'stopped'.
+  // The per-row branch below re-derives which condition fired (so the teardown reason +
+  // atomic re-validate opts stay exactly as before); this only narrows the candidate set.
+  const capThresholdIso = new Date(now - MAX_SESSION_GRACE_S * 1000).toISOString()
+  const bootThresholdIso = new Date(now - PROVISION_LEASE_MS).toISOString()
+  const { data: insts, error: instsErr } = await supabase
     .from('gpu_instances')
     .select('user_id, renew_deadline, max_session_at, created_at')
     .neq('status', 'stopped')
+    .or(
+      `renew_deadline.lt.${sweepThresholdIso},` +
+      `max_session_at.lt.${capThresholdIso},` +
+      `and(renew_deadline.is.null,created_at.lt.${bootThresholdIso})`,
+    )
+  if (instsErr) console.error('[sweep] gpu_instances query failed:', instsErr)
   for (const i of insts ?? []) {
     const leaseExpired = i.renew_deadline != null &&
       new Date(i.renew_deadline).getTime() + SWEEP_GRACE_MS < now
@@ -375,10 +438,19 @@ export async function sweepExpiredLeases(): Promise<void> {
   // GPU mid-stream.
   // provider/provider_id/racers/node_key_hash are re-read via the atomic claim-delete's
   // returning clause below (not here) so the destroy acts on the row we actually won.
-  const { data: nodes } = await supabase
+  // Index-driven (SCALE-01): only nodes past the box-dead settle threshold or never-paired
+  // past the boot window, backed by …000002's (renew_deadline) where role='gpu_backend'
+  // partial index. error is logged (not swallowed) so a bad filter can never silently
+  // turn the sweep into a no-reap.
+  const { data: nodes, error: nodesErr } = await supabase
     .from('relay_nodes')
     .select('id, instance_id, renew_deadline, created_at')
     .eq('role', 'gpu_backend')
+    .or(
+      `renew_deadline.lt.${sweepThresholdIso},` +
+      `and(renew_deadline.is.null,created_at.lt.${bootThresholdIso})`,
+    )
+  if (nodesErr) console.error('[sweep] gpu_backend node query failed:', nodesErr)
   for (const n of nodes ?? []) {
     const boxDead = n.renew_deadline != null &&
       new Date(n.renew_deadline).getTime() + SWEEP_GRACE_MS < now

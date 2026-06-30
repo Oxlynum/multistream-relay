@@ -14,6 +14,7 @@
 import { createServerClient } from '@/lib/supabase'
 import { generateApiKey, hashApiKey } from '@/lib/agent-auth'
 import { getVpsProvider, getProvider, ACTIVE_VPS_PROVIDERS, ACTIVE_GPU_PROVIDERS } from '@/lib/providers'
+import { captureError } from '@/lib/observability'
 import { buildCloudInit } from '@/lib/cloud-init'
 import { haversineKm, startProvisionRace, type RacerEntry, type UserOutputConfig } from '@/lib/gpu-broker'
 import { teardownHub } from '@/lib/pod-teardown'
@@ -201,6 +202,9 @@ async function spawnHub(args: {
       SLIMCAST_SRT_PASSPHRASE: srtPassphrase, // shared passphrase for the wildcard SRT path
       RELAY_PASSWORD: panelPassword,
       RELAY_ROLE: 'vps',
+      // SEC-03 bridge-auth toggle (default '' = off → baseline). Flip the Vercel env to
+      // 'true' + redeploy so NEW hubs run the source_forward through the auth gateway.
+      SLIMCAST_BRIDGE_AUTH: process.env.SLIMCAST_BRIDGE_AUTH ?? '',
     },
     ports: [
       { host: HUB_SRT_PORT, container: HUB_SRT_PORT, proto: 'udp' },       // SRT ingest (OBS → hub)
@@ -219,7 +223,9 @@ async function spawnHub(args: {
       ...(HUB_SSH_KEY_IDS.length ? { sshKeyIds: HUB_SSH_KEY_IDS } : {}),
     })
   } catch (e) {
-    console.error('[vps-broker] hub create failed:', e instanceof Error ? e.message : e)
+    // A hub spawn failure = a user's stream couldn't start. Capture it structured + alert
+    // (REL-03) — this was previously a console.error lost in Vercel's buffer.
+    captureError('vps-broker.hub_create', e, { region, hubId, provider: candidate.provider, alert: true })
     // Free the spawn lock + revoke the key so a retry can spawn cleanly.
     await supabase.from('agent_api_keys').delete().eq('key_hash', hubKeyHash)
     await supabase.from('vps_hubs').delete().eq('id', hubId)
@@ -371,6 +377,9 @@ export async function startGpuBackendRace(args: {
     { key: 'SLIMCAST_VERCEL_URL', value: callbackUrl },
     { key: 'RELAY_ROLE', value: 'gpu' },
     { key: 'SLIMCAST_BRIDGE_SECRET', value: bridgeSecret },
+    // SEC-03 bridge-auth toggle (default '' = off → baseline TLS listener). 'true' makes the
+    // GPU front its :8899 with the bridge_proxy gateway (secret-checked). Set on Vercel.
+    { key: 'SLIMCAST_BRIDGE_AUTH', value: process.env.SLIMCAST_BRIDGE_AUTH ?? '' },
   ]
 
   // Serialize racer writes onto relay_nodes.racers (the documented concurrent-write fix).
@@ -526,6 +535,8 @@ export async function reraceGpuBackend(nodeId: string, supabase: Supa): Promise<
     { key: 'SLIMCAST_VERCEL_URL', value: callbackUrl },
     { key: 'RELAY_ROLE', value: 'gpu' },
     { key: 'SLIMCAST_BRIDGE_SECRET', value: (inst.bridge_secret as string | null) ?? '' },
+    // SEC-03 bridge-auth toggle (default '' = off). Must match the initial-race gpuEnv above.
+    { key: 'SLIMCAST_BRIDGE_AUTH', value: process.env.SLIMCAST_BRIDGE_AUTH ?? '' },
   ]
 
   // Serialize racer writes onto relay_nodes.racers (same lock pattern as the race).

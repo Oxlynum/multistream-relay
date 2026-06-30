@@ -115,3 +115,28 @@ export const SWEEP_GRACE_MS = 90_000
 //   for the NULL-lease backstop in the sweeper (defense-in-depth for any insert path
 //   that forgets to stamp).
 export const PROVISION_LEASE_MS = 300_000
+
+// ── Sweep coordinator (enterprise-audit SCALE-01 + CORR-01) ───────────────────
+// The universal sweep is fired from EVERY heartbeat (after()), so without a gate it
+// runs N times per 10s window at N concurrent boxes, each scanning the fleet → O(N²)
+// DB load + N concurrent pooler connections. try_begin_sweep() (migration …000003) is
+// an atomic single-row CAS that lets these knobs decouple sweep COST from fleet SIZE.
+//
+//   THROTTLE — at most one real sweep per this window regardless of how many boxes
+//   beat into it. 20s ≈ 2 heartbeats: stale boxes are still reaped within ~20s + the
+//   210s lease/settle threshold (negligible add to a 210s reap), while sweep frequency
+//   becomes constant instead of linear in concurrency. The dominant scaling unlock.
+export const SWEEP_THROTTLE_MS = 20_000
+//
+//   CONTROL-PLANE OUTAGE — last_beat_at advances only on a winning sweep (~1 / throttle
+//   window), so a gap larger than this means no sweep ran for that long ⇒ Vercel was
+//   down (or the fleet was idle). Set comfortably above the throttle window (20s) and
+//   BELOW the effective box-dead threshold (BOX_LEASE + SWEEP_GRACE ≈ 210s) so the
+//   recovery freeze engages BEFORE any healthy lease could look reapable on recovery.
+export const CONTROL_PLANE_OUTAGE_MS = 150_000
+//
+//   RECOVERY FREEZE — on detecting an outage gap, suppress reaping for this long so the
+//   recovering heartbeat herd (each box re-beats within ~1 POLL_INTERVAL) re-renews every
+//   lease before reaping resumes. Prevents the CORR-01 fleet-wide mass-false-reap. 2 min
+//   is ample margin over the ~10s re-beat cadence.
+export const REAP_RECOVERY_GRACE_MS = 120_000
