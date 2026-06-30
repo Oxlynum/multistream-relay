@@ -49,6 +49,10 @@ export async function PATCH(request: Request) {
 
   // Validate and sanitize the incoming per-platform settings
   const sanitized: OutputSettingsMap = {}
+  // 1440p (2K) output requires the 2K add-on — checked against the profile below so a
+  // direct API call can't set it (the dashboard UI also gates this). Without the gate
+  // the GPU would NVENC-encode 2K for a non-entitled user (real compute + egress cost).
+  let requested1440 = false
   for (const [platform, settings] of Object.entries(body)) {
     if (!KNOWN_PLATFORMS.has(platform)) continue
     if (typeof settings !== 'object' || settings === null) continue
@@ -59,6 +63,7 @@ export async function PATCH(request: Request) {
       if (!VALID_RESOLUTIONS.has(settings.resolution)) {
         return Response.json({ error: `Invalid resolution for ${platform}` }, { status: 400 })
       }
+      if (settings.resolution === '1440p') requested1440 = true
       entry.resolution = settings.resolution
     }
 
@@ -83,9 +88,17 @@ export async function PATCH(request: Request) {
   // Merge with existing settings (don't overwrite platforms not in the request)
   const { data: profile } = await supabase
     .from('profiles')
-    .select('output_settings')
+    .select('output_settings, has_2k_addon')
     .eq('id', userId)
     .single()
+
+  // Gate 2K output on the add-on, server-side (unbypassable by a crafted request).
+  if (requested1440 && !(profile?.has_2k_addon ?? false)) {
+    return Response.json(
+      { error: '1440p (2K) output requires the 2K add-on' },
+      { status: 403 },
+    )
+  }
 
   const existing = (profile?.output_settings as OutputSettingsMap) ?? {}
   const merged = { ...existing, ...sanitized }
