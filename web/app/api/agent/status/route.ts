@@ -7,6 +7,7 @@ import { teardownInstance, teardownHub, sweepExpiredLeases } from '@/lib/pod-tea
 import { HUB_IDLE_GRACE_MS, BOX_LEASE_MS, RECONNECT_GRACE_MS, PROVISION_LEASE_MS } from '@/lib/datacenters'
 import { spendableTokens, type BillingPlatformRow } from '@/lib/billing'
 import { billStreamInterval } from '@/lib/billing-clock'
+import { promoteGpuNodeReady } from '@/lib/gpu-ready'
 
 // Dev billing bypass (single user id) — shared by the pod + hub clocks.
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -68,7 +69,16 @@ async function handleGpuStatus(request: NextRequest, node: NodeAuth): Promise<Re
     .maybeSingle()
 
   const body = await request.json().catch(() => ({})) as {
+    ip?: string; bridge_port?: number; provider_id?: string
     bridge?: { ingress_kbps?: number; egress_kbps?: number; active?: boolean }
+  }
+  // Self-heal a lost /ready: the GPU carries its bridge address on every beat. If its
+  // readiness POST was dropped at the edge, this node is still phase='racing' (un-bridged,
+  // un-reaped, billing) — re-run the idempotent winner-CAS now to promote it racing→ready
+  // so hub-config opens the bridge. A no-op once already promoted.
+  if (body.ip && body.bridge_port) {
+    await promoteGpuNodeReady(node.nodeId!, { ip: body.ip, bridgePort: body.bridge_port, providerId: body.provider_id })
+      .catch(e => console.error('[agent/status] gpu /ready self-heal failed:', e))
   }
   if (body.bridge && nodeRow?.instance_id && nodeRow?.user_id) {
     // Return leg (GPU→VPS) = the delivered transcode → the meaningful bridge bitrate.

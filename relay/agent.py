@@ -457,7 +457,8 @@ def _post_ready_gpu(ip: str, bridge_port: "int | None") -> "dict | None":
             return resp
         log.warning("POST /api/agent/ready (gpu) attempt %d failed, retrying in 3s…", attempt + 1)
         time.sleep(3)
-    log.warning("POST /api/agent/ready (gpu) all retries exhausted — assuming winner")
+    log.error("POST /api/agent/ready (gpu) all retries exhausted — readiness UNCONFIRMED "
+              "(caller aborts so the broker re-races).")
     return None
 
 
@@ -480,6 +481,17 @@ def main_gpu() -> None:
     log.info("GPU backend starting. provider=%s ip=%s bridge_port=%s instance=%s",
              SLIMCAST_PROVIDER or "?", ip or "?", bridge_port or "?", PROVIDER_ID or "?")
 
+    # Fail-safe: if the provider mapped no public 8899, the hub can NEVER connect the
+    # mpegts-over-TLS bridge to us — we'd boot, pass the self-test, then heartbeat + bill
+    # for the whole session doing zero work, invisible to every reaper (we'd "assume winner"
+    # below and never exit). Report failed so the broker re-races onto a host that DOES map
+    # the bridge port, and exit before we can become a billing zombie.
+    if bridge_port is None:
+        log.error("No *_TCP_PORT_8899 mapped by the provider — the hub can never bridge to "
+                  "this GPU. Reporting failed so the broker re-races.")
+        _post_failed("no 8899 bridge port mapped")
+        sys.exit(1)
+
     # GPU sanity gate — a GPU-blind host must fail fast so the broker re-races across
     # providers (this is the role that genuinely needs NVENC/NVDEC; vps skips it).
     ok, reason = _gpu_self_test()
@@ -491,10 +503,21 @@ def main_gpu() -> None:
 
     _gen_self_signed_cert()
 
-    # Report readiness early (the bridge address is known from env at boot). If we lost
-    # the race, exit; the winner serves this session.
+    # Report readiness early (the bridge address is known from env at boot). Then:
+    #  • None  → the control plane never confirmed our CAS (5 lost POSTs). A GPU backend is
+    #    useless to the hub until readiness is recorded (the hub gates the bridge on
+    #    phase='ready'), so we must NOT "assume winner" and heartbeat — that path bills the
+    #    whole session while no reaper catches it. Report failed + exit so the broker
+    #    re-races; exiting leaves last_seen null so the never-paired sweep replaces us. (The
+    #    old "assume winner" optimism was inherited from the deleted all-in-one pod, which
+    #    could serve OBS without the control plane; a backend cannot.)
+    #  • winner=false → another racer won this node; exit quietly.
     ready = _post_ready_gpu(ip, bridge_port)
-    if ready is not None and not ready.get("winner", True):
+    if ready is None:
+        log.error("Readiness CAS unconfirmed with the control plane — exiting so the broker re-races.")
+        _post_failed("ready CAS unconfirmed")
+        sys.exit(1)
+    if not ready.get("winner", True):
         log.info("Lost gpu race (another GPU won) — exiting.")
         sys.exit(0)
 
@@ -544,7 +567,12 @@ def main_gpu() -> None:
         # Bridge telemetry → the dock's "GPU bridge" health series. GB/hr → kbps is
         # *1e9*8/3600/1000 ≈ *2222.22. egress = the H.264 returned to the VPS (the
         # meaningful delivered bitrate); active = a transcode is currently applied.
-        hb_body: dict = {"role": "gpu"}
+        # Carry the bridge address on every beat so the control plane can self-heal a lost
+        # /ready: if our readiness POST was dropped at the edge, status/route.ts re-runs the
+        # idempotent winner-CAS from this and promotes us racing→ready (else we'd be stuck
+        # 'racing' forever — billing, un-reaped, hub never bridging). bridge_port is
+        # guaranteed non-None here (we exit above if it was).
+        hb_body: dict = {"role": "gpu", "ip": ip, "bridge_port": bridge_port, "provider_id": PROVIDER_ID}
         cost = cost_meter.sample()
         if cost is not None:
             hb_body["bridge"] = {
