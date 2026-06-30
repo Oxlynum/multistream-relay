@@ -1,3 +1,4 @@
+import { isIP } from 'node:net'
 import { createServerClient } from '@/lib/supabase'
 import { getProvider } from '@/lib/providers'
 import type { RacerEntry } from '@/lib/gpu-broker'
@@ -25,6 +26,18 @@ export async function promoteGpuNodeReady(
 ): Promise<GpuReadyResult> {
   const supabase = createServerClient()
   const nowIso = new Date().toISOString()
+
+  // SEC-03 (bug #2, defense in depth): opts.ip is the GPU's SELF-REPORTED address from the
+  // untrusted edge, and the hub later interpolates it (as tls://<ip>:<port>) into a shell
+  // pipeline (supervisor.build_source_forward_cmd under SLIMCAST_BRIDGE_AUTH). Accept ONLY a
+  // real IPv4/IPv6 literal so a malicious GPU reporting ip="x;cmd;" can't smuggle shell
+  // metacharacters onto the trusted hub (which holds every tenant's decrypted keys). A GPU
+  // with no valid bridge address is useless → refuse to promote; the broker re-races a fresh
+  // one (the /ready caller treats 'noop' as lost-CAS → self-destruct).
+  if (isIP(opts.ip) === 0) {
+    console.warn(`[gpu-ready] rejecting promotion for ${nodeId}: invalid bridge ip ${JSON.stringify(opts.ip)}`)
+    return 'noop'
+  }
 
   // CAS: first caller to flip this node out of a pre-ready phase wins; others see 0 rows.
   const { data: won } = await supabase

@@ -27,6 +27,7 @@ from __future__ import annotations
 import collections
 import json
 import os
+import shlex
 import signal
 import subprocess
 import threading
@@ -269,6 +270,15 @@ def _register_secrets(cfg: dict, source: str = "") -> None:
     srt_pp = os.environ.get("SLIMCAST_SRT_PASSPHRASE", "").strip()
     if len(srt_pp) >= 4:
         _SECRETS.add(srt_pp)
+    # SEC-03: the VPS↔GPU bridge_secret (env on the GPU; per-tenant in cfg.bridge on the hub).
+    # Redact it everywhere even though it's passed via env, not argv (defense in depth).
+    bsec = os.environ.get("SLIMCAST_BRIDGE_SECRET", "").strip()
+    if len(bsec) >= 4:
+        _SECRETS.add(bsec)
+    hub_bridge = cfg.get("bridge") or {}
+    hsec = (hub_bridge.get("bridge_secret") or "").strip()
+    if len(hsec) >= 4:
+        _SECRETS.add(hsec)
     def _add_output_secrets(o: dict) -> None:
         key = (o.get("key") or "").strip()
         if len(key) >= 4:
@@ -310,6 +320,16 @@ def _redact(msg: str) -> str:
 # `cid`) + SRT passphrase is registered in _SECRETS and scrubbed by _redact above.
 _FFMPEG_STDERR_TO_STDOUT = os.environ.get("RELAY_ROLE", "") in ("gpu", "vps")
 
+# SEC-03: enforce the per-session bridge_secret on the VPS↔GPU mpegts bridge. Default OFF
+# keeps the (not-yet-live-proven) baseline bridge byte-identical; flip SLIMCAST_BRIDGE_AUTH
+# =true (both ends) to route the bridge through bridge_proxy.py (TLS terminated + secret
+# checked by the gateway; ffmpeg reads/writes a plaintext localhost socket). See bridge_proxy.py.
+BRIDGE_AUTH = os.environ.get("SLIMCAST_BRIDGE_AUTH", "").strip().lower() == "true"
+# The private localhost port ffmpeg listens on for the GPU transcode INPUT when the auth
+# gateway owns the public :8899 (gateway → 127.0.0.1:BRIDGE_BACKEND_PORT).
+BRIDGE_BACKEND_PORT = 8898
+BRIDGE_PROXY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bridge_proxy.py")
+
 
 def _input_args(source: str) -> list[str]:
     """Per-protocol input flags."""
@@ -317,11 +337,13 @@ def _input_args(source: str) -> list[str]:
         return ["-rtsp_transport", "tcp"]
     if source.startswith("srt"):
         return ["-fflags", "+genpts"]
-    if source.startswith("tls"):
-        # VPS-hub GPU bridge: the VPS pushes mpegts-over-TLS to the GPU's raw listener.
-        # Declare mpegts explicitly (a raw TLS byte stream has no container hint), and
-        # +igndts because DTS is unreliable after the VPS's `-c copy` mpegts re-mux
-        # (see bpm_inject.py); the bumped probe lets NVDEC see the HEVC SPS/PPS first.
+    if source.startswith(("tls", "tcp")):
+        # VPS-hub GPU bridge: mpegts arrives raw on the GPU's listener — either directly over
+        # TLS (baseline) or over a PLAINTEXT localhost tcp socket when the bridge_proxy auth
+        # gateway terminates the public TLS first (SEC-03, SLIMCAST_BRIDGE_AUTH). Either way
+        # declare mpegts explicitly (a raw byte stream has no container hint), and +igndts
+        # because DTS is unreliable after the VPS's `-c copy` mpegts re-mux (see
+        # bpm_inject.py); the bumped probe lets NVDEC see the HEVC SPS/PPS first.
         args = ["-f", "mpegts", "-fflags", "+genpts+igndts", "-analyzeduration", "10M", "-probesize", "10M"]
         # TLS SERVER (listen=1): ffmpeg's tls protocol does NOT load cert_file/key_file
         # when they're given as URL query params — the server then offers no certificate
@@ -329,7 +351,8 @@ def _input_args(source: str) -> list[str]:
         # ffmpeg exits → crash-loop → the hub's source_forward sees "connection refused").
         # The cert MUST be passed as INPUT OPTIONS instead. Verified on jellyfin-ffmpeg
         # 7.1.4-3: URL-query cert → handshake fails; -cert_file/-key_file input opts → OK.
-        if "listen=1" in source:
+        # The plaintext tcp listener (gateway-terminated) needs no cert.
+        if source.startswith("tls") and "listen=1" in source:
             args = ["-cert_file", TLS_CERT_FILE, "-key_file", TLS_KEY_FILE] + args
         return args
     return []
@@ -590,13 +613,37 @@ def build_gpu_transcode_cmd(
 def build_source_forward_cmd(source: str, dest: str) -> list[str]:
     """VPS → GPU bridge (RELAY_ROLE=vps, transcode tenant): read the tenant's SRT
     loopback HEVC and push it to the GPU's mpegts-over-TLS listener with `-c copy` (no
-    re-encode → temporal HEVC preserved). The card-less hub does no NVENC; the GPU does."""
-    return [
-        "ffmpeg", "-hide_banner", "-loglevel", "warning",
-        *_input_args(source),
-        "-i", source,
-        "-c", "copy", "-f", "mpegts", dest,
-    ]
+    re-encode → temporal HEVC preserved). The card-less hub does no NVENC; the GPU does.
+
+    SEC-03 (SLIMCAST_BRIDGE_AUTH=true): instead of ffmpeg opening the TLS itself, it writes
+    mpegts to a local pipe into bridge_proxy.py `client`, which opens TLS to the GPU, sends
+    the per-tenant bridge_secret preamble (from the runner's SLIMCAST_BRIDGE_SECRET env —
+    set in plan_runners, never argv/logs), then pumps the stream. The GPU gateway drops any
+    connection whose secret doesn't match, closing the open-:8899 content-injection hole."""
+    if not BRIDGE_AUTH:
+        return [
+            "ffmpeg", "-hide_banner", "-loglevel", "warning",
+            *_input_args(source),
+            "-i", source,
+            "-c", "copy", "-f", "mpegts", dest,
+        ]
+    u = urllib.parse.urlparse(dest)
+    host, port = u.hostname or "", int(u.port or 0)
+    in_flags = " ".join(_input_args(source))
+    # Mirrors the eRTMP/bpm bash-pipe precedent: pipefail so a gateway failure exits the
+    # pipeline → OutputRunner restarts it. shlex.quote EVERY interpolated value — `host` comes
+    # from the GPU's self-reported IP (the UNTRUSTED edge) and lands in a bash -c, so without
+    # quoting a malicious GPU reporting ip="x;cmd;" would inject `cmd` onto the trusted hub
+    # (which holds every tenant's decrypted keys). `port` is int()-coerced; source/BRIDGE_PROXY
+    # are server-built but quoted for defense in depth. The secret is NOT here — it's env.
+    pipeline = (
+        "set -o pipefail; "
+        f"ffmpeg -hide_banner -loglevel warning {in_flags} -i {shlex.quote(source)} "
+        "-c copy -f mpegts pipe:1 "
+        f"| python3 {shlex.quote(BRIDGE_PROXY)} client "
+        f"--connect-host {shlex.quote(host)} --connect-port {int(port)}"
+    )
+    return ["bash", "-c", pipeline]
 
 
 def build_deliver_cmd(return_url: str, targets: list[dict]) -> list[str]:
@@ -616,10 +663,14 @@ class OutputRunner:
     """Supervises a single FFmpeg process (one passthrough output or one group)."""
 
     def __init__(self, key: str, cmd: list[str], platforms: list[str] | None = None,
-                 mode: str = "transcode"):
+                 mode: str = "transcode", env: dict | None = None):
         self.key = key
         self.name = key
         self.cmd = cmd
+        # Optional per-runner env OVERLAY (merged over os.environ at spawn). Used to hand the
+        # SEC-03 bridge_secret to the source_forward gateway client without exposing it on
+        # argv / in the `$ <cmd>` log line. None → inherit the process env unchanged.
+        self.env = env
         self.platforms = platforms or []
         self.mode = mode
         self._proc: subprocess.Popen | None = None
@@ -698,6 +749,8 @@ class OutputRunner:
                         errors="replace",   # a non-UTF-8 stderr byte must not kill the thread
                         bufsize=1,
                         start_new_session=True,   # own process group → clean group kill
+                        # Per-runner env overlay (SEC-03 bridge_secret); None → inherit unchanged.
+                        env={**os.environ, **self.env} if self.env else None,
                     )
                 except FileNotFoundError:
                     self.state = "error"
@@ -846,11 +899,18 @@ def plan_runners(cfg: dict, source: str = LOCAL_SOURCE, role: str = "vps") -> di
         bridge = cfg.get("bridge")
         sf = bridge.get("source_forward") if bridge else None
         if bridge and sf:
-            plan["source_forward"] = {
+            sf_runner: dict = {
                 "cmd": build_source_forward_cmd(source, sf),
                 "platforms": [],
                 "mode": "source_forward",
             }
+            # SEC-03: hand the per-tenant bridge_secret to the source_forward process via ENV
+            # (bridge_proxy client reads SLIMCAST_BRIDGE_SECRET) — never argv/logs. A change
+            # to the secret (re-race rotation) changes this dict → apply() rebuilds the runner.
+            bsec = (bridge.get("bridge_secret") or "").strip() if BRIDGE_AUTH else ""
+            if bsec:
+                sf_runner["env"] = {"SLIMCAST_BRIDGE_SECRET": bsec}
+            plan["source_forward"] = sf_runner
             for ro in bridge.get("return_outputs", []):
                 orient = ro.get("orientation", "landscape")
                 targets = ro.get("targets", [])
@@ -926,12 +986,13 @@ class Supervisor:
 
             for key, spec in desired.items():
                 runner = self.runners.get(key)
-                if runner is None or runner.cmd != spec["cmd"]:
-                    # new group, or its command (platforms/bitrate/crop) changed -> rebuild
+                if runner is None or runner.cmd != spec["cmd"] or runner.env != spec.get("env"):
+                    # new group, or its command (platforms/bitrate/crop) or env (SEC-03 secret
+                    # rotation) changed -> rebuild
                     if runner is not None:
                         runner.stop()
                     runner = OutputRunner(
-                        key, spec["cmd"], spec["platforms"], spec["mode"]
+                        key, spec["cmd"], spec["platforms"], spec["mode"], spec.get("env")
                     )
                     self.runners[key] = runner
                 runner.start()

@@ -41,7 +41,7 @@ import urllib.error
 # Empty locally → encryption disabled (the loopback is localhost-only there).
 SRT_PASSPHRASE = os.environ.get("SLIMCAST_SRT_PASSPHRASE", "").strip()
 
-from supervisor import Supervisor
+from supervisor import Supervisor, BRIDGE_AUTH, BRIDGE_BACKEND_PORT, BRIDGE_PROXY
 from budget import CostMeter
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [agent] %(message)s")
@@ -446,6 +446,23 @@ def _gen_self_signed_cert() -> None:
         log.error("TLS cert generation failed: %s", exc)
 
 
+def _start_bridge_gateway() -> "subprocess.Popen":
+    """SEC-03: start the authenticating mpegts gateway (bridge_proxy.py server) on the PUBLIC
+    :8899. It terminates TLS, validates the SLIMCAST_BRIDGE_SECRET preamble, then splices an
+    authenticated connection to ffmpeg on 127.0.0.1:BRIDGE_BACKEND_PORT. Runs for the life of
+    the pod; if it ever dies the bridge goes dark (fail-closed) rather than open. The secret
+    is read from this process's env by the gateway — never passed on argv."""
+    proc = subprocess.Popen(
+        [sys.executable, BRIDGE_PROXY, "server",
+         "--listen-port", "8899",
+         "--backend-host", "127.0.0.1", "--backend-port", str(BRIDGE_BACKEND_PORT),
+         "--cert-file", "/app/relay.crt", "--key-file", "/app/relay.key"],
+        start_new_session=True,
+    )
+    log.info("bridge_proxy auth gateway started on :8899 → ffmpeg 127.0.0.1:%d", BRIDGE_BACKEND_PORT)
+    return proc
+
+
 def _post_ready_gpu(ip: str, bridge_port: "int | None") -> "dict | None":
     """GPU backend self-reports its bridge-in address. Winner-CAS on the cloud side;
     a loser is told to self-destruct."""
@@ -521,13 +538,26 @@ def main_gpu() -> None:
         log.info("Lost gpu race (another GPU won) — exiting.")
         sys.exit(0)
 
-    # The transcode reads the source from a raw mpegts-over-TLS listener (the VPS
-    # source_forward connects in). One Supervisor; one transcode runner (build_group
-    # for the GPU does one decode → N orientation encodes → N RTMPS returns).
-    # NOTE: the cert is injected as -cert_file/-key_file INPUT OPTIONS by
-    # supervisor._input_args() — ffmpeg's tls server ignores cert_file/key_file passed
-    # as URL query params ("no shared cipher" handshake failure). Do NOT put them here.
-    listen = "tls://0.0.0.0:8899?listen=1"
+    # The transcode reads the source from the VPS source_forward (which connects in).
+    # One Supervisor; one transcode runner (one decode → N orientation encodes → N RTMPS
+    # returns).
+    if BRIDGE_AUTH:
+        # SEC-03: the bridge_proxy gateway owns the PUBLIC :8899 — it terminates TLS and
+        # validates the SLIMCAST_BRIDGE_SECRET preamble, then splices to ffmpeg on a PRIVATE
+        # localhost port. ffmpeg never sees an unauthenticated peer, so a stranger who finds
+        # the GPU IP:8899 can no longer inject mpegts into the victim's outputs. Default-off
+        # (SLIMCAST_BRIDGE_AUTH unset) keeps the proven baseline below byte-identical.
+        bridge_gw = _start_bridge_gateway()
+        listen = f"tcp://127.0.0.1:{BRIDGE_BACKEND_PORT}?listen=1"
+        log.info("SEC-03 bridge auth ENABLED — ffmpeg reads plaintext from the gateway on :%d",
+                 BRIDGE_BACKEND_PORT)
+    else:
+        bridge_gw = None
+        # Baseline: ffmpeg terminates the public TLS itself. NOTE: the cert is injected as
+        # -cert_file/-key_file INPUT OPTIONS by supervisor._input_args() — ffmpeg's tls server
+        # ignores cert_file/key_file passed as URL query params ("no shared cipher" handshake
+        # failure). Do NOT put them here.
+        listen = "tls://0.0.0.0:8899?listen=1"
     sup = Supervisor(source=listen, role="gpu")
 
     def shutdown(sig: int, _frame: object) -> None:
@@ -543,6 +573,12 @@ def main_gpu() -> None:
     # so /proc/net/dev IS the internal VPS↔GPU bridge leg. Measure it for dock telemetry.
     cost_meter = CostMeter()
     while True:
+        # Self-heal the auth gateway: if it ever exits, the bridge goes dark while this GPU
+        # keeps heartbeating "healthy" (so no reaper re-races it) → a silent transcode outage.
+        # Restart it (fail-closed → self-healing). bridge_gw is None when auth is off.
+        if bridge_gw is not None and bridge_gw.poll() is not None:
+            log.error("bridge_proxy gateway exited (code %s) — restarting", bridge_gw.returncode)
+            bridge_gw = _start_bridge_gateway()
         cfg_resp = _api("GET", "/api/agent/gpu-config") or {}
         groups = cfg_resp.get("groups", [])
         returns = cfg_resp.get("return")
