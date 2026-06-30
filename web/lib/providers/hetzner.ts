@@ -30,6 +30,11 @@ const DEFAULT_IMAGE = process.env.HETZNER_IMAGE || 'ubuntu-22.04'
 // Unset (prod default) → fall back to DEFAULT_IMAGE + the full install cloud-init.
 // REBUILD the snapshot whenever the relay image changes (it bakes a specific image).
 const SNAPSHOT_ID = process.env.HETZNER_SNAPSHOT_ID || ''
+// Known-good disk floor (GB) used when SNAPSHOT_ID is set but the live /images lookup
+// fails — so a transient error fails CLOSED (keeps excluding too-small types) instead of
+// dropping onto the cheapest 40GB type and 422-ing every cold spawn. Our snapshot is baked
+// on an 80GB box; override if you rebake on a different base.
+const SNAPSHOT_DISK_GB_FALLBACK = Number(process.env.HETZNER_SNAPSHOT_DISK_GB || 80)
 
 // Soft floor for a server type to be a viable hub: it must terminate SRT + remux +
 // (for transcode) source-forward + platform fan-out. Tune after the §2.6 load-test;
@@ -146,13 +151,23 @@ export const hetznerProvider: VpsProvider = {
       // type disk"). Our relay snapshot is baked on an 80GB box, so the cheapest 40GB
       // types (cx23/cpx11) must be excluded when SNAPSHOT_ID is set. Read the snapshot's
       // disk_size and floor the candidate types on it. (0 = no snapshot → no floor.)
-      let snapshotDiskGb = 0
+      // Fail CLOSED: seed the floor with the known-good fallback when a snapshot is
+      // configured, and only REPLACE it with the live value on a successful read. A
+      // 429/5xx/timeout therefore keeps the floor (the cold spawn picks the 80GB type and
+      // create succeeds) instead of disabling it and dropping onto a 40GB type that 422s.
+      let snapshotDiskGb = SNAPSHOT_ID ? SNAPSHOT_DISK_GB_FALLBACK : 0
       if (SNAPSHOT_ID) {
         try {
           const imgRes = await hzFetch(`/images/${SNAPSHOT_ID}`)
-          if (imgRes.ok) snapshotDiskGb = Number(((await imgRes.json()).image?.disk_size) ?? 0)
-          else console.error(`[hetzner] snapshot ${SNAPSHOT_ID} lookup → ${imgRes.status} (disk floor disabled)`)
-        } catch (e) { console.error('[hetzner] snapshot disk_size fetch failed:', e instanceof Error ? e.message : e) }
+          if (imgRes.ok) {
+            const live = Number(((await imgRes.json()).image?.disk_size) ?? 0)
+            if (live > 0) snapshotDiskGb = live
+          } else {
+            console.error(`[hetzner] snapshot ${SNAPSHOT_ID} lookup → ${imgRes.status} (using ${snapshotDiskGb}GB floor fallback)`)
+          }
+        } catch (e) {
+          console.error(`[hetzner] snapshot disk_size fetch failed (using ${snapshotDiskGb}GB floor fallback):`, e instanceof Error ? e.message : e)
+        }
       }
 
       const candidates: VpsCandidate[] = []
