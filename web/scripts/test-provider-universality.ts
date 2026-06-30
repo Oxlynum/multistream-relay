@@ -10,7 +10,7 @@
 
 import assert from 'node:assert/strict'
 import {
-  podName, hubName, ownerOfPodName, ownerOfHubName, MANAGED_BY, POD_PREFIX, HUB_PREFIX,
+  podName, hubName, ownerOfPodName, ownerOfHubName, nodeTokenOfPodName, MANAGED_BY, POD_PREFIX, HUB_PREFIX,
 } from '../lib/managed-identity'
 import {
   getProvider, getVpsProvider, resolveProvider,
@@ -25,11 +25,16 @@ function check(name: string, fn: () => void) {
 
 console.log('managed-identity:')
 
-check('pod name round-trips to owner id', () => {
+check('pod name round-trips to owner id + node token', () => {
   const uid = 'abcdef12-3456-7890-aaaa-bbbbbbbbbbbb'
-  const name = podName(uid)
-  assert.equal(name, `${POD_PREFIX}abcdef12`)
-  assert.equal(ownerOfPodName(name), 'abcdef12')
+  const nid = 'feed5678-1111-2222-3333-444444444444'
+  const name = podName(uid, nid)
+  assert.equal(name, `${POD_PREFIX}abcdef12-feed5678`)
+  assert.equal(ownerOfPodName(name), 'abcdef12')      // head = owner
+  assert.equal(nodeTokenOfPodName(name), 'feed5678')  // tail = session-unique node token
+  // A legacy single-segment name still parses its owner, and has no node token.
+  assert.equal(ownerOfPodName(`${POD_PREFIX}abcdef12`), 'abcdef12')
+  assert.equal(nodeTokenOfPodName(`${POD_PREFIX}abcdef12`), null)
 })
 
 check('hub name round-trips to hub-id tail', () => {
@@ -51,7 +56,7 @@ check('GPU listInstances filter (ownerOfPodName != null) is hub-EXCLUSIVE', () =
   // pods and drop hubs + non-slimcast — otherwise a hub surfacing in the GPU reaper pass
   // gets ownerId=null and is destroyed (adversarial-review finding, 2026-06-28).
   const isPod = (n: string) => ownerOfPodName(n) != null
-  assert.equal(isPod(podName('abcdef12-...')), true)        // pod kept
+  assert.equal(isPod(podName('abcdef12-...', 'node5678-...')), true) // pod kept
   assert.equal(isPod(hubName('fsn1', 'deadbeef-...')), false) // hub dropped
   assert.equal(isPod('nginx-prod'), false)                  // foreign box dropped
 })

@@ -25,10 +25,15 @@ export const POD_PREFIX = `${MANAGED_BY}-`
 // so pod-name matching must explicitly exclude hub names (ownerOfPodName does).
 export const HUB_PREFIX = `${MANAGED_BY}-hub-`
 
-/** The name to stamp on a GPU pod / GPU-backend box at create. The reaper matches and
- *  parses this exact shape, so always build the name here. */
-export function podName(userId: string): string {
-  return `${POD_PREFIX}${userId.slice(0, 8)}`
+/** The name to stamp on a GPU-backend box at create: `slimcast-<userId8>-<nodeId8>`.
+ *  The nodeId tail makes the name SESSION-UNIQUE (= the relay_nodes row id), which the
+ *  reaper's mid-provision guard needs to tell a genuinely-booting box (its row exists) from
+ *  a LEAKED one (its row was CASCADE-dropped but the provider destroy failed). Without the
+ *  tail every box a user ever rents shares one name, so the guard shields a leaked box
+ *  forever whenever the user has any live row (the un-reaped-forever money leak). The reaper
+ *  matches and parses this exact shape, so always build the name here. */
+export function podName(userId: string, nodeId: string): string {
+  return `${POD_PREFIX}${userId.slice(0, 8)}-${nodeId.slice(0, 8)}`
 }
 
 /** The name to stamp on a VPS hub box at create. Region ids carry no hyphens
@@ -38,11 +43,24 @@ export function hubName(region: string, hubId: string): string {
 }
 
 /** Owner-id (8-char user prefix) parsed back out of a GPU box name, or null if the name
- *  isn't one of our pod names. Excludes hub names (which share the `slimcast-` prefix). */
+ *  isn't one of our pod names. Excludes hub names (which share the `slimcast-` prefix).
+ *  Parses the HEAD segment, so it handles BOTH the session-unique
+ *  `slimcast-<userId8>-<nodeId8>` and any legacy single-segment `slimcast-<userId8>` name
+ *  (userId8 is the first UUID group, which never contains a hyphen). */
 export function ownerOfPodName(name: string | null | undefined): string | null {
   if (!name || !name.startsWith(POD_PREFIX)) return null
   if (name.startsWith(HUB_PREFIX)) return null   // a hub, not a pod
-  return name.slice(POD_PREFIX.length) || null
+  return name.slice(POD_PREFIX.length).split('-')[0] || null
+}
+
+/** The session-unique node token (8-char relay_nodes id prefix) parsed out of a GPU box
+ *  name, or null for a non-pod name OR a legacy single-segment `slimcast-<userId8>` name
+ *  (which carries no tail). The reaper spares a box only when this token is still live, so a
+ *  leaked box (row gone) is reaped while a mid-provision box (row present) is kept. */
+export function nodeTokenOfPodName(name: string | null | undefined): string | null {
+  if (!name || !name.startsWith(POD_PREFIX)) return null
+  if (name.startsWith(HUB_PREFIX)) return null   // a hub, not a pod
+  return name.slice(POD_PREFIX.length).split('-')[1] || null
 }
 
 /** Owner-id (8-char hub prefix) parsed back out of a VPS hub box name, or null if the

@@ -2,6 +2,7 @@ import { createServerClient } from '@/lib/supabase'
 import { sweepExpiredLeases } from '@/lib/pod-teardown'
 import { reraceGpuBackend } from '@/lib/vps-broker'
 import { ACTIVE_GPU_PROVIDERS, ACTIVE_VPS_PROVIDERS, getProvider } from '@/lib/providers'
+import { nodeTokenOfPodName } from '@/lib/managed-identity'
 import type { RacerEntry } from '@/lib/gpu-broker'
 
 // The DEMOTED-TO-FLOOR backstop (termination-system-plan §9.4). The primary reaper
@@ -91,7 +92,7 @@ export async function GET(request: Request) {
     // an orphan and destroyed (landmine #5).
     const { data: nodeRows } = await supabase
       .from('relay_nodes')
-      .select('provider_id, racers')
+      .select('id, provider_id, racers')
       .eq('role', 'gpu_backend')
     // Include racer pod IDs (v2 race path) so active racers aren't orphan-destroyed.
     const knownPodIds = new Set([
@@ -109,6 +110,13 @@ export async function GET(request: Request) {
       ),
     ])
     const knownUserPrefixes = new Set((allRows ?? []).map(r => r.user_id?.slice(0, 8)).filter(Boolean))
+    // Session-unique node tokens (relay_nodes.id head) for the mid-provision guard. The GPU
+    // box name carries `-<nodeId8>`, and the relay_nodes row is created BEFORE the box
+    // (vps-broker), so a booting box's token is live here while a LEAKED box (row
+    // CASCADE-dropped) has none → it gets reaped instead of shielded forever.
+    const knownNodeTokens = new Set(
+      (nodeRows ?? []).map(n => (n.id as string | null)?.slice(0, 8)).filter(Boolean)
+    )
 
     // Sweep EVERY GPU provider that can hold a box (Vast + RunPod). Without RunPod here, a
     // row-less RunPod GPU backend orphan (create() succeeded but the racers write lost a
@@ -128,7 +136,18 @@ export async function GET(request: Request) {
       }
       for (const pod of live) {
         if (knownPodIds.has(pod.id)) continue
-        if (pod.ownerId && knownUserPrefixes.has(pod.ownerId)) continue // row exists (mid-provision) — leave it
+        // Mid-provision guard, now session-precise. Spare a box only if its node token is
+        // still live (its relay_nodes row exists = genuinely booting). A leaked box whose
+        // row was CASCADE-dropped has a token that's no longer live → reaped (closes the
+        // shielded-forever leak). A legacy single-segment name carries no token → fall back
+        // to the userId-prefix guard so a box created by pre-rename code mid-deploy is still
+        // spared (deploy-transition safety; no such boxes exist in steady state).
+        const token = nodeTokenOfPodName(pod.name)
+        if (token) {
+          if (knownNodeTokens.has(token)) continue
+        } else if (pod.ownerId && knownUserPrefixes.has(pod.ownerId)) {
+          continue
+        }
         try {
           await provider.destroy(pod.id)
           orphans.push(`${provider.name}:${pod.id}`)

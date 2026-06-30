@@ -378,7 +378,7 @@ export async function startGpuBackendRace(args: {
   const race = await startProvisionRace({
     lat: hubLat ?? FALLBACK_LAT,
     lon: hubLon ?? FALLBACK_LON,
-    name: podName(userId),
+    name: podName(userId, nodeId),
     imageTag,
     env: gpuEnv,
     userOutputs,
@@ -533,7 +533,7 @@ export async function reraceGpuBackend(nodeId: string, supabase: Supa): Promise<
   const race = await startProvisionRace({
     lat: hubLat ?? FALLBACK_LAT,
     lon: hubLon ?? FALLBACK_LON,
-    name: podName(userId),
+    name: podName(userId, nodeId),
     imageTag,
     env: gpuEnv,
     providers: ACTIVE_GPU_PROVIDERS,

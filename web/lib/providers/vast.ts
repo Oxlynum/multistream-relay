@@ -350,7 +350,14 @@ export const vastProvider: GpuProvider = {
   },
 
   async destroy(podId): Promise<void> {
-    await fetch(`${BASE}/instances/${podId}/`, { method: 'DELETE', headers: authHeaders() })
+    // Check the result. A silent no-op on a failed DELETE (auth error, 429, 5xx) used to
+    // hide a still-billing box behind a "destroyed" log. 404 = already gone = idempotent
+    // success; any other non-ok throws so the caller's catch surfaces the leak (the
+    // reaper/teardown all wrap destroy in try/catch + log, and re-list it next pass).
+    const res = await fetch(`${BASE}/instances/${podId}/`, { method: 'DELETE', headers: authHeaders() })
+    if (!res.ok && res.status !== 404) {
+      throw new Error(`[vast] destroy ${podId} → ${res.status}: ${(await res.text().catch(() => '')).slice(0, 300)}`)
+    }
   },
 
   // OUR live rentals only. Vast's `label` is the `name` we set at create
