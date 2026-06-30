@@ -141,12 +141,27 @@ export const hetznerProvider: VpsProvider = {
         for (const tid of dc.server_types?.available ?? []) orderable.add(`${tid}@${ln}`)
       }
 
+      // Snapshot disk floor: Hetzner refuses to restore a snapshot onto a server type
+      // whose disk is SMALLER than the snapshot's (422 "image disk is bigger than server
+      // type disk"). Our relay snapshot is baked on an 80GB box, so the cheapest 40GB
+      // types (cx23/cpx11) must be excluded when SNAPSHOT_ID is set. Read the snapshot's
+      // disk_size and floor the candidate types on it. (0 = no snapshot → no floor.)
+      let snapshotDiskGb = 0
+      if (SNAPSHOT_ID) {
+        try {
+          const imgRes = await hzFetch(`/images/${SNAPSHOT_ID}`)
+          if (imgRes.ok) snapshotDiskGb = Number(((await imgRes.json()).image?.disk_size) ?? 0)
+          else console.error(`[hetzner] snapshot ${SNAPSHOT_ID} lookup → ${imgRes.status} (disk floor disabled)`)
+        } catch (e) { console.error('[hetzner] snapshot disk_size fetch failed:', e instanceof Error ? e.message : e) }
+      }
+
       const candidates: VpsCandidate[] = []
       for (const st of serverTypes) {
         if (st.deprecation) continue                                  // skip deprecated lines
         if ((st.architecture ?? 'x86') !== 'x86') continue            // relay image is amd64
         if ((st.cores ?? 0) < MIN_CORES) continue
         if ((st.memory ?? 0) < MIN_MEMORY_GB) continue
+        if (snapshotDiskGb > 0 && (st.disk ?? 0) < snapshotDiskGb) continue   // snapshot won't fit this disk → would 422 at create
         for (const pr of st.prices ?? []) {
           const loc = locByName.get(pr.location)
           if (!loc || loc.latitude == null || loc.longitude == null) continue
