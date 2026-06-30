@@ -34,9 +34,6 @@ struct GpuInfo {
     // True when this stream transcodes via a GPU backend behind the VPS hub — enables
     // the health graph's "GPU bridge" (VPS↔GPU) series. False for all-in-one/passthrough.
     bool    hasBridge      = false;
-    // True when the account has the 2K (1440p) add-on. The dock warns when OBS outputs
-    // a >1080p source without this — it'd just be downscaled to 1080p (wasted upload).
-    bool    has2kAddon     = false;
 };
 
 // A user's connected channel. Stream keys/URLs never leave the server — the dock

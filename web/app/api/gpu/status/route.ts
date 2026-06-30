@@ -33,13 +33,9 @@ export async function GET(request: Request) {
 
   const { data: profile } = await supabase
     .from('profiles')
-    .select('streaming_credits, allotment_tokens, has_2k_addon')
+    .select('streaming_credits, allotment_tokens')
     .eq('id', userId)
     .single()
-
-  // 2K entitlement — the dock compares this against OBS's output resolution to warn
-  // when a user pushes a >1080p source without the add-on (it'd just be downscaled).
-  const has2kAddon = profile?.has_2k_addon ?? false
 
   // Dock "time left" must reflect total spendable = allotment (subscribers) + purchased,
   // else a streaming subscriber's remaining time understates by their allotment.
@@ -62,7 +58,6 @@ export async function GET(request: Request) {
       datacenter: null,
       gpu_type: null,
       has_bridge: false,
-      has_2k_addon: has2kAddon,
     })
   }
 
@@ -134,7 +129,5 @@ export async function GET(request: Request) {
     // This stream transcodes via a GPU backend behind the VPS hub → the dock offers a
     // "GPU bridge" health series (direction='bridge'). False for all-in-one + passthrough.
     has_bridge: effectiveStatus === 'running' && instance.topology === 'vps_gpu',
-    // 2K entitlement — drives the dock's "2K needs the add-on" resolution warning.
-    has_2k_addon: has2kAddon,
   })
 }
