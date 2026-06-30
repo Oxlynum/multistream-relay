@@ -121,6 +121,12 @@ def _snap_fps(fps: float) -> int:
     return min(_SUPPORTED_FPS, key=lambda s: abs(s - fps))
 
 
+# Twitch eRTMP canvas (16:9) by output resolution. The eRTMP path is landscape-only
+# (classifyMode gates it on orientation), so a 16:9 canvas is correct. Used in place of the
+# process-global SOURCE_WIDTH/HEIGHT, which cannot be per-tenant on the multi-tenant hub.
+_ERTMP_CANVAS = {"720p": (1280, 720), "1080p": (1920, 1080), "1440p": (2560, 1440)}
+
+
 def _resolve_ertmp_url(out: dict) -> str:
     """Call Twitch GetClientConfiguration to get a session ingest URL + auth token.
 
@@ -133,11 +139,14 @@ def _resolve_ertmp_url(out: dict) -> str:
         if stream_key in _ertmp_session_cache:
             return _ertmp_session_cache[stream_key]
 
-    # We pass the source HEVC straight through (no scaling on the Twitch path),
-    # so the canvas we report is the real source resolution. SOURCE_WIDTH/HEIGHT
-    # are injected per-pod at provision from the user's max output resolution, so
-    # this is already per-user dynamic. Framerate is snapped to a Twitch-supported
-    # integer (it rejects 59.94 etc. at config time).
+    # We pass the source HEVC straight through (no scaling on the Twitch path), so the
+    # canvas we report MUST match the real source resolution — else Twitch binds the session
+    # to the wrong canvas (a 1440p bitstream negotiated as a 1080p session → mismatch). The
+    # hub is multi-tenant, so the process-global SOURCE_WIDTH/HEIGHT can't be per-tenant;
+    # derive the 16:9 canvas from THIS output's resolution (the eRTMP path is landscape-only)
+    # and fall back to the global only if it carries none. Framerate is snapped to a
+    # Twitch-supported integer (it rejects 59.94 etc. at config time).
+    cw, ch = _ERTMP_CANVAS.get((out.get("resolution") or "").strip(), (SOURCE_WIDTH, SOURCE_HEIGHT))
     fps = _snap_fps(float(out.get("fps") or 60))
 
     body = {
@@ -174,8 +183,8 @@ def _resolve_ertmp_url(out: dict) -> str:
             "vod_track_audio": False,
             "composition_gpu_index": 0,    # references gpu[0] above — must be non-empty
             "canvases": [{
-                "width": SOURCE_WIDTH, "height": SOURCE_HEIGHT,
-                "canvas_width": SOURCE_WIDTH, "canvas_height": SOURCE_HEIGHT,
+                "width": cw, "height": ch,
+                "canvas_width": cw, "canvas_height": ch,
                 "framerate": {"numerator": fps, "denominator": 1},
             }],
             "audio_samples_per_sec": 48000,
