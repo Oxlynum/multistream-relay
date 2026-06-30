@@ -1015,7 +1015,10 @@ void RelayDock::updateIngestLabel()
     // pass the 2K source straight through (un-entitled delivery). Either way it's a
     // mismatch — warn so the user enables the add-on or drops OBS to 1080p.
     // m_has2kAddon comes from /api/gpu/status (account entitlement).
-    const bool over1080NoAddon = outH > 1080 && !m_has2kAddon;
+    // "2K" = >1080p in the LIMITING (short) side, so a legit 1080p portrait canvas
+    // (1080×1920) is not mis-flagged as 2K. Height-alone would warn on every vertical source.
+    const int shortSide = (outW < outH) ? outW : outH;   // 0 if resolution unreadable → no warn
+    const bool over1080NoAddon = shortSide > 1080 && !m_has2kAddon;
 
     if (!isHevc) {
         m_ingestLabel->setText(base + " · ⚠ Switch encoder to H265");
@@ -1322,11 +1325,17 @@ bool RelayDock::passes2kGate()
         return true;
 
     obs_video_info ovi;
-    if (!obs_get_video_info(&ovi) || ovi.output_height <= 1080)
-        return true;   // ≤1080p (or can't read it) → nothing to gate
+    if (!obs_get_video_info(&ovi))
+        return true;   // can't read the resolution → fail safe, don't gate
 
     const int outW = (int)ovi.output_width;
     const int outH = (int)ovi.output_height;
+    // "2K" = >1080p in the LIMITING (short) side, so a legit 1080p portrait canvas
+    // (1080×1920 — same pixel budget as 1920×1080) is NOT mis-flagged. Gating on height
+    // alone would falsely block/downscale every vertical (TikTok-first) creator.
+    const int shortSide = (outW < outH) ? outW : outH;
+    if (shortSide <= 1080)
+        return true;   // ≤1080p in its limiting dimension → nothing to gate
 
     QMessageBox box(this);
     box.setIcon(QMessageBox::Warning);
@@ -1359,24 +1368,36 @@ bool RelayDock::passes2kGate()
     return false;   // Cancel / closed → don't launch
 }
 
-// Pin OBS's scaled output resolution to 1080p (height), preserving aspect ratio and
-// the base canvas. obs_reset_video can only run with no active output, so this is a
-// pre-stream operation (the gate runs before we provision/start). Returns false if it
-// couldn't apply (e.g. a recording/output is active).
+// Pin OBS's scaled output resolution so its SHORT side is 1080, preserving aspect ratio
+// and the base canvas. Orientation-aware: a landscape source caps to ...×1080, a portrait
+// source caps to 1080×... — so a real 2K portrait (1440×2560) downscales to 1080×1920, NOT
+// 608×1080 (the bug from always pinning height). obs_reset_video can only run with no active
+// output, so this is a pre-stream operation (the gate runs before we provision/start).
+// Returns false if it couldn't apply (e.g. a recording/output is active).
 bool RelayDock::downscaleOutputTo1080()
 {
     if (obs_frontend_streaming_active() || obs_frontend_recording_active())
         return false;
 
     obs_video_info ovi;
-    if (!obs_get_video_info(&ovi) || ovi.output_height == 0)
+    if (!obs_get_video_info(&ovi) || ovi.output_width == 0 || ovi.output_height == 0)
         return false;
 
-    const double aspect = (double)ovi.output_width / (double)ovi.output_height;
-    uint32_t newW = ((uint32_t)std::lround(1080.0 * aspect)) & ~1u;   // even width
-    if (newW == 0) newW = 1920;
-    ovi.output_width  = newW;
-    ovi.output_height = 1080;
+    if (ovi.output_width <= ovi.output_height) {
+        // Portrait/square: pin width to 1080, scale height by aspect.
+        const double aspect = (double)ovi.output_height / (double)ovi.output_width;
+        uint32_t newH = ((uint32_t)std::lround(1080.0 * aspect)) & ~1u;   // even height
+        if (newH == 0) newH = 1920;
+        ovi.output_width  = 1080;
+        ovi.output_height = newH;
+    } else {
+        // Landscape: pin height to 1080, scale width by aspect.
+        const double aspect = (double)ovi.output_width / (double)ovi.output_height;
+        uint32_t newW = ((uint32_t)std::lround(1080.0 * aspect)) & ~1u;   // even width
+        if (newW == 0) newW = 1920;
+        ovi.output_width  = newW;
+        ovi.output_height = 1080;
+    }
     return obs_reset_video(&ovi) == OBS_VIDEO_SUCCESS;
 }
 
