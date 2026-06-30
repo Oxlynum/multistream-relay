@@ -88,12 +88,6 @@ private:
     QString obsServiceIssue();
     void renderChannels();
     void updateIngestLabel();
-    // Go-Live gate: a >1080p OBS output on a non-2K account would cost upload + GPU
-    // decode without ever reaching a platform at 2K. One window — offer to downscale
-    // ("b") or upgrade; declining blocks the launch ("a"). Returns true to proceed.
-    bool passes2kGate();
-    // Pin OBS's scaled output resolution to 1080p (preserving aspect + base canvas).
-    bool downscaleOutputTo1080();
     void updateTotals();
     void setStatus(const QString &text, const QString &color);
     void showSetup(bool setup);
@@ -139,8 +133,6 @@ private:
     qint64 m_launchStartMs = 0;      // when Go Live was pressed (for elapsed time)
     bool m_wasStreaming   = false;  // to auto-engage the channel lock on stream start
     bool m_haveEncode     = false;
-    bool m_has2kAddon     = false;  // account 2K entitlement (from /api/gpu/status) — gates the resolution warning
-    bool m_statusKnown    = false;  // a /api/gpu/status response has landed → m_has2kAddon is trustworthy
     int  m_orphanTicks    = 0;      // consecutive polls of "pod up, OBS not streaming"
     int  m_appliedThrottleKbps = 0; // last throttle bitrate we pushed (0 = none/unthrottled)
     int  m_originalBitrateKbps = 0; // user's configured bitrate, captured before first throttle
