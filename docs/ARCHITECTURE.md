@@ -66,7 +66,7 @@ temporal layers). NVENC/AMF/QSV HEVC with a B-pyramid hits the same path.
   (`main_vps`, MediaMTX + passthrough + per-platform delivery) and the **GPU backend** (`main_gpu`, the TLS
   bridge + NVDEC/NVENC transcode). Built by CI to GHCR.
 - **`slimcast-obs/`** — the C++ OBS plugin/dock that drives the whole lifecycle. Encoder-agnostic
-  detection (Apple VT / NVENC / QSV / AMF). Windows build status: [`macvpc.md`](../macvpc.md).
+  detection (Apple VT / NVENC / QSV / AMF). Windows build status: [`macvpc.md`](macvpc.md).
 
 ## Encoder tuning (the "crisp in fast motion" part)
 
@@ -77,6 +77,8 @@ The GPU's shared H.264 encode is tuned for high-motion quality — `p7 / tune hq
 
 ## Roadmap & test runbooks
 
-`gputest.md` (GPU transcode-bridge live test — the current #1 unknown) · `hevcpasstest.md` (hub
-passthrough — proven live) · `dualstream.md` (vertical 9:16) · `enterprise-audit.md` (hardening) ·
-`docs/PRODUCT_PLAN.md` (business/licensing) · `docs/srt-rtmp-split-plan.md` (contingency transport).
+**Active plans** (`plans/`): `enterprise-audit.md` (hardening roadmap) · `dualstream.md` (vertical 9:16).
+**Reference:** `PRODUCT_PLAN.md` (business/licensing) · `production-checklist.md` (pre-launch cutover) ·
+`macvpc.md` (Windows enablement).
+**History** (`archive/`): `gputest.md` (GPU transcode-bridge — Phase 2 passed) · `hevcpasstest.md`
+(hub passthrough — proven live) · `srt-rtmp-split-plan.md` (superseded by the shipped hub bridge).

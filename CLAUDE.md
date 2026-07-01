@@ -58,9 +58,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Layout
 - `relay/` — hub + GPU Docker image: `supervisor.py`, `agent.py`, MediaMTX (`mediamtx.vps.yml`), `hook.sh`
 - `web/` — Next.js 16: auth, dashboard, billing, broker, OBS dock. Supabase + Stripe. Vercel. **Front-end rebuilt 2026-06-29** onto a shadcn/**Base UI** design system: **dark-only** CSS-token theme in `app/globals.css` (**NO `tailwind.config`** — Tailwind v4, edit tokens in `globals.css`; `components.json` style `base-nova`, lucide icons, `cn` in `lib/utils.ts`). Marketing pages live under the `app/(marketing)/` route group (shared `layout.tsx` with SiteNav/SiteFooter) — the flat `app/page.tsx` / `app/{features,pricing,faq}/page.tsx` are GONE.
-- `slimcast-obs/` — C++ OBS plugin v2.1.0 (sources under `slimcast-obs/src/`). Mac `.pkg` built by hand today. **The plugin CI does NOT run** — `release.yml` sits in `slimcast-obs/.github/workflows/`, but GitHub only fires workflows in the repo-root `.github/workflows/` (which holds only `relay-docker.yml`); the Windows `.exe` is unproven and likely won't compile as-is (POSIX `dlfcn` in `plugin-main.cpp`). See `macvpc.md`.
+- `slimcast-obs/` — C++ OBS plugin v2.1.0 (sources under `slimcast-obs/src/`). Mac `.pkg` built by hand today. **The plugin CI does NOT run** — `release.yml` sits in `slimcast-obs/.github/workflows/`, but GitHub only fires workflows in the repo-root `.github/workflows/` (which holds only `relay-docker.yml`); the Windows `.exe` is unproven and likely won't compile as-is (POSIX `dlfcn` in `plugin-main.cpp`). See `docs/macvpc.md`.
 - `mobile/` — **PLANNED, not started** (only `mobileapp.md` so far). Native iOS-first (then Android) app = "phone-shaped OBS" (capture→HEVC→MPEG-TS→SRT to the backend's `srt_url`); reuses the server unchanged bar ~5 small `web/` backend cards (IAP validate, store S2S, Sign-in-with-Apple, mobile OAuth, version gate).
-- `docs/` — `ARCHITECTURE.md` (current high-level overview; defers to this file for detail), `PRODUCT_PLAN.md`, `srt-rtmp-split-plan.md`, and `archive/` (shipped/superseded design + worklog docs: the `vps-hub-*` / termination / web-rebuild plans + the stale blueprint PDF).
+- `docs/` — current docs: `ARCHITECTURE.md` (high-level overview; defers to this file for detail), `PRODUCT_PLAN.md`, `macvpc.md` (Windows plugin status), `production-checklist.md`. Two subfolders: **`docs/plans/`** = active / not-yet-shipped roadmaps (`enterprise-audit.md`, `dualstream.md` — untracked worklogs; see `docs/plans/README.md`) · **`docs/archive/`** = shipped/superseded design + worklog docs (`vps-hub-*` / termination / web-rebuild / `gputest.md` / `hevcpasstest.md` / `srt-rtmp-split-plan.md` / `phase5-review-notes.md` + the stale blueprint PDF; index in `docs/archive/README.md`).
 
 ## Commands
 
@@ -79,7 +79,7 @@ vercel logs --environment=production --since=10m -x
 >
 > **Tests:** no test framework — tests are standalone `scripts/*.ts` run with `npx tsx` (each `node:assert`s and exits non-zero on failure; run one by invoking its file). To test **SQL migrations/RPCs** without touching prod, apply them to a throwaway Postgres and assert in PL/pgSQL: `docker run -d --name pgt -e POSTGRES_HOST_AUTH_METHOD=trust postgres:17` (the image self-restarts once during initdb — wait for 3 consecutive `pg_isready`), then pipe `cat bootstrap.sql migrations/*.sql assert.sql | docker exec -i pgt psql -v ON_ERROR_STOP=1 -U postgres -d <db>`. Reconcile migrations must be idempotent + convergent on BOTH the live schema AND a fresh history replay — test both.
 
-**slimcast-obs/** (macOS arm64; the Windows `windows-x64` preset exists but is **unproven** — see `macvpc.md`; needs OBS.app + CMake ≥3.26):
+**slimcast-obs/** (macOS arm64; the Windows `windows-x64` preset exists but is **unproven** — see `docs/macvpc.md`; needs OBS.app + CMake ≥3.26):
 ```bash
 cd slimcast-obs
 cmake --preset macos-arm64
@@ -255,9 +255,11 @@ Latest migration: `20260628000012_primary_platform.sql` (gputest Phase 1 — add
 - AV1 output later (Ada only — RTX 40/L4/L40, not Ampere).
 - Audio: AAC 160k in transcode groups; copied in YouTube passthrough.
 
-## Roadmap / planning docs (untracked, repo root — plans, NOT all shipped)
-- **`gputest.md`** — GPU provider/protocol uniformity. **Phase 1 SHIPPED** (`a7347a6`: all-in-one path deleted, hub-bridge is the only GPU route, broker overhaul — see Current status + Architecture §8). **Phase 2 = the live Twitch H.264 transcode-bridge test — OPEN, never run on a provisioned GPU** (the mpegts-over-TLS transcode bridge is the #1 unknown). Staged test A–H + pre-flight silent-killers live in this doc.
-- **`hevcpasstest.md`** — VPS-hub *passthrough* (no-GPU) live-test runbook. §12 records the path **proven live** OBS→Hetzner hub→YouTube ingest (2026-06-29). **Supersedes `vps-hub-livetest.md`** (now in `docs/archive/`) — treat that older file as dead.
-- **`dualstream.md`** — **PLANNED** vertical 9:16 streaming: TikTok+YouTube first (manual crop ~80% built; smart auto-reframe/face-track is the new work), Twitch Dual Format (multitrack eRTMP) = Phase 3, Kick deferred. **License landmine: use OpenCV YuNet (MIT) or NVIDIA FaceDetect; NEVER Ultralytics YOLO (AGPL → forces backend copyleft) or InsightFace/SCRFD/RetinaFace released weights (non-commercial).** (Doc-internal staleness: its "what already exists" map cites `app/api/agent/config` + `build_group_cmd`, both deleted by `a7347a6`.)
+## Roadmap / planning docs
+Active roadmaps live in **`docs/plans/`** (untracked worklogs); shipped/superseded runbooks in **`docs/archive/`** (index: `docs/archive/README.md`). Lift a still-relevant fact UP into this file rather than reviving an archived doc.
+- **`docs/plans/enterprise-audit.md`** — the **P0–P3 hardening/overhaul roadmap** (the active worklog). Phase 0 shipped 2026-06-30; Phase 5 (billing/margin integrity — CORR-04/COST-02/03) shipped; remaining phases in progress. Deferred follow-ups are logged in `docs/archive/phase5-review-notes.md`.
+- **`docs/plans/dualstream.md`** — **PLANNED** vertical 9:16 streaming: TikTok+YouTube first (manual crop ~80% built; smart auto-reframe/face-track is the new work), Twitch Dual Format (multitrack eRTMP) = Phase 3, Kick deferred. **License landmine: use OpenCV YuNet (MIT) or NVIDIA FaceDetect; NEVER Ultralytics YOLO (AGPL → forces backend copyleft) or InsightFace/SCRFD/RetinaFace released weights (non-commercial).** (Doc-internal staleness: its "what already exists" map cites `app/api/agent/config` + `build_group_cmd`, both deleted by `a7347a6`.)
 - **`mobile/mobileapp.md`** — PLANNED native mobile app (see `mobile/` in Layout).
+- **`docs/production-checklist.md`** — pre-launch cutover checklist.
+- **Archived runbooks (`docs/archive/`):** `gputest.md` (GPU provider/protocol uniformity — Phase 1 shipped `a7347a6`, **Phase 2 PASSED 2026-07-01**: the mpegts-over-TLS transcode bridge is now proven on a provisioned GPU) · `hevcpasstest.md` (VPS-hub passthrough — proven live OBS→hub→YouTube) · `srt-rtmp-split-plan.md` (contingency transport — **superseded** by the shipped hub bridge) · `phase5-review-notes.md` (Phase 5 deferred-items log).
 - **`docs/archive/Slimcast_Complete_Architecture_Blueprint.pdf`** — pre-2026-06-29 blueprint; **STALE, archived** (predates the all-in-one deletion — describes the now-removed direct OBS→GPU topology).

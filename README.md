@@ -18,7 +18,7 @@ terminal: an OBS plugin drives the whole lifecycle from the Start Streaming butt
                                  │ • YouTube: HEVC passthrough│◄──────►│ H.264-encode (NVENC)     │
                                  │ • Twitch eRTMP passthrough │ :8899  │ returns H.264 to the hub │
                                  │ • transcode → bridge ─────►│        └─────────────────────────┘
-                                 │ tee fan-out to platforms   │
+                                 │ per-platform delivery      │
                                  └───────────┬───────────────┘
                                              ▼
                               Twitch · Kick · YouTube · TikTok
@@ -42,25 +42,26 @@ terminal: an OBS plugin drives the whole lifecycle from the Start Streaming butt
 |---|---|
 | `web/` | **Next.js 16 SaaS** — auth, dashboard, billing (Supabase + Stripe), the GPU/hub broker, and the OBS-dock API. Deploys to Vercel. |
 | `relay/` | **The relay Docker image** run on both the hub and the GPU (`agent.py` dispatches on role). MediaMTX + jellyfin-ffmpeg + `supervisor.py`. Built by CI to GHCR. |
-| `slimcast-obs/` | **The OBS plugin** (C++) — the dock that drives provisioning and streaming. Mac `.pkg` today; Windows `.exe` in progress (see [`macvpc.md`](macvpc.md)). |
-| `mobile/` | **Planned** native mobile app ("phone-shaped OBS"). Design only so far. |
-| `docs/` | Architecture notes + `docs/archive/` (historical/shipped design docs). |
+| `slimcast-obs/` | **The OBS plugin** (C++) — the dock that drives provisioning and streaming. Mac `.pkg` today; Windows `.exe` in progress (see [`docs/macvpc.md`](docs/macvpc.md)). |
+| `mobile/` | **Planned** native mobile app ("phone-shaped OBS"). Design only so far (`mobile/mobileapp.md`). |
+| `docs/` | Current docs (`ARCHITECTURE.md`, `PRODUCT_PLAN.md`, `macvpc.md`, `production-checklist.md`) + `plans/` (active roadmaps) + `archive/` (shipped/superseded). |
 
 ## Where to start
 
 - **[`CLAUDE.md`](CLAUDE.md)** is the deep, current reference — architecture invariants, the broker,
   billing, teardown/lease safety, the schema, and the load-bearing decisions. Read it before
   changing anything.
-- **[`macvpc.md`](macvpc.md)** — the Mac-vs-Windows plugin status and the Windows-enablement plan.
-- **Roadmap / test runbooks:** `gputest.md` (GPU transcode-bridge live test — the current #1
-  unknown), `hevcpasstest.md` (hub passthrough — proven live), `dualstream.md` (vertical 9:16),
-  `enterprise-audit.md` (hardening roadmap), `production-checklist.md` (pre-launch cutover).
+- **[`docs/macvpc.md`](docs/macvpc.md)** — the Mac-vs-Windows plugin status and the Windows-enablement plan.
+- **Active plans** (`docs/plans/`): `enterprise-audit.md` (hardening roadmap), `dualstream.md`
+  (vertical 9:16 streaming). Pre-launch cutover: [`docs/production-checklist.md`](docs/production-checklist.md).
+- **Test-runbook history** (`docs/archive/`): `gputest.md` (GPU transcode-bridge — Phase 2 passed),
+  `hevcpasstest.md` (hub passthrough — proven live).
 
 ## Status
 
 - **Hub passthrough → YouTube: proven live** (OBS → Hetzner hub → YouTube, HEVC-over-HLS).
-- **GPU transcode bridge: built, not yet proven on a provisioned GPU** — the mpegts-over-TLS
-  transcode path has only run locally so far (`gputest.md` Phase 2).
+- **GPU transcode bridge: proven on a provisioned GPU** (gputest Phase 2 passed 2026-07-01); the
+  broker's no-GPU RunPod-starvation bug was fixed + live-verified 2026-07-01.
 - **Billing** is two-tier (PAYG + subscription) and **OFF by default** until launch.
 
 > **Platform terms.** SlimCast streams within each platform's terms and does not hide simulcasting.
