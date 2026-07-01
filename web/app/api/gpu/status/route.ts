@@ -1,7 +1,9 @@
+import { after } from 'next/server'
 import { createServerClient } from '@/lib/supabase'
 import { authenticateAgent } from '@/lib/agent-auth'
 import { spendableTokens } from '@/lib/billing'
 import { FALLBACK_LAT, FALLBACK_LON } from '@/lib/datacenters'
+import { refreshYouTubeHealthCache } from '@/lib/youtube-health'
 
 // OBS→hub SRT receive buffer — DYNAMIC per-RTT (enterprise-audit STREAM-01; made per-RTT 2026-07-01).
 //
@@ -156,6 +158,42 @@ export async function GET(request: Request) {
   // line runs on every dock poll (SEC-04). A boolean presence flag is enough to debug.
   console.log(`[gpu/status] effectiveStatus=${effectiveStatus} streaming=${instance.streaming} ip=${instance.ip_address} port=${instance.ingest_port} hls_port=${instance.hls_port ?? 'null'} srt_port=${instance.srt_port ?? 'null'} has_key=${!!instance.ingest_key} rtmp_url=${server}`)
 
+  // ── STREAM-02 Stage B: truthful YouTube liveness overlay ────────────────────────────
+  // YouTube HLS 200-OKs a dead/unbound/revoked key, so the relay reports the youtube
+  // passthrough runner "running" and its dot stays green even when the stream is dead.
+  // Overlay a server-side YouTube Data API verdict (cached on platform_connections,
+  // refreshed off-response via after()) onto the youtube dot. Only ever DOWNGRADES to
+  // 'error' on a CONFIRMED-dead verdict — a warming-up stream ('pending') is left green.
+  type OutputState = { state?: string; platforms?: string[]; [k: string]: unknown }
+  let outputsEffective: OutputState[] =
+    effectiveStatus === 'running' ? ((instance.outputs as OutputState[] | null) ?? []) : []
+
+  if (effectiveStatus === 'running' && outputsEffective.some(o => o.platforms?.includes('youtube'))) {
+    const { data: yt } = await supabase
+      .from('platform_connections')
+      .select('youtube_health, youtube_health_checked_at')
+      .eq('user_id', userId)
+      .eq('platform', 'youtube')
+      .maybeSingle()
+    const health = (yt?.youtube_health as string | null) ?? null
+
+    if (health === 'dead') {
+      outputsEffective = outputsEffective.map(o =>
+        o.platforms?.includes('youtube') ? { ...o, state: 'error' } : o,
+      )
+    }
+
+    // Adaptive re-poll cadence (burst-then-sparse): tight until confirmed 'live', then
+    // sparse; medium while 'dead' (watch for recovery). Runs AFTER the response — never
+    // blocks the poll, never touches the heartbeat path. lib/youtube-health claims the
+    // row atomically so concurrent polls fire at most one YouTube API call.
+    const ttlMs = health === 'live' ? 120_000 : health === 'dead' ? 60_000 : 20_000
+    const checkedAt = yt?.youtube_health_checked_at ? new Date(yt.youtube_health_checked_at).getTime() : 0
+    if (Date.now() - checkedAt > ttlMs) {
+      after(() => refreshYouTubeHealthCache(userId).catch(e => console.error('[yt-health] refresh error:', e)))
+    }
+  }
+
   return Response.json({
     status: effectiveStatus,
     ip: instance.ip_address ?? null,
@@ -169,7 +207,8 @@ export async function GET(request: Request) {
     burn_rate: effectiveStatus === 'running' ? (instance.burn_rate ?? 0) : 0,
     // Per-platform live state for status dots. Stale/stopped pods aren't live.
     streaming: effectiveStatus === 'running' ? (instance.streaming ?? false) : false,
-    outputs: effectiveStatus === 'running' ? (instance.outputs ?? []) : [],
+    // Overlaid with the truthful YouTube liveness verdict (STREAM-02 Stage B).
+    outputs: outputsEffective,
     // The dock shows a countdown + "Yes, still streaming" button when this is set.
     confirm_required: confirmRequired,
     confirm_deadline: instance.max_session_at ?? null,
