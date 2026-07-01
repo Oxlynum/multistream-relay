@@ -491,4 +491,23 @@ export async function sweepExpiredLeases(opts?: { force?: boolean }): Promise<vo
       console.error(`[sweep] gpu backend destroy failed ${n.id}:`, e)
     }
   }
+
+  // ── 4. REL-05 / SCALE-02: heartbeat-driven, fleet-throttled periodic maintenance.
+  // Runs the expensive, low-frequency jobs the lease sweep can't cover — the row-less-orphan
+  // reconcile (a box whose DB row was lost has no lease to read) and the connection_metrics
+  // retention prune. HEARTBEAT PATH ONLY (skipped on the force/cron floor, which runs the
+  // reconcile + prune directly — folding it here too would double-run on the cron). Because
+  // we only reach here on a WINNING, non-frozen sweep (past the try_begin_sweep gate above),
+  // this inherits the ~SWEEP_THROTTLE_MS cadence before it even probes the 15-/30-min periodic
+  // throttles — so the cross-provider reconcile costs ~one probe / sweep window fleet-wide,
+  // not one per beat. The dynamic import breaks the pod-teardown → orphan-reconcile →
+  // vps-broker → pod-teardown module cycle (orphan-reconcile pulls in reraceGpuBackend).
+  if (!opts?.force) {
+    try {
+      const { maybePeriodicMaintenance } = await import('./orphan-reconcile')
+      await maybePeriodicMaintenance()
+    } catch (e) {
+      console.error('[sweep] periodic maintenance error:', e)
+    }
+  }
 }

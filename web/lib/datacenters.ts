@@ -140,3 +140,21 @@ export const CONTROL_PLANE_OUTAGE_MS = 150_000
 //   lease before reaping resumes. Prevents the CORR-01 fleet-wide mass-false-reap. 2 min
 //   is ample margin over the ~10s re-beat cadence.
 export const REAP_RECOVERY_GRACE_MS = 120_000
+
+// ── Heartbeat-driven periodic maintenance throttles (enterprise-audit REL-05 + SCALE-02) ──
+// Vercel Hobby honours only a DAILY cron, so a row-less orphan box (create-succeeded-row-
+// lost) would bill up to ~24h before the daily reaper's listInstances reconcile sees it.
+// Instead we run that reconcile — and the connection_metrics retention prune — off ANY
+// box's heartbeat, but at most once per window fleet-wide via try_begin_periodic() (…000004).
+// These are self-scheduling maintenance cadences, NOT reap-latency knobs (the lease sweep
+// still reaps rowed boxes within ~20s), so minutes-scale intervals are correct.
+//
+//   ORPHAN RECONCILE — how often the (expensive: cross-provider listInstances) row-less-
+//   orphan reconcile may run fleet-wide. 15 min bounds a leaked box's worst-case bill to a
+//   quarter-hour instead of a day, at ~one provider sweep / 15 min regardless of fleet size.
+export const ORPHAN_RECONCILE_THROTTLE_MS = 15 * 60_000
+//
+//   METRICS PRUNE — how often prune_old_connection_metrics() (delete rows >24h) may run
+//   fleet-wide. 30 min keeps the table tight between daily crons; each prune deletes only
+//   the newly-aged tail (BRIN-indexed), so it stays cheap.
+export const METRICS_PRUNE_THROTTLE_MS = 30 * 60_000

@@ -15,11 +15,37 @@ export const TIER_LIMITS: Record<Tier, TierLimits> = {
 }
 
 // Server client for API routes — uses service role key, bypasses RLS.
-export function createServerClient() {
+//
+// Hoisted to a module/globalThis singleton (enterprise-audit SCALE-06). createClient()
+// rebuilds the whole PostgREST + fetch/auth scaffolding on each call, and this is invoked
+// on every heartbeat + dock/dashboard poll (43 call sites). The service client carries NO
+// per-request state — a static service-role key and no user session (every server-side
+// auth.getUser() call passes the JWT explicitly, so it's a stateless verify that never
+// mutates the client's session) — so ONE shared instance is safe and lets Vercel Fluid's
+// warm instance reuse the fetch agent across concurrent invocations instead of churning a
+// new client + TLS agent per request. globalThis-guarded so dev HMR / module re-eval can't
+// spawn duplicates.
+//
+// The type is captured from a factory (ReturnType<typeof makeServerClient>) rather than
+// annotated as ReturnType<typeof createClient>: the latter instantiates createClient's
+// generic with its DEFAULT Database param, which collapses every `.from(t).select()` row to
+// `never` at all 43 call sites. Inferring from the factory preserves the exact query-builder
+// type the un-annotated function returned before, so callers are byte-identical.
+function makeServerClient() {
   return createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.SUPABASE_SERVICE_ROLE_KEY!,
   )
+}
+const _serverClientHolder = globalThis as unknown as {
+  __slimcastServerClient?: ReturnType<typeof makeServerClient>
+}
+
+export function createServerClient() {
+  if (!_serverClientHolder.__slimcastServerClient) {
+    _serverClientHolder.__slimcastServerClient = makeServerClient()
+  }
+  return _serverClientHolder.__slimcastServerClient
 }
 
 // Browser client — uses @supabase/ssr so session is stored in cookies (readable by middleware).

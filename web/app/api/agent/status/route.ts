@@ -9,6 +9,12 @@ import { spendableTokens, type BillingPlatformRow } from '@/lib/billing'
 import { billStreamInterval } from '@/lib/billing-clock'
 import { promoteGpuNodeReady } from '@/lib/gpu-ready'
 
+// The heartbeat's after() runs the throttled periodic maintenance (REL-05 orphan reconcile
+// ~every 15 min) which does cross-provider listInstances() + destroys. Give the post-response
+// work headroom so it completes instead of being cut at the default budget; normal beats
+// finish in <1s and are billed for actual time, so the raised ceiling costs nothing for them.
+export const maxDuration = 60
+
 // Dev billing bypass (single user id) — shared by the pod + hub clocks.
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 function isDevNoBilling(userId: string): boolean {
@@ -80,13 +86,15 @@ async function handleGpuStatus(request: NextRequest, node: NodeAuth): Promise<Re
     await promoteGpuNodeReady(node.nodeId!, { ip: body.ip, bridgePort: body.bridge_port, providerId: body.provider_id })
       .catch(e => console.error('[agent/status] gpu /ready self-heal failed:', e))
   }
-  if (body.bridge && nodeRow?.instance_id && nodeRow?.user_id) {
+  // Down-sample (SCALE-02/REL-04): record a bridge row ONLY while the GPU is actually
+  // transcoding (active). An idle backend would otherwise write a health=0 row every 10s —
+  // unbounded table growth with nothing to plot. The lease-renew + /ready self-heal above
+  // are NOT gated (they must run on every beat); only this telemetry insert is.
+  if (body.bridge?.active && nodeRow?.instance_id && nodeRow?.user_id) {
     // Return leg (GPU→VPS) = the delivered transcode → the meaningful bridge bitrate.
     const egressKbps = Math.max(0, Math.round(body.bridge.egress_kbps ?? 0))
-    const active = body.bridge.active ?? false
-    // Health: transcoding + return flowing = healthy; transcoding but no return bytes
-    // = degraded (bridge stalled); not transcoding = idle.
-    const health = active ? (egressKbps > 0 ? 100 : 50) : 0
+    // Health: return flowing = healthy; transcoding but no return bytes = degraded (stalled).
+    const health = egressKbps > 0 ? 100 : 50
     // AWAIT (not fire-and-forget): handleGpuStatus has no trailing awaited work, so an
     // un-awaited insert would race the Response and can be dropped on Vercel. One ~10ms
     // round-trip on a 10s heartbeat is negligible.
@@ -193,7 +201,18 @@ async function handleVpsStatus(request: NextRequest, hubId: string): Promise<Res
     platformsByUser.set(uid, arr)
   }
 
-  for (const s of sessions ?? []) {
+  // SCALE-05: run each tenant's bill → lease-renew → metrics → refill → Clock-A teardown
+  // CONCURRENTLY instead of serially. A densely-packed hub (the whole point of multi-tenant
+  // packing — 10-20 tenants) otherwise serializes 10-20 deduct_tokens RPCs + UPDATEs + inserts
+  // within one 10s heartbeat (~0.6-2s of serial round-trips), and one slow FOR-UPDATE
+  // deduction stalls every OTHER tenant's beat too. Each tenant touches a DISTINCT user/
+  // instance row and teardownInstance is idempotent, so there is no cross-tenant write
+  // contention; the reconcile_hub_emptiness below still runs AFTER all of them (the barrier),
+  // so the derived count reflects this beat's detaches. allSettled (not all): one tenant's
+  // transient DB/RPC error must NOT reject the whole hub beat — that would skip the reconcile
+  // + the after()-sweep AND leave every OTHER tenant's lease unrenewed this beat (risking a
+  // false-reap of healthy neighbours). Each tenant is independent, so isolate failures.
+  const tenantResults = await Promise.allSettled((sessions ?? []).map(async (s) => {
     const userId = s.user_id as string
     const r = reported.find(x => x.ingest_key === s.ingest_key)
     const streaming = r?.streaming ?? false
@@ -230,15 +249,18 @@ async function handleVpsStatus(request: NextRequest, hubId: string): Promise<Res
       })
       .eq('user_id', userId).eq('vps_hub_id', hubId)
 
-    // Coarse inbound (OBS→hub) health for the dock graph in hub topology. `streaming`
-    // here = OBS is publishing to this tenant's SRT path (honest source-present signal).
-    // The rich per-platform OUTBOUND series needs encoder states the VPS doesn't report
-    // yet (deferred); the bridge series comes from the GPU backend's own heartbeat.
-    if (s.id) {
-      supabase.from('connection_metrics').insert({
+    // Coarse inbound (OBS→hub) health for the dock graph in hub topology. Down-sampled
+    // (SCALE-02/REL-04): write a row ONLY while the OBS source is present — an idle tenant
+    // would otherwise insert a health=0 row every 10s forever (pure table growth with
+    // nothing to plot). AWAITED inside Promise.all (not fire-and-forget) so the insert can't
+    // be dropped when the barrier settles before the Response on Vercel. The rich
+    // per-platform OUTBOUND series needs encoder states the VPS doesn't report yet
+    // (deferred); the bridge series comes from the GPU backend's own heartbeat.
+    if (s.id && streaming) {
+      await supabase.from('connection_metrics').insert({
         instance_id: s.id as string, user_id: userId, direction: 'inbound',
-        platform: null, bitrate_kbps: null, health_score: streaming ? 100 : 0, dropped_frames: 0,
-      }).then(() => {})
+        platform: null, bitrate_kbps: null, health_score: 100, dropped_frames: 0,
+      })
     }
 
     // Try auto-refill before any credits kill (mirrors the pod clock so the two don't diverge).
@@ -255,6 +277,11 @@ async function handleVpsStatus(request: NextRequest, hubId: string): Promise<Res
     } else if (!streaming && idleFor > IDLE_GRACE_S) {
       await teardownInstance(userId, 'hub_clockA:idle_timeout')
     }
+  }))
+  // Surface (don't swallow) any isolated per-tenant failure so a persistent tenant fault is
+  // visible rather than silently degrading that tenant's billing/lease every beat.
+  for (const res of tenantResults) {
+    if (res.status === 'rejected') console.error('[hub] tenant beat failed:', res.reason)
   }
 
   // Scale-to-zero (Clock B, timely path): reconcile emptiness from the DERIVED
