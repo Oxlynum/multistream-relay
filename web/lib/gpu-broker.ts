@@ -137,6 +137,28 @@ export async function startProvisionRace(args: RaceArgs): Promise<RaceResult> {
     return true
   })
 
+  // Cap create attempts per physical LOCATION (provider + datacenter), not just per
+  // host, so one drained datacenter can't burn the whole race budget. RunPod publishes
+  // one candidate per (datacenter × catalog GPU) — its nearest datacenter to the hub can
+  // occupy many of the top-ranked-by-distance slots on its own, and when that datacenter
+  // has zero SECURE-cloud capacity every entry there fails identically (confirmed live
+  // 2026-07-01: RunPod EU-CZ-1 rejected 5 different GPU types with the same "could not
+  // find any pods with required specifications" 500, exhausting the old MAX_CREATE_ATTEMPTS
+  // budget before the race ever reached RunPod's other EU datacenters or a real Vast host —
+  // "no capacity" reported even though capacity existed one datacenter farther out). The
+  // group key falls back to hostId for Vast, where every candidate is already a distinct
+  // physical machine (an independent rentable unit, unlike RunPod's DC-level pool) — so
+  // this must never throttle separate Vast hosts that happen to share a region.
+  const MAX_PER_LOCATION = 2
+  const locationAttempts = new Map<string, number>()
+  const locationCapped = dedupedCandidates.filter(({ c }) => {
+    const locationKey = `${c.provider}:${c.placement.datacenterId ?? c.placement.hostId ?? c.label}`
+    const seen = locationAttempts.get(locationKey) ?? 0
+    if (seen >= MAX_PER_LOCATION) return false
+    locationAttempts.set(locationKey, seen + 1)
+    return true
+  })
+
   const providerByName = new Map(providers.map(p => [p.name, p]))
   // Candidate pool past the rounds already tried (skipN). We fan out racersN at a time,
   // but a create FAILURE (RunPod 500 / no-capacity, a drained region) must NOT end the
@@ -144,7 +166,7 @@ export async function startProvisionRace(args: RaceArgs): Promise<RaceResult> {
   // out. Without this, a single top-ranked host failing to create aborted the whole race
   // and no other provider was ever attempted (e.g. RunPod failed → Vast never tried).
   // Bounded by MAX_CREATE_ATTEMPTS so we never probe an unbounded number of dead hosts.
-  const pool = dedupedCandidates.slice(skipN)
+  const pool = locationCapped.slice(skipN)
   if (pool.length === 0) {
     return { started: false, racerCount: 0, error: 'no untried candidates remaining' }
   }
@@ -152,7 +174,9 @@ export async function startProvisionRace(args: RaceArgs): Promise<RaceResult> {
   // region / provider 500) must not end the race — walk to the next ranked host until
   // racersN pods are live or the pool runs out. Safe because the re-race cascade
   // (reraceGpuBackend) keys off the racers[] array, not a fixed per-round stride.
-  const MAX_CREATE_ATTEMPTS = racersN + 4
+  // Raised 4→8 (on top of racersN) so the race can walk past several fully-drained
+  // locations (now capped at MAX_PER_LOCATION tries each) and still reach a working one.
+  const MAX_CREATE_ATTEMPTS = racersN + 8
 
   const createOne = async ({ c, distKm }: { c: GpuCandidate; distKm: number }): Promise<boolean> => {
     const provider = providerByName.get(c.provider)
