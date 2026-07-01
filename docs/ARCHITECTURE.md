@@ -1,169 +1,82 @@
-# HEVC → H.264 Transcoding Multistreamer — Architecture & Plan
+# SlimCast — Architecture Overview
 
-Stream 1080p60 fast-paced FPS (Call of Duty, Destiny 2) from a Mac mini M4
-to Twitch, Kick and YouTube simultaneously, using a rented RTX 4060 on RunPod
-as a cloud transcode + fan-out relay.
+> This is a readable map of the current pipeline. **The load-bearing, authoritative reference is
+> [`/CLAUDE.md`](../CLAUDE.md)** (§ "Architecture (load-bearing)") — read it before changing
+> anything. This file intentionally stays high-level so the two can't drift.
+>
+> _History: the original design was a direct OBS→GPU "all-in-one" relay on a single rented pod. That
+> path was **deleted 2026-06-29** in favor of the VPS-hub topology below. The pre-2026-06-29
+> blueprint lives in [`archive/`](archive/)._
 
-> Multistreaming note: this is built to run **within each platform's terms**.
-> Kick allows simulcasting but pays a reduced rate when you're not exclusive —
-> use Kick's official "Multistream" toggle if you want full revenue eligibility.
-> Nothing here hides simulcasting from any platform.
+## The shape
 
----
-
-## 1. Why a cloud relay at all
-
-Your Mac uploads **one** HEVC stream to the RunPod box. The box decodes once and
-fans out to every platform on **RunPod's** bandwidth, not yours. So your modest
-10–20 Mbps uplink only ever carries a single stream — the three outbound streams
-(which together can exceed 24 Mbps) leave from the datacenter.
+One efficient HEVC upload from OBS becomes many platform streams — and the heavy fan-out leaves a
+datacenter, not the streamer's uplink.
 
 ```
-                 ~10-12 Mbps HEVC                  RunPod RTX 4060 (datacenter uplink)
-  Mac mini M4  ───────────────────────►  ┌─────────────────────────────────────────┐
-  OBS, HEVC                              │  MediaMTX (ingest, TCP)                    │
-  enhanced-RTMP                          │      │ republish locally (RTSP, loopback) │
-                                         │      ▼                                     │
-                                         │  ┌───────────── relay supervisor ───────┐ │
-                                         │  │ YouTube : HEVC copy → HLS (no re-enc) │─┼─► YouTube (HEVC)
-                                         │  │ Twitch  : NVENC H.264 → RTMP          │─┼─► Twitch  (H.264)
-                                         │  │ Kick    : NVENC H.264 → RTMP(S)       │─┼─► Kick    (H.264)
-                                         │  └───────────────────────────────────────┘ │
-                                         │  Control panel (web UI) on HTTP port        │
-                                         └─────────────────────────────────────────────┘
+  OBS (Mac or PC)                 Trusted VPS hub (Hetzner)            Cloud GPU (Vast / RunPod)
+  any HEVC encoder     HEVC/SRT   ┌────────────────────────────┐  TLS  ┌────────────────────────┐
+  ────────────────────────────►   │ MediaMTX SRT ingest :8890  │ :8899 │ NVDEC HEVC-decode       │
+  Apple VT / NVENC /              │ passthrough (no GPU):      │◄─────►│ NVENC  H.264-encode     │
+  AMF / QSV                       │  • YouTube  HEVC→HLS       │bridge │ (one shared encode      │
+                                  │  • Twitch   HEVC eRTMP*    │       │  per orientation)       │
+                                  │ transcode → TLS bridge ───►│       │ returns H.264 to hub    │
+                                  │ tee fan-out to platforms   │       └────────────────────────┘
+                                  └─────────────┬──────────────┘
+                                                ▼
+                                Twitch · Kick · YouTube · TikTok
 ```
 
----
+\* Twitch HEVC eRTMP passthrough is used only for accounts Twitch authorizes for it; everyone else
+falls through to the H.264 transcode group.
 
-## 2. The transport decision (and the RunPod gotcha)
+## Source: any HEVC hardware encoder, Mac or PC
 
-The original plan was SRT for the Mac→cloud hop. **RunPod Pods do not forward UDP**,
-and SRT is UDP-only, so SRT can't reach the pod through normal RunPod networking.
+OBS → hub ingest is **HEVC over SRT** — a bitstream transport. The hub and GPU decode HEVC and do
+**not** care what produced it, so the source can be **Apple VideoToolbox** (macOS) or **NVENC /
+AMF / QSV** (Windows). The only Apple-specific nuance is a technical one: VideoToolbox emits
+*temporal-layered* HEVC, which is why the internal loopback uses **SRT, not RTSP** (RTSP mangles
+temporal layers). NVENC/AMF/QSV HEVC with a B-pyramid hits the same path.
 
-The fix that keeps your HEVC source intact: **Enhanced RTMP carrying HEVC over TCP.**
-OBS 30+ negotiates HEVC (and AV1) over enhanced RTMP with a server that advertises
-support. MediaMTX advertises it. This rides RunPod's **Direct TCP** port mapping with
-no quality loss — it's a bitstream transport, not a re-encode.
+## Load-bearing invariants (summary — full detail in `CLAUDE.md`)
 
-| Option | Carries HEVC? | Works through RunPod? | Verdict |
-|---|---|---|---|
-| SRT (UDP) | yes | **no** (UDP blocked) | not usable on RunPod Pods |
-| Plain RTMP (TCP) | no (H.264 only) | yes | loses your HEVC source |
-| **Enhanced-RTMP HEVC (TCP)** | **yes** | **yes** | **chosen** |
+1. **One way to reach a GPU.** OBS → SRT → **trusted VPS hub** → mpegts-over-TLS bridge (`:8899`) →
+   GPU → H.264 back to the hub → hub pushes to platforms. OBS never publishes to a GPU.
+2. **Stream keys never reach a rented GPU.** The hub holds keys and does all platform delivery; the
+   GPU only transcodes and returns video.
+3. **Internal loopback is SRT, not RTSP** (temporal-layered HEVC — see above).
+4. **Hardware codecs only.** NVDEC decode + NVENC H.264 encode on the GPU; CPU only for the portrait
+   crop/scale. YouTube landscape is `-c copy` HEVC passthrough (no re-encode).
+5. **Passthrough runs GPU-free on the hub.** A GPU is rented only when an H.264 platform (Kick,
+   TikTok, non-eligible Twitch) needs a transcode.
+6. **Broker picks the GPU, never a human.** Ranked by NVENC-driver preference → proximity **to the
+   hub** (the VPS↔GPU bridge leg dominates latency) → price, under a hard $/hr ceiling. Providers
+   (Vast, RunPod, more later) are interchangeable behind one TCP bridge protocol.
+7. **No idle billing.** A universal renew-deadline **lease** (heartbeat-driven) plus a daily reaper
+   tears down hubs and GPUs when a stream ends or a box goes dark.
+8. **Vercel stores config; the box executes it.** Stream keys live encrypted in Supabase; the relay
+   polls its role config and posts heartbeats. Keys are AES-256-GCM at rest and decrypted only to
+   the trusted hub.
 
-If you ever move off RunPod to a box with a real public IP + UDP (a bare VPS, AWS,
-etc.), switch the uplink back to SRT — MediaMTX accepts SRT ingest too, and the
-relay logic is unchanged.
+## Components
 
----
+- **`web/`** — Next.js 16 on Vercel: auth, dashboard, billing (Supabase + Stripe), the hub/GPU
+  broker, and the OBS-dock API. See `CLAUDE.md` → "Key files / web".
+- **`relay/`** — one Docker image, two roles (`agent.py` dispatches on `RELAY_ROLE`): the **hub**
+  (`main_vps`, MediaMTX + passthrough + tee fan-out) and the **GPU backend** (`main_gpu`, the TLS
+  bridge + NVDEC/NVENC transcode). Built by CI to GHCR.
+- **`slimcast-obs/`** — the C++ OBS plugin/dock that drives the whole lifecycle. Encoder-agnostic
+  detection (Apple VT / NVENC / QSV / AMF). Windows build status: [`macvpc.md`](../macvpc.md).
 
-## 3. End-to-end pipeline
+## Encoder tuning (the "crisp in fast motion" part)
 
-**Ingest (MediaMTX, runs always).** Listens for enhanced-RTMP HEVC on the pod's
-exposed TCP port. Remuxes (no transcode) and republishes the live feed on a
-loopback RTSP URL (`rtsp://127.0.0.1:8554/live`) that the encoders pull from.
-Loopback RTSP/TCP is lossless and rock-solid — no packet loss like a network UDP hop.
+The GPU's shared H.264 encode is tuned for high-motion quality — `p7 / tune hq / fullres`, CBR with
+2× bufsize, `bf=2 b_ref_mode=middle`, `rc-lookahead=32`, spatial+temporal AQ (`aq-strength=8`), a
+2s GOP aligned to HLS segments, and `forced-idr=1`. These are load-bearing quality settings — see
+`CLAUDE.md` → `supervisor.py` notes (and its NVENC-flag landmines) before touching them.
 
-**Egress (the supervisor, one FFmpeg process per platform).** Each enabled output
-pulls the loopback feed and does its own thing, independently. If one platform
-connection drops, the others keep running, and the supervisor auto-restarts the
-dead one with backoff.
+## Roadmap & test runbooks
 
-- **YouTube** — `-c copy` of the HEVC bitstream into HLS TS segments, PUT to
-  YouTube's HLS ingest URL. Zero re-encode = zero added quality loss.
-- **Twitch** — NVDEC decode → `h264_nvenc` → RTMP. Twitch ingest is H.264-only.
-- **Kick** — NVDEC decode → `h264_nvenc` → RTMP(S). Kick accepts generous bitrates.
-
-One decode, then separate NVENC encodes. The RTX 4060's 8th-gen NVENC handles
-multiple simultaneous 1080p60 H.264 encodes without breaking a sweat.
-
----
-
-## 4. Encoder tuning for high-motion FPS (the "crisp" part)
-
-Fast camera pans in COD/Destiny are where bitrate and AQ earn their keep. Defaults
-baked into the relay:
-
-- `-preset p7 -tune hq -multipass fullres` — highest-quality NVENC mode (Ada).
-- `-rc cbr` with `bufsize == bitrate` — streaming-stable, platform-friendly.
-- `-bf 3 -b_ref_mode middle` — B-frames as references, better detail at the same bitrate.
-- `-rc-lookahead 20` — lets the encoder spend bits where motion spikes.
-- `-spatial-aq 1 -temporal-aq 1 -aq-strength 8` — preserves texture/detail across
-  the frame and over time; the single biggest visible win in fast motion.
-- `-g {fps*2}` — 2-second keyframe interval, aligned with OBS and HLS segments.
-
-**Bitrate is king for FPS.** Set each platform as high as it allows:
-
-| Platform | Practical 1080p60 ceiling | Notes |
-|---|---|---|
-| Twitch | ~6,000–8,500 kbps | Higher only via Enhanced Broadcasting / partner. 8000 is a safe aggressive default. |
-| Kick | ~8,000+ kbps | Generous; you can push higher than Twitch. |
-| YouTube | source bitrate (passthrough) | Re-encodes on their side anyway; HEVC source ~10–12 Mbps is plenty. |
-
-These are editable live from the control panel.
-
-**Source bitrate from the Mac.** With a 10–20 Mbps uplink, target the HEVC source at
-~60–70% of your *measured stable* upload (run a speed test). Roughly 10–12 Mbps HEVC
-at 1080p60 looks excellent and transcodes cleanly to 8 Mbps H.264 (HEVC is ~40–50%
-more efficient, so a 10 Mbps HEVC source has more real detail than an 8 Mbps H.264 one).
-
----
-
-## 5. OBS settings on the Mac mini M4
-
-- **Encoder:** Apple VT H265 Hardware Encoder (the M4's media engine).
-- **Rate control:** CBR, bitrate ≈ 10,000–12,000 kbps (fit your uplink).
-- **Keyframe interval:** **2 s** (fixed — required so YouTube HLS segments and the
-  NVENC GOP line up cleanly).
-- **Profile:** main. **Resolution:** 1920×1080. **FPS:** 60.
-- **Audio:** AAC, 160 kbps, 48 kHz, stereo.
-- **Stream service:** *Custom…*
-  - Server: `rtmp://<RUNPOD_PUBLIC_IP>:<TCP_PORT>/live`
-  - Stream key: `stream` (or whatever you set; the relay pulls `/live`)
-- OBS must be **v30 or newer** for enhanced-RTMP HEVC.
-
----
-
-## 6. RunPod setup essentials
-
-- Use a **Secure Cloud** pod for a **stable public IP** (Community Cloud IPs can
-  change on restart/migration).
-- In the pod/template **Expose TCP Ports**, add:
-  - `1935` — RTMP ingest (OBS → pod). Note the mapped external port in
-    *Connect → TCP Port Mapping*; OBS uses that external port.
-  - `8080` — control-panel web UI (reach it via the RunPod HTTP proxy or the
-    direct TCP mapping).
-- GPU: any RTX 4060 (Ada) instance. NVENC + NVDEC are the only GPU features used.
-- The control panel handles **stream keys** — protect it. A panel password is
-  required (env `RELAY_PASSWORD`); never expose it unauthenticated.
-
----
-
-## 7. Control panel (frontend)
-
-A single-page web UI served by the relay lets you, live, without SSH:
-
-- edit **stream keys / ingest URLs** per platform,
-- set **max bitrate** per platform,
-- set **output resolution and FPS** per platform (e.g. send Kick 1080p60 but a
-  720p60 copy somewhere else),
-- enable/disable each destination,
-- **start / stop / restart** the whole pipeline or one output,
-- watch per-output **status** (running / restarting / error) and a **live log tail**.
-
-Changes are saved to `config.json` and applied by restarting only the affected
-FFmpeg processes.
-
----
-
-## 8. Things to verify on first run (honest caveats)
-
-- This code is written carefully but **cannot be tested against live Twitch/Kick/
-  YouTube endpoints from here** — first run is on your pod.
-- Confirm your **MediaMTX build accepts enhanced-RTMP HEVC** (current releases do;
-  pinned in the Dockerfile).
-- **YouTube HLS** is the fiddliest leg: create an *HLS* stream key in YouTube Studio,
-  copy the ingestion URL into the panel. If segments are rejected, drop YouTube to
-  H.264 transcode mode (one toggle) as a fallback.
-- Watch the first few minutes of each platform's stream-health dashboard for dropped
-  frames and adjust bitrate down if the platform reports congestion.
+`gputest.md` (GPU transcode-bridge live test — the current #1 unknown) · `hevcpasstest.md` (hub
+passthrough — proven live) · `dualstream.md` (vertical 9:16) · `enterprise-audit.md` (hardening) ·
+`docs/PRODUCT_PLAN.md` (business/licensing) · `docs/srt-rtmp-split-plan.md` (contingency transport).

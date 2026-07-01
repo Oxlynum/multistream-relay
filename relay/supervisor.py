@@ -38,8 +38,9 @@ import urllib.request
 
 CONFIG_PATH = os.environ.get("RELAY_CONFIG", "config.json")
 # Loopback feed republished by MediaMTX. We pull over SRT (MPEG-TS), NOT RTSP:
-# RTSP/RTP mangles Apple's temporal-layered HEVC ("Illegal temporal ID" →
-# dropped frames / artifacts). SRT carries HEVC cleanly.
+# RTSP/RTP mangles temporal-layered HEVC ("Illegal temporal ID" → dropped
+# frames / artifacts) — Apple VideoToolbox emits it, and NVENC/AMF do too with
+# a B-pyramid. SRT carries HEVC cleanly.
 # Note: MediaMTX <v1.15.0 had a DTS extractor bug with Apple VT HEVC that closed
 # SRT connections ("DTS is not monotonically increasing"). Fixed in v1.15.0
 # (issue #4892). Dockerfile pins MediaMTX to v1.19.1+ which includes this fix.
@@ -531,7 +532,7 @@ def build_ertmp_cmd(out: dict, source: str = LOCAL_SOURCE) -> list[str]:
       1. A per-session ingest URL + auth token from GetClientConfiguration
          (_resolve_ertmp_url; using the raw key disconnects with exit 187).
       2. Broadcast Performance Metrics (BPM) SEI on every IDR, or Twitch drops the
-         connection a few seconds in. A raw `-c copy` of Apple VT HEVC has none, so
+         connection a few seconds in. A raw `-c copy` of hardware-encoder HEVC (Apple VT, NVENC, …) has none, so
          bpm_inject.py appends them at the bitstream level (no re-encode).
 
     Pipeline: jellyfin-ffmpeg reads the SRT loopback and re-muxes to MPEG-TS; the

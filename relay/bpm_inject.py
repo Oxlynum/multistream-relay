@@ -6,7 +6,7 @@ Twitch's Enhanced Broadcasting ingest requires Broadcast Performance Metrics
 (BPM) SEI messages on every IDR access unit — it's one of the two mandatory
 features (the other is the GetClientConfiguration call, handled in
 supervisor.py). OBS inserts these from its encoder; a raw `-c copy` passthrough
-of Apple VideoToolbox HEVC has none, so Twitch accepts the connection, receives
+of hardware-encoder HEVC (Apple VideoToolbox, NVENC, AMF, …) has none, so Twitch accepts the connection, receives
 a few seconds, then disconnects ("Broadcast performance metrics do not precede
 every IDR on every track").
 

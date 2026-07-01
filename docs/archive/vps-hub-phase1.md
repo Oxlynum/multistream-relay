@@ -1,3 +1,5 @@
+> **📦 ARCHIVED — SHIPPED 2026-06-29.** Multi-tenant VPS-hub passthrough. Design record only; `CLAUDE.md` is current. Moved here 2026-06-30.
+
 # VPS-Hub Phase 1 — Multi-Tenant Passthrough (implementation doc)
 
 > Status: IN PROGRESS. Produced 2026-06-28 from a code-grounded design pass (4 parallel

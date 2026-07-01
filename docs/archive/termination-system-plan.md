@@ -1,3 +1,5 @@
+> **📦 ARCHIVED — SHIPPED.** Universal termination/lease system (migrations `…000009`/`…000010`). Design record only; `CLAUDE.md` is current. Moved here 2026-06-30.
+
 # SlimCast — Universal Termination System Plan
 
 **Status:** PLAN — approved-direction, not yet implemented. No code changed as of this writing.

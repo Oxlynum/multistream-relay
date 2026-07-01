@@ -1,3 +1,5 @@
+> **📦 ARCHIVED — SHIPPED.** VPS-as-the-hub architecture; Phases 1–2 are built and the hub is the only user→GPU path. Kept as the design record — the live source of truth is `CLAUDE.md`. Moved here 2026-06-30.
+
 # VPS-as-the-Hub — Implementation Plan
 
 > Status: PLAN (not yet implemented). Produced 2026-06-28 from a full-codebase recon

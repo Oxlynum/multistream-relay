@@ -1,69 +1,68 @@
-# Transcoder Multistream Project
+# SlimCast
 
-Upload one efficient **HEVC** stream from a Mac (Apple hardware encoder) to a
-rented cloud GPU; the GPU transcodes and fans it out to **Twitch, Kick, and
-YouTube** at once. Built for low-upload streamers and multistreamers — HEVC
-carries good 1080p60 through a connection that couldn't push H.264.
+**Consumer multistreaming, without the upload tax.** You stream **one** efficient HEVC feed
+from OBS; SlimCast fans it out to **Twitch, Kick, YouTube, and TikTok** at once — and the
+bandwidth-heavy fan-out leaves from a datacenter, not your home uplink. Nothing requires a
+terminal: an OBS plugin drives the whole lifecycle from the Start Streaming button.
 
-Status: **working end-to-end** (Twitch confirmed live at 1080p). Currently
-hardening quality and moving toward a UDP/SRT host. See the product plan for the
-path to a sellable, white-label, self-hosted product.
+> **Works on Mac and PC.** Your source can be **any HEVC-capable hardware encoder** — Apple
+> VideoToolbox on macOS, or NVIDIA NVENC / AMD AMF / Intel QSV on Windows. HEVC's efficiency is
+> what carries clean 1080p60 (and 1440p) through a connection that could never push H.264.
 
-## Project structure
+## How it works
 
 ```
-transcoder-multistream-project/
-├── README.md            ← you are here
-├── CLAUDE.md            ← context for continuing in Claude Code
-├── relay/               ← the deployable server (upload THIS to your GPU box)
-│   ├── app.py           control-panel API + auth
-│   ├── supervisor.py    builds/supervises the per-platform FFmpeg processes
-│   ├── static/index.html  the control-panel UI (also runs as an OBS dock)
-│   ├── mediamtx.yml     ingest server config (RTMP in, SRT republish)
-│   ├── hook.sh          OBS-triggered auto start/stop
-│   ├── setup.sh         one-command installer (FFmpeg + MediaMTX + deps)
-│   ├── run.sh           one-command launcher (your password/token baked in)
-│   ├── start.sh         starts MediaMTX + the control panel
-│   ├── config.example.json
-│   ├── requirements.txt
-│   ├── Dockerfile / docker-compose.yml
-│   └── README.md        deploy + OBS setup walkthrough
-└── docs/
-    ├── ARCHITECTURE.md  how the pipeline works + tuning + caveats
-    └── PRODUCT_PLAN.md  productization: model, codecs, licensing, roadmap
+  OBS (Mac or PC)                Trusted VPS hub (Hetzner)              Cloud GPU (Vast / RunPod)
+  any HEVC encoder    HEVC/SRT   ┌───────────────────────────┐  TLS   ┌─────────────────────────┐
+  ───────────────────────────►  │ SRT ingest (:8890)         │ bridge │ HEVC-decode (NVDEC)      │
+                                 │ • YouTube: HEVC passthrough│◄──────►│ H.264-encode (NVENC)     │
+                                 │ • Twitch eRTMP passthrough │ :8899  │ returns H.264 to the hub │
+                                 │ • transcode → bridge ─────►│        └─────────────────────────┘
+                                 │ tee fan-out to platforms   │
+                                 └───────────┬───────────────┘
+                                             ▼
+                              Twitch · Kick · YouTube · TikTok
 ```
 
-## Quick start (deploy the relay)
+- **One upload.** OBS publishes a single HEVC stream over **SRT** to a trusted VPS **hub**
+  (Hetzner) — never directly to a rented GPU.
+- **Passthrough is GPU-free.** YouTube (HLS) and eligible-Twitch (HEVC eRTMP) are served straight
+  from the hub with no re-encode — no GPU rented.
+- **Transcode is bridged.** For H.264 platforms (Kick, TikTok, non-eligible Twitch) the hub bridges
+  the feed over **mpegts-over-TLS (TCP)** to a cloud GPU that HEVC-decodes → H.264-encodes and
+  returns the video to the hub, which pushes to every platform.
+- **Stream keys never reach the GPU.** The hub holds the keys and does all platform delivery; a
+  rented GPU only transcodes and returns video.
+- **No idle billing.** The hub and GPU are provisioned when you Start Streaming and torn down when
+  you stop (a universal lease + reaper backstop cleans up orphans).
 
-On your GPU box, from inside `relay/`:
+## Repository layout
 
-```bash
-bash setup.sh                 # installs FFmpeg (jellyfin, driver-matched) + MediaMTX
-bash run.sh                   # launches everything (edit your password/token in run.sh)
-```
+| Path | What it is |
+|---|---|
+| `web/` | **Next.js 16 SaaS** — auth, dashboard, billing (Supabase + Stripe), the GPU/hub broker, and the OBS-dock API. Deploys to Vercel. |
+| `relay/` | **The relay Docker image** run on both the hub and the GPU (`agent.py` dispatches on role). MediaMTX + jellyfin-ffmpeg + `supervisor.py`. Built by CI to GHCR. |
+| `slimcast-obs/` | **The OBS plugin** (C++) — the dock that drives provisioning and streaming. Mac `.pkg` today; Windows `.exe` in progress (see [`macvpc.md`](macvpc.md)). |
+| `mobile/` | **Planned** native mobile app ("phone-shaped OBS"). Design only so far. |
+| `docs/` | Architecture notes + `docs/archive/` (historical/shipped design docs). |
 
-Then point OBS at the box and add the control panel as an OBS dock. Full
-step-by-step is in `relay/README.md`.
+## Where to start
 
-## RunPod vs Vultr (host choice)
+- **[`CLAUDE.md`](CLAUDE.md)** is the deep, current reference — architecture invariants, the broker,
+  billing, teardown/lease safety, the schema, and the load-bearing decisions. Read it before
+  changing anything.
+- **[`macvpc.md`](macvpc.md)** — the Mac-vs-Windows plugin status and the Windows-enablement plan.
+- **Roadmap / test runbooks:** `gputest.md` (GPU transcode-bridge live test — the current #1
+  unknown), `hevcpasstest.md` (hub passthrough — proven live), `dualstream.md` (vertical 9:16),
+  `enterprise-audit.md` (hardening roadmap), `production-checklist.md` (pre-launch cutover).
 
-The application is **host-agnostic** — the same code runs anywhere. The only
-difference is the **uplink transport**:
+## Status
 
-- **RunPod** is TCP-only (no UDP) → uplink uses **enhanced-RTMP (HEVC over TCP)**.
-  Fine for development and for users on strong connections.
-- **Vultr / AWS / other UDP-capable hosts** → uplink can use **SRT**, which
-  shrugs off latency, jitter, and packet loss. This is the better transport for
-  weak/unstable uploads and is the production target.
+- **Hub passthrough → YouTube: proven live** (OBS → Hetzner hub → YouTube, HEVC-over-HLS).
+- **GPU transcode bridge: built, not yet proven on a provisioned GPU** — the mpegts-over-TLS
+  transcode path has only run locally so far (`gputest.md` Phase 2).
+- **Billing** is two-tier (PAYG + subscription) and **OFF by default** until launch.
 
-Switching providers is a config change (open a UDP port, point OBS at `srt://`),
-not a rewrite. Develop features on either; validate final quality on a
-UDP/SRT host located near you.
-
-## Codec roadmap
-
-- **HEVC** — today, via hardware codecs only (Apple VT encode, NVENC/NVDEC).
-- **AV1** — royalty-free, ~30% more efficient, a future server-side output on
-  **Ada-class GPUs** (RTX 40-series / L4 / L40). Ampere (A16) is HEVC-only.
-
-See `docs/PRODUCT_PLAN.md` for the full strategy, licensing posture, and roadmap.
+> **Platform terms.** SlimCast streams within each platform's terms and does not hide simulcasting.
+> Kick pays a reduced rate when you are not exclusive — use Kick's official Multistream toggle for
+> full revenue eligibility.

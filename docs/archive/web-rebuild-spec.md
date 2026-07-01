@@ -1,3 +1,5 @@
+> **📦 ARCHIVED — SHIPPED (front-end rebuild, 2026-06-28→29).** Design record for the shadcn/Base-UI system now live in `web/`. Moved here 2026-06-30.
+
 # SlimCast Front-End Rebuild Spec — "Creator Energy, Premium Grade"
 
 **Project root (REAL):** `/Users/danielaltom/Desktop/claude/abstrascapes/slimcast/web`

@@ -115,8 +115,10 @@ AV1 specifics that constrain the build:
   the AV1 tier must target Ada GPUs. (The RTX 4060 used early in development has
   AV1 encode; the Vultr A16 does not.)
 - **Apple M-series (through M4) can decode but not hardware-encode AV1**, so AV1
-  can't be the *uplink* codec from a Mac. AV1 is a **server-side output**: Mac
-  sends HEVC up, the GPU transcodes HEVC → AV1 for platforms that want it.
+  can't be the *uplink* codec from a Mac. (A PC on an Ada-class GPU / Intel Arc /
+  AMD RDNA3 *can* AV1-encode, but the design keeps the uplink uniform: **HEVC from
+  every source, Mac or PC.**) AV1 is a **server-side output**: the source sends
+  HEVC up, the GPU transcodes HEVC → AV1 for platforms that want it.
 
 Product framing: **HEVC uplink everywhere; H.264 output today; AV1 output as a
 premium/"future-proof" tier on Ada-class servers.**

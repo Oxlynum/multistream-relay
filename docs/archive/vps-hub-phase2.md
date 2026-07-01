@@ -1,3 +1,5 @@
+> **📦 ARCHIVED — BUILD COMPLETE.** GPU-bridge + multi-provider catalog. The remaining live GPU-transcode test is tracked in `gputest.md` (Phase 2). Design record only. Moved here 2026-06-30.
+
 # VPS-Hub Phase 2 — GPU Bridge + Multi-Provider Catalog (implementation doc)
 
 > Status: BUILD COMPLETE (2026-06-28) — P2–P9 done, adversarially reviewed (8 defects fixed), tsc +
