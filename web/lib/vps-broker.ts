@@ -58,6 +58,10 @@ export interface AcquireHubArgs {
   imageTag: string
   callbackUrl: string
   supabase: Supa
+  // SPIN-03: pre-ranked hub candidates. When the caller already ranked (to derive the GPU
+  // race's geo-anchor and overlap the two provisions), pass them so we don't re-run the
+  // ~10s Hetzner catalog fetch. Omitted → we rank internally (the standalone path).
+  candidates?: VpsCandidate[]
 }
 
 export interface AcquireHubResult {
@@ -83,7 +87,7 @@ function parseImageLogin(): { server: string; username: string; password: string
   return { username: m[1], password: m[2], server: m[3] }
 }
 
-async function rankCandidates(lat: number, lon: number): Promise<VpsCandidate[]> {
+export async function rankCandidates(lat: number, lon: number): Promise<VpsCandidate[]> {
   const lists = await Promise.all(
     ACTIVE_VPS_PROVIDERS.map(async p => {
       try { return await p.listCandidates({ maxPricePerHr: VPS_PRICE_CEILING }) }
@@ -110,10 +114,13 @@ async function attach(supabase: Supa, userId: string, region: string): Promise<A
   if (!hub || !hub.id) return null
 
   const live = hub.status === 'live'
+  // NOTE (SPIN-03): attach does NOT set topology/needs_transcode. The provision route sets
+  // the 'passthrough_only' DEFAULT on the claim row up-front, and startGpuBackendRace
+  // overrides it to 'vps_gpu' for a transcode tenant. Keeping those columns OUT of this
+  // update makes attach and the concurrent GPU race write DISJOINT columns on gpu_instances,
+  // so they can run in parallel without a last-writer-wins race on topology.
   await supabase.from('gpu_instances').update({
     vps_hub_id: hub.id,
-    topology: 'passthrough_only',
-    needs_transcode: false,
     ip_address: hub.ip_address,
     srt_port: HUB_SRT_PORT,
     srt_passphrase: hub.srt_passphrase,   // the hub's SHARED passphrase (wildcard path)
@@ -272,7 +279,8 @@ export async function acquireHubOrSpawn(args: AcquireHubArgs): Promise<AcquireHu
   // Clear any wedged 'spawning' hubs first so a stuck box can't block this region.
   await reclaimStuckSpawningHubs(supabase)
 
-  const candidates = await rankCandidates(lat, lon)
+  // SPIN-03: reuse the caller's ranking when provided (overlap path) — else rank here.
+  const candidates = args.candidates ?? await rankCandidates(lat, lon)
   if (candidates.length === 0) return { ok: false, error: 'no VPS capacity available' }
 
   // Regions nearest-first (dedup, preserving order).

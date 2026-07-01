@@ -1,7 +1,7 @@
 import { createServerClient } from '@/lib/supabase'
 import { generateApiKey, authenticateUserOrAgent } from '@/lib/agent-auth'
 import { type UserOutputConfig } from '@/lib/gpu-broker'
-import { acquireHubOrSpawn, startGpuBackendRace } from '@/lib/vps-broker'
+import { acquireHubOrSpawn, startGpuBackendRace, rankCandidates, type AcquireHubResult } from '@/lib/vps-broker'
 import { classifyMode, needsTranscode } from '@/lib/agent-config'
 import { teardownInstance, sweepExpiredLeases } from '@/lib/pod-teardown'
 import { checkRateLimit } from '@/lib/rate-limit'
@@ -126,6 +126,16 @@ export async function POST(request: Request) {
       user_id: userId,
       provider_id: '',
       status: 'provisioning',
+      // SPIN-03: set the topology DEFAULT here (was: attach()). Owning it on the claim row
+      // means attach() and the concurrent startGpuBackendRace write DISJOINT gpu_instances
+      // columns, so they can run in parallel. A transcode tenant gets overridden to 'vps_gpu'
+      // by the race; a passthrough tenant keeps 'passthrough_only'. (A transcode tenant that
+      // gets NO GPU capacity keeps topology='vps_gpu' but its gpu_backend node is marked
+      // ended, and hub-config gates the bridge on the node reaching phase='ready' — so it
+      // still degrades to passthrough delivery; unchanged from pre-SPIN-03.) topology is a
+      // nullable text column with no DB default, so it MUST be set explicitly.
+      topology: 'passthrough_only',
+      needs_transcode: false,
       max_session_at: new Date(Date.now() + MAX_SESSION_MS).toISOString(),
       // Boot-window lease so a pod that boots a real box but dies before its first
       // heartbeat is swept in ~PROVISION_LEASE_MS+grace instead of leaking until the 12h
@@ -196,22 +206,56 @@ export async function POST(request: Request) {
   // EVERY stream ingests to the VPS hub first — passthrough (YouTube/eligible-Twitch)
   // delivers VPS-direct; transcode (Kick/TikTok/non-eligible-Twitch) bridges to a GPU
   // backend behind the hub. No user ever goes straight to a GPU.
-  const hub = await acquireHubOrSpawn({ userId, lat, lon, imageTag, callbackUrl, supabase })
-  if (!hub.ok) {
+  // SPIN-03: rank hub regions ONCE, then OVERLAP the hub acquire with the GPU race instead
+  // of summing their provider latencies serially (Hetzner catalog + spawn, THEN Vast/RunPod
+  // offer-search + create). The GPU race anchors on the nearest hub region's coords
+  // (candidates[0]); the hub lands there in the common case, and a rare attach to the 2nd-
+  // nearest region is still EU-adjacent so the VPS↔GPU bridge leg stays short. Safe to run
+  // concurrently because attach() and startGpuBackendRace now write DISJOINT gpu_instances
+  // columns (the 'passthrough_only' topology default was moved to the claim row above).
+  const candidates = await rankCandidates(lat, lon)
+  if (candidates.length === 0) {
     await releaseClaim()
+    return Response.json({ error: 'No VPS capacity available right now.' }, { status: 503 })
+  }
+  const anchor = candidates[0]
+
+  // allSettled (not all): both branches RETURN a result object on every normal
+  // error/no-capacity path, so a rejection here is only a raw network fault. Using
+  // allSettled guarantees we still reach the cleanup branch below on such a fault — with
+  // Promise.all, a hub-branch throw after the GPU race already booted a box would skip the
+  // teardown and leak the box until the lease sweep (~6.5 min). Settle → always clean up.
+  const [hubRes, gpuRes] = await Promise.allSettled([
+    acquireHubOrSpawn({ userId, lat, lon, candidates, imageTag, callbackUrl, supabase }),
+    needsGpu
+      ? startGpuBackendRace({
+          userId, instanceId: claim.id, hubLat: anchor.lat, hubLon: anchor.lon,
+          imageTag, callbackUrl, userOutputs, supabase,
+        })
+      : Promise.resolve(null),
+  ])
+  let hub: AcquireHubResult
+  if (hubRes.status === 'fulfilled') {
+    hub = hubRes.value
+  } else {
+    console.error('[provision] hub acquire threw:', hubRes.reason)
+    hub = { ok: false, error: 'hub acquire failed' }
+  }
+  const gpu = gpuRes.status === 'fulfilled' ? gpuRes.value : null
+  if (gpuRes.status === 'rejected') console.error('[provision] gpu race threw:', gpuRes.reason)
+
+  if (!hub.ok) {
+    // The hub is the ONLY ingress — no hub, no stream. Tear down anything the concurrent GPU
+    // race created (its box + node + key) so it can't leak, then release the claim.
+    // teardownInstance is the idempotent all-in-one destroy (it also drops the claim row);
+    // for a passthrough tenant there's no GPU, so a plain releaseClaim is enough.
+    if (needsGpu) await teardownInstance(userId, 'provision:hub_acquire_failed')
+    else await releaseClaim()
     return Response.json({ error: 'No VPS capacity available right now.', detail: hub.error }, { status: 503 })
   }
 
   if (needsGpu) {
-    // Transcode tenant: race a GPU backend anchored on the HUB's region (across all
-    // backend providers). acquireHubOrSpawn's attach() set topology='passthrough_only';
-    // startGpuBackendRace overrides it to 'vps_gpu' + links the gpu_backend node.
-    // On no-capacity it DEGRADES (passthrough keeps serving) — never direct-to-GPU.
-    const gpu = await startGpuBackendRace({
-      userId, instanceId: claim.id, hubLat: hub.lat ?? null, hubLon: hub.lon ?? null,
-      imageTag, callbackUrl, userOutputs, supabase,
-    })
-    console.log(`[provision] VPS hub + GPU bridge for ${userId}: hub=${hub.hubId} status=${hub.status} gpu=${gpu.ok ? gpu.nodeId : 'NO-CAPACITY(' + gpu.error + ')'}`)
+    console.log(`[provision] VPS hub + GPU bridge for ${userId}: hub=${hub.hubId} status=${hub.status} gpu=${gpu?.ok ? gpu.nodeId : 'NO-CAPACITY(' + (gpu?.error ?? 'null') + ')'}`)
   } else {
     console.log(`[provision] VPS hub ${hub.attached ? 'attached' : 'spawned'} for ${userId}: hub=${hub.hubId} status=${hub.status} region=${hub.region}`)
   }

@@ -30,10 +30,13 @@ const DEFAULT_IMAGE = process.env.HETZNER_IMAGE || 'ubuntu-22.04'
 // Unset (prod default) → fall back to DEFAULT_IMAGE + the full install cloud-init.
 // REBUILD the snapshot whenever the relay image changes (it bakes a specific image).
 const SNAPSHOT_ID = process.env.HETZNER_SNAPSHOT_ID || ''
-// Known-good disk floor (GB) used when SNAPSHOT_ID is set but the live /images lookup
-// fails — so a transient error fails CLOSED (keeps excluding too-small types) instead of
-// dropping onto the cheapest 40GB type and 422-ing every cold spawn. Our snapshot is baked
-// on an 80GB box; override if you rebake on a different base.
+// Disk floor (GB) used ONLY when SNAPSHOT_ID is set but the live /images lookup fails.
+// Normally listCandidates reads the snapshot's real disk_size at runtime; this is the
+// fallback so a transient lookup error fails CLOSED (over-floors → excludes too-small types
+// → picks a larger type that can still restore the snapshot) rather than admitting a type
+// too small and 422-ing every cold spawn. The build script sets HETZNER_SNAPSHOT_DISK_GB to
+// the snapshot's actual size (the current snapshot is baked on a 40GB cx23); this 80 default
+// is a conservative over-floor for when that env is unset.
 const SNAPSHOT_DISK_GB_FALLBACK = Number(process.env.HETZNER_SNAPSHOT_DISK_GB || 80)
 
 // Soft floor for a server type to be a viable hub: it must terminate SRT + remux +

@@ -332,9 +332,48 @@ if (!KEEP_OLD) {
   }
 }
 
+// The snapshot's authoritative disk_size = what the broker's disk-floor reads at runtime.
+let snapshotDiskGb = pick.st.disk
+try {
+  const sr = await hz(`/images/${snapshotId}`)
+  if (sr.ok) { const d = Number(((await sr.json()).image?.disk_size) ?? 0); if (d > 0) snapshotDiskGb = d }
+} catch { /* fall back to the builder type's disk */ }
+
+// Auto-repoint Vercel. This prune-then-mint script leaves a NEW id; without repointing, the
+// pruned old id stays live in Vercel → hetzner.create() passes a 404 image → EVERY cold hub
+// spawn fails. Set BOTH the id and the disk-floor fallback (so a rebake on a different base
+// can't 422). No-op with a clear manual fallback when Vercel creds aren't in the env.
+const VC_TOKEN = fromEnvFile('VERCEL_TOKEN')
+const VC_PROJECT = fromEnvFile('VERCEL_PROJECT_ID')
+const VC_TEAM = fromEnvFile('VERCEL_ORG_ID')
+async function vercelSetEnv(key, value) {
+  const b = 'https://api.vercel.com'
+  const h = { Authorization: `Bearer ${VC_TOKEN}`, 'Content-Type': 'application/json' }
+  const listR = await fetch(`${b}/v9/projects/${VC_PROJECT}/env?teamId=${VC_TEAM}`, { headers: h })
+  for (const e of ((await listR.json()).envs ?? []).filter(e => e.key === key)) {
+    await fetch(`${b}/v9/projects/${VC_PROJECT}/env/${e.id}?teamId=${VC_TEAM}`, { method: 'DELETE', headers: h })
+  }
+  const cr = await fetch(`${b}/v10/projects/${VC_PROJECT}/env?teamId=${VC_TEAM}`, {
+    method: 'POST', headers: h,
+    body: JSON.stringify({ key, value: String(value), type: 'encrypted', target: ['production'] }),
+  })
+  if (!cr.ok) throw new Error(`set ${key} → HTTP ${cr.status}`)
+}
+
 console.log('\n── Done ──────────────────────────────────────')
-console.log(`Snapshot image id: ${snapshotId}`)
-console.log('\nNext steps:')
-console.log(`  1. vercel env add HETZNER_SNAPSHOT_ID   → enter: ${snapshotId}   (Production)`)
-console.log('  2. Redeploy (vercel --prod) so the broker boots hubs from the snapshot.')
-console.log('  3. Re-run this script after any relay image change (it bakes a specific image).')
+console.log(`Snapshot image id: ${snapshotId}  (disk_size ${snapshotDiskGb}GB)`)
+if (VC_TOKEN && VC_PROJECT && VC_TEAM) {
+  try {
+    await vercelSetEnv('HETZNER_SNAPSHOT_ID', snapshotId)
+    await vercelSetEnv('HETZNER_SNAPSHOT_DISK_GB', snapshotDiskGb)
+    console.log('✅ Vercel prod env auto-updated: HETZNER_SNAPSHOT_ID + HETZNER_SNAPSHOT_DISK_GB.')
+    console.log('   Redeploy (or push to main) so the broker boots hubs from this snapshot.')
+  } catch (e) {
+    console.error('⚠️  auto-repoint failed:', e instanceof Error ? e.message : e)
+    console.log(`   Set manually (Production), then redeploy: HETZNER_SNAPSHOT_ID=${snapshotId}, HETZNER_SNAPSHOT_DISK_GB=${snapshotDiskGb}`)
+  }
+} else {
+  console.log('\nNo Vercel creds in env (VERCEL_TOKEN/PROJECT_ID/ORG_ID) — set manually (Production), then redeploy:')
+  console.log(`  HETZNER_SNAPSHOT_ID=${snapshotId}   HETZNER_SNAPSHOT_DISK_GB=${snapshotDiskGb}`)
+}
+console.log('Re-run this script after any relay image change (it bakes a specific image).')
