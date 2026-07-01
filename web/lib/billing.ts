@@ -110,10 +110,9 @@ export function buildBillingContext(
   outputSettings: OutputSettingsMap,
   has2kAddon: boolean,
   streaming: boolean,
-  // Billing fairness: when the budget controller has throttled the effective resolution
-  // below 1440p, the user isn't getting 2K, so we don't charge the +0.5 2K adder for that
-  // interval — even though their config still says 1440p.
-  resolutionThrottledBelow1440 = false,
+  // NOTE (ARCH-01): dropped the resolutionThrottledBelow1440 param — the hub budget-throttle
+  // that would have set it is deferred (CLAUDE.md §9a), so it was always false. When the
+  // throttle returns, re-add it here to suppress the 2K adder while throttled below 1440p.
 ): BillingContext {
   if (!streaming) {
     return { landscapePlatforms: [], portraitPlatforms: [], passthroughPlatforms: [], has1440p: false, needsProfessionalGpu: false }
@@ -138,7 +137,6 @@ export function buildBillingContext(
   const allRunning = [...landscapePlatforms, ...portraitPlatforms, ...passthroughPlatforms]
   const has1440p =
     has2kAddon &&
-    !resolutionThrottledBelow1440 &&
     allRunning.some(p => outputSettings[p]?.resolution === '1440p')
 
   const userOutputs: UserOutputConfig[] = enabled.map(p => ({

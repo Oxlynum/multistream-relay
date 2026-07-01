@@ -18,9 +18,12 @@ import {
 // was long ago (missed beats / restart) — avoids surprise overcharges.
 export const MAX_BILL_INTERVAL_S = 60
 
-// Budget tiers 0–1 keep 1440p; tier ≥2 has downscaled to ≤1080p, so a 2K user throttled
-// there shouldn't be charged the 2K adder for that interval.
-const THROTTLE_BELOW_1440_TIER = 2
+// NOTE (ARCH-01, removed 2026-06-30): the budget-throttle inputs (throttleTier /
+// throttledBelow1440) were deleted from this clock. The hub-side BudgetController that would
+// have written them was removed 2026-06-29 (CLAUDE.md §9a), so nothing ever set them —
+// throttledBelow1440 was permanently false and the 2K-suppression branch was dead. When the
+// hub throttle is reintroduced (a future VPS/billing plan, §9a is the doc of record), re-add
+// the tier input HERE and re-thread it into buildBillingContext.
 
 export interface BillProfile {
   plan?: string | null
@@ -54,7 +57,6 @@ export async function billStreamInterval(opts: {
   profile: BillProfile | null
   platforms: BillingPlatformRow[]
   streaming: boolean
-  throttleTier?: number
   lastSeenAtMs: number
   nowMs: number
   billingActive: boolean
@@ -62,15 +64,14 @@ export async function billStreamInterval(opts: {
 }): Promise<BillResult> {
   const {
     userId, profile, platforms, streaming,
-    throttleTier = 0, lastSeenAtMs, nowMs, billingActive, devBypass = false,
+    lastSeenAtMs, nowMs, billingActive, devBypass = false,
   } = opts
 
   const plan: Plan = profile?.plan === 'subscription' ? 'subscription' : 'payg'
   const outputSettings = (profile?.output_settings as OutputSettingsMap) ?? {}
   const has2kAddon = profile?.has_2k_addon ?? false
-  const throttledBelow1440 = throttleTier >= THROTTLE_BELOW_1440_TIER
 
-  const ctx = buildBillingContext(platforms, outputSettings, has2kAddon, streaming, throttledBelow1440)
+  const ctx = buildBillingContext(platforms, outputSettings, has2kAddon, streaming)
   const burnRate = computeBurnRate(ctx, streaming, plan)
 
   const elapsed = Math.min(Math.max(0, (nowMs - lastSeenAtMs) / 1000), MAX_BILL_INTERVAL_S)

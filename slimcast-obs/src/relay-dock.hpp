@@ -78,10 +78,8 @@ private:
     void setSlimcastService(const QString &server, const QString &key);
     // Write SlimCast's recommended encoder settings into the active OBS profile.
     void applyRecommendedSettings(const QString &encId, int bframeFamily, int bitrate);
-    // Budget throttle: lower the LIVE stream encoder's bitrate mid-stream when the
-    // pod signals it's approaching the cost ceiling. Distinct from
-    // applyRecommendedSettings (which writes a JSON profile for pre-stream setup).
-    void applyIngestThrottle(int kbps);
+    // (ARCH-01/UX-06, removed 2026-06-30): applyIngestThrottle() was declared here — the
+    // hub throttle that drove it is deferred (CLAUDE.md §9a). Re-add when it returns.
 
     bool eventFilter(QObject *obj, QEvent *event) override;
     void restoreObsStreamBtn();   // snap back to OBS's saved style/text immediately
@@ -150,8 +148,6 @@ private:
     qint64 m_failoverWindowStartMs = 0; // REL-01: start of the rolling failover-count window (0 = none yet)
     bool m_serverLostHandled = false;   // REL-01: latch so a sustained run of status=='error' polls fires failover ONCE per episode
     bool m_failoverPending = false;     // REL-01: a reconnect singleShot is armed — suppress the stop-handler's destroy + "Stopping…" overwrite
-    int  m_appliedThrottleKbps = 0; // last throttle bitrate we pushed (0 = none/unthrottled)
-    int  m_originalBitrateKbps = 0; // user's configured bitrate, captured before first throttle
 
     GpuInfo                   m_lastGpuInfo;
     QMap<QString, PlatformConfig> m_platforms;  // platform -> current config

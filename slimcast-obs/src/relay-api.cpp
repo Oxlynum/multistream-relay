@@ -85,11 +85,10 @@ void RelayApi::fetchGpuStatus()
             info.creditsTokens = obj["credits_seconds"].toInt(0) / 3600.0;
         info.burnRate       = obj["burn_rate"].toDouble(0);
         info.streaming      = obj["streaming"].toBool(false);
-        // Budget throttle: the pod's suggested OBS source bitrate + cost telemetry.
-        info.suggestedIngestKbps = obj["suggested_ingest_kbps"].toInt(0);
-        info.throttleActive = obj["throttle_active"].toBool(false);
-        info.throttleTier   = obj["throttle_tier"].toInt(0);
-        info.costUsdHr      = obj["cost_usd_hr"].toDouble(0);
+        // (ARCH-01/UX-06, removed 2026-06-30): the budget-throttle + cost fields
+        // (suggested_ingest_kbps / throttle_active / throttle_tier / cost_usd_hr) were
+        // parsed here but the throttle never fired (hub controller deferred, CLAUDE.md §9a)
+        // and cost was never rendered. /api/gpu/status no longer sends them.
         info.confirmRequired = obj["confirm_required"].toBool(false);
         info.hasBridge       = obj["has_bridge"].toBool(false);
         info.has2kAddon      = obj["has_2k_addon"].toBool(false);

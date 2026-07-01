@@ -849,22 +849,10 @@ void RelayDock::onGpuStatusUpdated(GpuInfo info)
     } else {
         m_orphanTicks = 0;
     }
-
-    // ── Budget throttle: apply the pod's suggested OBS source bitrate ────────────
-    // The pod's cost controller asks us to lower the encoder when it's near the
-    // ceiling (the only lever that cuts ingress + YouTube passthrough). Only while
-    // actually streaming; a suggestion of 0 means "no throttle" → restore once.
-    if (obsActive) {
-        if (info.suggestedIngestKbps > 0) {
-            if (info.suggestedIngestKbps != m_appliedThrottleKbps)
-                applyIngestThrottle(info.suggestedIngestKbps);
-        } else if (m_appliedThrottleKbps != 0) {
-            // Pod stopped throttling — restore the user's configured bitrate.
-            applyIngestThrottle(0);
-        }
-    } else {
-        m_appliedThrottleKbps = 0;   // reset between streams
-    }
+    // (ARCH-01/UX-06, removed 2026-06-30): the budget-throttle apply-loop lived here — it
+    // read info.suggestedIngestKbps and drove applyIngestThrottle(). The hub throttle that
+    // would set that suggestion is deferred (CLAUDE.md §9a), so it was always 0 and this
+    // never fired. Removed with applyIngestThrottle() + the GpuInfo throttle fields.
 }
 
 void RelayDock::render(const GpuInfo &info)
@@ -898,9 +886,6 @@ void RelayDock::render(const GpuInfo &info)
             if (!anyRunning)   { text = "OBS connected · starting…"; color = C_WARN; }
             else if (anyErr)   { text = "Live · platform error";      color = C_ERR;  }
             else if (anyRestart) { text = "Live · reconnecting…";     color = C_WARN; }
-            // Budget throttle: stream stays up, quality was auto-adjusted to keep the
-            // pod within its cost ceiling. Calm/amber — informational, not an error.
-            else if (info.throttleActive) { text = "Live · quality auto-adjusted"; color = C_WARN; }
             else               { text = "Live";                        color = C_LIVE; }
         } else {
             text = "Server ready · waiting for OBS";     color = C_WARN;
@@ -1659,8 +1644,7 @@ void RelayDock::applyRecommendedSettings(const QString &encId, int bfFamily, int
     // 2) Profile config — output mode, encoder selection.
     //    NB: we deliberately do NOT touch OBS's "DynamicBitrate" flag. It's an
     //    RTMP/TCP-only congestion feature and a no-op over SRT (our ingest path),
-    //    so writing it just left the user's setting in a misleading state. SlimCast
-    //    does its own live bitrate adaptation server-side via applyIngestThrottle().
+    //    so writing it just left the user's setting in a misleading state.
     if (config_t *cfg = obs_frontend_get_profile_config()) {
         config_set_string(cfg, "Output", "Mode", "Advanced");
         config_set_string(cfg, "AdvOut", "Encoder", encId.toUtf8().constData());
@@ -1682,43 +1666,8 @@ void RelayDock::applyRecommendedSettings(const QString &encId, int bfFamily, int
     setSlimcastService(server, key);
 }
 
-// Lower (or restore) the LIVE video encoder's bitrate mid-stream. Called from the
-// status poll when the pod's budget controller signals throttling: a lower OBS
-// source bitrate cuts both ingress (OBS→pod) and YouTube HEVC passthrough egress
-// in one move — the levers the pod can't touch itself.
-//
-//   kbps > 0 : throttle to this bitrate (capturing the user's value on first apply)
-//   kbps = 0 : restore the user's original configured bitrate
-//
-// Uses the same obs_encoder_update() path OBS's own "Dynamic Bitrate" congestion
-// control uses, so it applies without restarting the encoder on the encoders that
-// support it (incl. Apple VideoToolbox, which maps it to VTCompressionSession's
-// AverageBitRate). Verify on the M4 that VT HEVC honours it live (plan Phase 3 risk).
-void RelayDock::applyIngestThrottle(int kbps)
-{
-    obs_output_t *output = obs_frontend_get_streaming_output();   // new ref
-    if (!output) return;
-
-    obs_encoder_t *venc = obs_output_get_video_encoder(output);   // borrowed
-    if (venc) {
-        obs_data_t *settings = obs_encoder_get_settings(venc);    // new ref
-        const int current = static_cast<int>(obs_data_get_int(settings, "bitrate"));
-
-        int target;
-        if (kbps > 0) {
-            if (m_appliedThrottleKbps == 0) m_originalBitrateKbps = current;  // remember once
-            target = kbps;
-        } else {
-            target = m_originalBitrateKbps > 0 ? m_originalBitrateKbps : current;
-        }
-
-        if (target != current) {
-            obs_data_set_int(settings, "bitrate", target);
-            obs_encoder_update(venc, settings);
-            blog(LOG_INFO, "[slimcast] budget throttle: encoder bitrate %d -> %d kbps", current, target);
-        }
-        obs_data_release(settings);
-        m_appliedThrottleKbps = kbps;
-    }
-    obs_output_release(output);
-}
+// (ARCH-01/UX-06, removed 2026-06-30): applyIngestThrottle() lived here — it lowered/restored
+// the live OBS encoder bitrate when the pod's budget controller asked (via obs_encoder_update,
+// the same path OBS's Dynamic Bitrate uses). That controller is deferred (CLAUDE.md §9a), so it
+// never fired. Re-add it — plus the GpuInfo throttle fields and the /api/gpu/status payload —
+// when the hub-side throttle returns.

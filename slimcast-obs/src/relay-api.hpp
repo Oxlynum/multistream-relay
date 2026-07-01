@@ -23,14 +23,8 @@ struct GpuInfo {
     bool    confirmRequired  = false;
     qint64  confirmDeadlineMs = 0;
     QMap<QString, QString> platformStates;
-    // ── Budget throttle ────────────────────────────────────────────────────────
-    // When the pod's cost controller throttles, it asks the plugin to lower the OBS
-    // encoder bitrate — the only lever that cuts both ingress and YouTube passthrough
-    // egress. suggestedIngestKbps <= 0 means "no throttle, leave the encoder alone".
-    int     suggestedIngestKbps = 0;
-    bool    throttleActive = false;
-    int     throttleTier   = 0;
-    double  costUsdHr      = 0;   // live infra cost shown in the dock banner
+    // (ARCH-01/UX-06, removed 2026-06-30): suggestedIngestKbps/throttleActive/throttleTier
+    // (dead — hub throttle deferred, CLAUDE.md §9a) + costUsdHr (parsed but never rendered).
     // True when this stream transcodes via a GPU backend behind the VPS hub — enables
     // the health graph's "GPU bridge" (VPS↔GPU) series. False for all-in-one/passthrough.
     bool    hasBridge      = false;
