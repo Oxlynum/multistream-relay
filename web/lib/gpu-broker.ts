@@ -19,6 +19,7 @@
 
 import { PRICE_CEILING } from '@/lib/datacenters'
 import { ACTIVE_GPU_PROVIDERS } from '@/lib/providers'
+import { captureError } from '@/lib/observability'
 import type { GpuCandidate, GpuProvider, PodEnv } from '@/lib/providers/types'
 import type { UserOutputConfig } from '@/lib/nvenc-utils'
 export type { UserOutputConfig } from '@/lib/nvenc-utils'
@@ -50,6 +51,10 @@ export async function rankedCandidates(
         return await p.listCandidates({ maxPricePerHr, needsProfessionalGpu })
       } catch (err) {
         console.error(`[broker] ${p.name} listCandidates failed:`, err instanceof Error ? err.message : err)
+        // TEMP-DIAG (no-gpu investigation): a provider's catalog fetch throwing (e.g. a
+        // 401 from a stale key) silently yields [] → the race can find "no capable host".
+        // Surface it so ONE re-test tells us if the empty list is auth vs genuinely no offers.
+        captureError('broker.listCandidates', err, { provider: p.name, maxPricePerHr, alert: true })
         return []
       }
     }),
@@ -166,6 +171,13 @@ export async function startProvisionRace(args: RaceArgs): Promise<RaceResult> {
       return true
     } catch (err) {
       console.error(`[broker/race] ${c.provider} ${c.gpuKey} @ ${c.label} failed to create:`, err instanceof Error ? err.message : err)
+      // TEMP-DIAG (no-gpu investigation): per-host create failure carries the EXACT provider
+      // rent error (e.g. Vast's "insufficient credit" / offer-taken / body reject). If the key
+      // is fine but every create fails, this is where the reason lands.
+      captureError('broker.race.create', err, {
+        provider: c.provider, gpuKey: c.gpuKey, label: c.label,
+        offerId: String((c.placement as { offerId?: unknown }).offerId ?? ''), alert: true,
+      })
       return false
     }
   }

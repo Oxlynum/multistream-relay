@@ -14,7 +14,7 @@
 import { createServerClient } from '@/lib/supabase'
 import { generateApiKey, hashApiKey } from '@/lib/agent-auth'
 import { getVpsProvider, getProvider, ACTIVE_VPS_PROVIDERS, ACTIVE_GPU_PROVIDERS } from '@/lib/providers'
-import { captureError } from '@/lib/observability'
+import { captureError, reportServerError } from '@/lib/observability'
 import { buildCloudInit } from '@/lib/cloud-init'
 import { haversineKm, startProvisionRace, type RacerEntry, type UserOutputConfig } from '@/lib/gpu-broker'
 import { teardownHub } from '@/lib/pod-teardown'
@@ -435,6 +435,14 @@ export async function startGpuBackendRace(args: {
 
   if (!race.started) {
     console.error(`[vps-broker] gpu backend race found no capacity for ${userId}: ${race.error}`)
+    // TEMP-DIAG (no-gpu investigation): AWAITED so the verdict can't be dropped when the
+    // background race function ends. race.error === 'no capable host available' ⇒ the ranked
+    // list was EMPTY (see broker.listCandidates captures for why); undefined ⇒ candidates
+    // existed but every create failed (see broker.race.create captures for the rent error).
+    await reportServerError('vps-broker.gpu_race_no_capacity',
+      new Error(race.error ?? 'all create attempts failed (candidates existed)'), {
+        userId, nodeId, hubLat, hubLon, racerCount: race.racerCount, raceError: race.error ?? null, alert: true,
+      })
     await supabase.from('relay_nodes').update({ phase: 'ended', status: 'error' }).eq('id', nodeId)
     return { ok: false, nodeId, error: race.error }
   }
@@ -591,6 +599,11 @@ export async function reraceGpuBackend(nodeId: string, supabase: Supa): Promise<
 
   if (!race.started) {
     console.error(`[vps-broker] gpu re-race found no capacity for ${userId}: ${race.error}`)
+    // TEMP-DIAG (no-gpu investigation): same verdict capture on the reaper's mid-stream re-race.
+    await reportServerError('vps-broker.gpu_rerace_no_capacity',
+      new Error(race.error ?? 'all create attempts failed (candidates existed)'), {
+        userId, nodeId, hubLat, hubLon, racerCount: race.racerCount, raceError: race.error ?? null, alert: true,
+      })
     await supabase.from('relay_nodes').update({ phase: 'ended', status: 'error' }).eq('id', nodeId)
     return { ok: false, nodeId, error: race.error }
   }
