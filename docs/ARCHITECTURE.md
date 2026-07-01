@@ -21,7 +21,7 @@ datacenter, not the streamer's uplink.
   AMF / QSV                       │  • YouTube  HEVC→HLS       │bridge │ (one shared encode      │
                                   │  • Twitch   HEVC eRTMP*    │       │  per orientation)       │
                                   │ transcode → TLS bridge ───►│       │ returns H.264 to hub    │
-                                  │ tee fan-out to platforms   │       └────────────────────────┘
+                                  │ per-platform delivery      │       └────────────────────────┘
                                   └─────────────┬──────────────┘
                                                 ▼
                                 Twitch · Kick · YouTube · TikTok
@@ -63,7 +63,7 @@ temporal layers). NVENC/AMF/QSV HEVC with a B-pyramid hits the same path.
 - **`web/`** — Next.js 16 on Vercel: auth, dashboard, billing (Supabase + Stripe), the hub/GPU
   broker, and the OBS-dock API. See `CLAUDE.md` → "Key files / web".
 - **`relay/`** — one Docker image, two roles (`agent.py` dispatches on `RELAY_ROLE`): the **hub**
-  (`main_vps`, MediaMTX + passthrough + tee fan-out) and the **GPU backend** (`main_gpu`, the TLS
+  (`main_vps`, MediaMTX + passthrough + per-platform delivery) and the **GPU backend** (`main_gpu`, the TLS
   bridge + NVDEC/NVENC transcode). Built by CI to GHCR.
 - **`slimcast-obs/`** — the C++ OBS plugin/dock that drives the whole lifecycle. Encoder-agnostic
   detection (Apple VT / NVENC / QSV / AMF). Windows build status: [`macvpc.md`](../macvpc.md).
