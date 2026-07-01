@@ -1,7 +1,7 @@
 import { createServerClient } from '@/lib/supabase'
-import { getOAuthConfig, createOAuthState, callbackUrl } from '@/lib/oauth'
+import { getOAuthConfig, createOAuthState, callbackUrl, deriveCodeVerifier, codeChallengeS256 } from '@/lib/oauth'
 
-const OAUTH_PLATFORMS = new Set(['twitch', 'youtube', 'facebook'])
+const OAUTH_PLATFORMS = new Set(['twitch', 'youtube', 'kick', 'facebook'])
 
 export async function GET(
   request: Request,
@@ -39,6 +39,13 @@ export async function GET(
   if (platform === 'youtube') {
     url.searchParams.set('access_type', 'offline')
     url.searchParams.set('prompt', 'consent')
+  }
+
+  // PKCE (Kick / OAuth 2.1): send the S256 challenge; the callback re-derives the
+  // verifier from the same signed state — nothing to persist between the two hops.
+  if (cfg.pkce) {
+    url.searchParams.set('code_challenge', codeChallengeS256(deriveCodeVerifier(state)))
+    url.searchParams.set('code_challenge_method', 'S256')
   }
 
   return Response.json({ url: url.toString() })

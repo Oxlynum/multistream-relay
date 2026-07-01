@@ -1,6 +1,6 @@
 // Platform OAuth helpers: state signing, token refresh, per-platform configs.
 
-import { createHmac, randomBytes } from 'crypto'
+import { createHmac, createHash, randomBytes } from 'crypto'
 import { encryptSecret, decryptSecret } from '@/lib/crypto'
 import { createServerClient } from '@/lib/supabase'
 
@@ -53,6 +53,27 @@ export function verifyOAuthState(state: string): { userId: string; platform: str
 }
 
 // ---------------------------------------------------------------------------
+// PKCE (RFC 7636) — required by OAuth-2.1 providers (Kick)
+// ---------------------------------------------------------------------------
+
+/**
+ * Derive the PKCE code_verifier deterministically from the signed state token.
+ * This keeps the flow stateless (no verifier to persist between authorize and
+ * callback) while never transmitting the verifier — only its S256 challenge
+ * goes to the provider, and the state (which IS public) can't yield the verifier
+ * without STREAM_KEY_SECRET. base64url(HMAC-SHA256) = 43 chars, all within the
+ * RFC 7636 unreserved verifier alphabet.
+ */
+export function deriveCodeVerifier(state: string): string {
+  return createHmac('sha256', stateSecret()).update(`pkce:${state}`).digest('base64url')
+}
+
+/** S256 code_challenge = base64url(SHA-256(code_verifier)). */
+export function codeChallengeS256(verifier: string): string {
+  return createHash('sha256').update(verifier).digest('base64url')
+}
+
+// ---------------------------------------------------------------------------
 // Per-platform OAuth config
 // ---------------------------------------------------------------------------
 
@@ -63,6 +84,8 @@ export interface OAuthConfig {
   scopes: string[]
   clientId: () => string | undefined
   clientSecret: () => string | undefined
+  /** Provider mandates PKCE (S256) on the authorization-code flow (Kick / OAuth 2.1). */
+  pkce?: boolean
 }
 
 export const OAUTH_CONFIGS: Record<string, OAuthConfig> = {
@@ -81,6 +104,17 @@ export const OAUTH_CONFIGS: Record<string, OAuthConfig> = {
     scopes: ['https://www.googleapis.com/auth/youtube'],
     clientId: () => process.env.GOOGLE_CLIENT_ID,
     clientSecret: () => process.env.GOOGLE_CLIENT_SECRET,
+  },
+  kick: {
+    name: 'Kick',
+    // Kick OAuth 2.1 — auth/token live on id.kick.com; API on api.kick.com.
+    authUrl: 'https://id.kick.com/oauth/authorize',
+    tokenUrl: 'https://id.kick.com/oauth/token',
+    // streamkey:read → stream URL + key; channel:read → channel object; user:read → identity.
+    scopes: ['user:read', 'channel:read', 'streamkey:read'],
+    clientId: () => process.env.KICK_CLIENT_ID,
+    clientSecret: () => process.env.KICK_CLIENT_SECRET,
+    pkce: true,
   },
   facebook: {
     name: 'Facebook',
@@ -113,7 +147,7 @@ export interface TokenSet {
   scope?: string
 }
 
-export async function exchangeCode(platform: string, code: string): Promise<TokenSet> {
+export async function exchangeCode(platform: string, code: string, codeVerifier?: string): Promise<TokenSet> {
   const cfg = getOAuthConfig(platform)
   if (!cfg) throw new Error(`Unknown platform: ${platform}`)
 
@@ -128,6 +162,8 @@ export async function exchangeCode(platform: string, code: string): Promise<Toke
     client_id: clientId,
     client_secret: clientSecret,
   })
+  // PKCE providers (Kick) require the verifier that matches the authorize challenge.
+  if (codeVerifier) params.set('code_verifier', codeVerifier)
 
   const res = await fetch(cfg.tokenUrl, {
     method: 'POST',
@@ -267,6 +303,33 @@ export async function fetchYouTubeStreamKey(accessToken: string): Promise<{ rtmp
   if (!rtmpUrl || !streamKey) throw new Error('YouTube API did not return ingest info')
 
   return { rtmpUrl, streamKey }
+}
+
+/**
+ * Fetch the Kick stream URL + key for the authenticated user.
+ * GET /public/v1/channels with no params returns the caller's own channel
+ * (requires the streamkey:read scope for the nested stream.key/url).
+ * Kick stream URLs + keys are persistent and reusable across sessions.
+ */
+export async function fetchKickStreamKey(accessToken: string): Promise<{ rtmpUrl: string; streamKey: string }> {
+  const res = await fetch('https://api.kick.com/public/v1/channels', {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  })
+
+  if (!res.ok) {
+    const err = await res.text()
+    throw new Error(`Kick channels fetch failed: ${err}`)
+  }
+
+  const json = await res.json() as {
+    data?: Array<{ stream?: { key?: string; url?: string } }>
+  }
+
+  const stream = json.data?.[0]?.stream
+  if (!stream?.key || !stream?.url) {
+    throw new Error('Kick API did not return a stream key/url (streamkey:read scope granted?)')
+  }
+  return { rtmpUrl: stream.url, streamKey: stream.key }
 }
 
 /**

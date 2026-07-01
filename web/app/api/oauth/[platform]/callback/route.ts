@@ -6,14 +6,19 @@ import {
   verifyOAuthState,
   exchangeCode,
   saveOAuthTokens,
+  getOAuthConfig,
+  deriveCodeVerifier,
   fetchTwitchStreamKey,
   fetchYouTubeStreamKey,
+  fetchKickStreamKey,
   fetchFacebookStreamKey,
 } from '@/lib/oauth'
 
 const PLATFORM_DEFAULTS: Record<string, { rtmp_url: string; bitrate_kbps: number; orientation: string }> = {
   twitch:   { rtmp_url: 'rtmps://live.twitch.tv:443/app',                  bitrate_kbps: 8000, orientation: 'landscape' },
   youtube:  { rtmp_url: 'rtmp://a.rtmp.youtube.com/live2',                 bitrate_kbps: 9000, orientation: 'landscape' },
+  // rtmp_url is a fallback — the Kick API returns the real ingest URL, which overrides it.
+  kick:     { rtmp_url: 'rtmps://stream.kick.com/',                        bitrate_kbps: 8000, orientation: 'landscape' },
   facebook: { rtmp_url: 'rtmps://live-api-s.facebook.com:443/rtmp/',       bitrate_kbps: 4000, orientation: 'landscape' },
 }
 
@@ -61,7 +66,9 @@ export async function GET(
 
   let tokens
   try {
-    tokens = await exchangeCode(platform, code)
+    // PKCE providers (Kick): re-derive the verifier from the same signed state.
+    const codeVerifier = getOAuthConfig(platform)?.pkce ? deriveCodeVerifier(state) : undefined
+    tokens = await exchangeCode(platform, code, codeVerifier)
   } catch (err) {
     console.error(`[oauth/callback] token exchange failed for ${platform}:`, err)
     return dashboardRedirect(platform, 'token_exchange_failed')
@@ -78,6 +85,10 @@ export async function GET(
       streamKey = await fetchTwitchStreamKey(tokens.access_token)
     } else if (platform === 'youtube') {
       const info = await fetchYouTubeStreamKey(tokens.access_token)
+      streamKey = info.streamKey
+      rtmpUrl = info.rtmpUrl
+    } else if (platform === 'kick') {
+      const info = await fetchKickStreamKey(tokens.access_token)
       streamKey = info.streamKey
       rtmpUrl = info.rtmpUrl
     } else if (platform === 'facebook') {

@@ -21,7 +21,7 @@ interface PlatformConfig {
 }
 
 // Platforms that support OAuth "Connect" flow
-const OAUTH_PLATFORMS = new Set(['twitch', 'youtube', 'facebook'])
+const OAUTH_PLATFORMS = new Set(['twitch', 'youtube', 'kick', 'facebook'])
 
 const PLATFORMS: Array<{ id: PlatformKey; label: string; note: string | null }> = [
   { id: 'twitch',   label: 'Twitch',   note: null },
