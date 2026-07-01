@@ -28,7 +28,7 @@ when a user hits Start Streaming, injects role + config env, and tears them down
 | File | What it is |
 |---|---|
 | `agent.py` | Entrypoint. Dispatches on `RELAY_ROLE`, self-reports readiness (`POST /api/agent/ready`), polls its role config every ~10s, posts heartbeats. |
-| `supervisor.py` | Builds + supervises the per-role ffmpeg commands. GPU: `build_gpu_transcode_cmd()`. Hub: `build_source_forward_cmd()` / `build_deliver_cmd()` / `build_passthrough_cmd()` / `build_ertmp_cmd()`. **Read the NVENC-flag + tee `fifo_options` landmine comments before editing.** |
+| `supervisor.py` | Builds + supervises the per-role ffmpeg commands. GPU: `build_gpu_transcode_cmd()`. Hub: `build_source_forward_cmd()` / `build_deliver_one_cmd()` (STREAM-02 de-tee: one `-c copy` push per transcode platform, not a shared tee) / `build_passthrough_cmd()` / `build_ertmp_cmd()`. **Read the NVENC-flag landmine comments before editing.** |
 | `mediamtx.vps.yml` | The hub's MediaMTX: SRT `:8890` (OBS ingest + loopback) + RTMP `:1935` readiness beacon. `runOnReady` → `hook.sh`. |
 | `budget.py` | `CostMeter` — live $/hr from `/proc/net/dev`, GPU-bridge cost telemetry. |
 | `bpm_inject.py` | BPM SEI injection for Twitch HEVC eRTMP passthrough. |

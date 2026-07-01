@@ -396,13 +396,14 @@ def main_vps() -> None:
                 t["applied_hash"] = None
 
             # Per-platform output state for the OBS dock's status dots. Each runner
-            # reports {state, platforms}: passthrough/ertmp runners carry one platform
-            # (YouTube/Twitch-eRTMP); a deliver:<orientation> runner carries every
-            # transcode platform it tees to (e.g. Twitch-H.264 + Kick share one tee, so
-            # one state). Runners with no platforms (source_forward) are dropped. Only
-            # report while OBS is publishing — once it drops the runners linger in a
-            # 'stopped' state that the dock would misread as "connecting…" rather than
-            # idle; an empty list is the honest "idle" signal.
+            # reports {state, platforms}, and since the STREAM-02 de-tee EVERY runner carries
+            # exactly ONE platform: passthrough/ertmp (YouTube / Twitch-eRTMP) and one
+            # deliver:<platform> per transcode platform (Twitch-H.264, Kick, TikTok no longer
+            # share a tee), so a dropped platform reports its OWN 'restarting'/'error' instead
+            # of riding a neighbour's 'running'. Runners with no platforms (source_forward) are
+            # dropped. Only report while OBS is publishing — once it drops the runners linger in
+            # a 'stopped' state that the dock would misread as "connecting…" rather than idle;
+            # an empty list is the honest "idle" signal.
             outputs = (
                 [
                     {"state": r["state"], "platforms": r["platforms"]}

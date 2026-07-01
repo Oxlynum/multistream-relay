@@ -15,8 +15,10 @@ file (selected per process by RELAY_ROLE):
       passthrough (HEVC `-c copy` -> YouTube HLS) and ertmp (HEVC -> Twitch Enhanced
       RTMP) directly from the tenant feed (no NVENC on the hub); plus, when the tenant
       has a GPU backend, source_forward (push the tenant HEVC to the GPU bridge) and
-      deliver (tee the GPU's H.264 return to every transcode platform). See
-      build_passthrough_cmd, build_ertmp_cmd, build_source_forward_cmd, build_deliver_cmd.
+      deliver (one `-c copy` push PER transcode platform of the GPU's H.264 return —
+      STREAM-02 de-tee, so a single platform's drop reconnects just that platform and
+      each status dot is truthful). See build_passthrough_cmd, build_ertmp_cmd,
+      build_source_forward_cmd, build_deliver_one_cmd.
 
 Each runner runs in its own thread, captures FFmpeg stderr into a ring buffer, and
 auto-restarts with exponential backoff while it is supposed to be running.
@@ -295,7 +297,7 @@ def _register_secrets(cfg: dict, source: str = "") -> None:
         _add_output_secrets(o)
     # VPS-hub transcode tenant: the DECRYPTED platform keys (Kick/TikTok/non-eligible
     # Twitch H.264) ride in bridge.return_outputs[].targets[], NOT cfg["outputs"] (which
-    # holds only passthrough/ertmp on the hub). Without scrubbing these, build_deliver_cmd
+    # holds only passthrough/ertmp on the hub). Without scrubbing these, build_deliver_one_cmd
     # embeds them in the runner argv that OutputRunner logs verbatim → plaintext key leak
     # the moment the :8080 debug panel is enabled on a hub.
     bridge = cfg.get("bridge") or {}
@@ -446,44 +448,20 @@ def _encode_flags(bv: int, fps: int) -> list[str]:
     ]
 
 
-# Characters that would let a stream key/URL break out of the FFmpeg `tee` target
-# string and inject an extra destination ("...|[f=flv]rtmp://attacker/...") or a
-# local file sink ("[f=mp4]/tmp/x"). Real RTMP/stream keys are URL-safe and never
-# contain these, so any output carrying one is malformed or hostile — we drop it
-# rather than fan the user's stream out to an attacker-controlled target. The
-# PRIMARY guard is web-side validation on save (POST /api/platforms); this is the
-# pod's defense-in-depth so a bad key can never reach the tee muxer.
-_TEE_UNSAFE = ("|", "[", "]", "\n", "\r", " ", "\t", "\\")
+# Characters that would make a delivery URL malformed or let a stream key smuggle
+# extra ffmpeg option/target syntax. Real RTMP/stream keys are URL-safe and never
+# contain these, so any target carrying one is malformed or hostile — we drop that
+# target (its platform simply gets no runner; the others still deliver). The PRIMARY
+# guard is web-side validation on save (POST /api/platforms); this is the pod's
+# defense-in-depth. (Kept from the pre-STREAM-02 `tee` era, where these chars could
+# break out of the tee target string; the de-tee now passes each URL as a plain argv
+# element, so this is belt-and-suspenders — but rejecting a malformed target is still
+# correct.)
+_URL_UNSAFE = ("|", "[", "]", "\n", "\r", " ", "\t", "\\")
 
 
-def _tee_safe(url: str) -> bool:
-    return not any(c in url for c in _TEE_UNSAFE)
-
-
-def _tee_targets(outputs: list[dict]) -> str:
-    """Build the FFmpeg `tee` output string. onfail=ignore keeps the shared
-    encode alive when a single platform's ingest drops or rejects the stream.
-    Targets whose URL/key contain tee control characters are skipped (injection
-    guard) — a real key never has them."""
-    parts = []
-    for o in outputs:
-        url = _full_rtmp_url(o)
-        if not _tee_safe(url):
-            continue
-        # use_fifo=1 runs each platform output in its own thread with a bounded queue,
-        # so one platform's TCP backpressure can't stall the shared read of the GPU
-        # return stream. Pass ONLY queue_size: jellyfin-ffmpeg 7.1.4-3's tee parser does
-        # NOT keep a 2nd nested fifo_option bound to the fifo muxer — drop_pkts_on_overflow
-        # leaks to the wrapped flv muxer → "Unknown option 'drop_pkts_on_overflow'" →
-        # "All tee outputs failed" → every platform dark (confirmed on the LIVE hub
-        # 2026-06-29; the leak survived every ':'/'\:'/'\\:' escaping that worked in
-        # isolated ffmpeg, so it is NOT a simple escape bug). A comma fails differently
-        # (fifo reads queue_size="512,drop…" → Invalid argument). queue_size is a single
-        # key=value with no separator to mis-parse → robust. The 512-frame (~8s) queue
-        # absorbs short stalls; on sustained overflow the fifo blocks (acceptable for now
-        # — re-add drop-on-overflow only with an escaping proven on the LIVE relay).
-        parts.append(f"[f=flv:onfail=ignore:use_fifo=1:fifo_options=queue_size=512]{url}")
-    return "|".join(parts)
+def _url_safe(url: str) -> bool:
+    return not any(c in url for c in _URL_UNSAFE)
 
 
 _RES_HEIGHT = {"720p": 720, "1080p": 1080, "1440p": 1440}
@@ -647,16 +625,30 @@ def build_source_forward_cmd(source: str, dest: str) -> list[str]:
     return ["bash", "-c", pipeline]
 
 
-def build_deliver_cmd(return_url: str, targets: list[dict]) -> list[str]:
-    """VPS deliver (RELAY_ROLE=vps, transcode tenant): read the GPU's H.264 return from
-    the LOCAL MediaMTX and tee (`-c copy`, the GPU already encoded) to every transcode
-    platform for this orientation. The tee + use_fifo backpressure decoupling lives HERE
-    (the GPU returned ONE stream; the platform fan-out is the VPS's job)."""
+def build_deliver_one_cmd(return_url: str, target: dict) -> list[str]:
+    """VPS deliver, ONE platform (RELAY_ROLE=vps, transcode tenant — STREAM-02 de-tee):
+    read the GPU's H.264 return from the LOCAL MediaMTX and `-c copy` push it to a SINGLE
+    platform. One ffmpeg PER platform, NOT a shared `tee`: the old tee used onfail=ignore,
+    which silently abandoned a dropped branch FOREVER (never reconnecting it) while the
+    process stayed alive — so a dropped platform kept reading 'live' on the dock and never
+    recovered short of a full stream restart. Per-platform instead: a drop exits THIS ffmpeg
+    → OutputRunner restarts just it (reconnect at the live edge), and its runner state is
+    that ONE platform's alone → the dock's per-platform status dots are truthful.
+
+    Backpressure isolation is now STRUCTURAL — each platform is its own process with its own
+    MediaMTX reader — so the tee's old use_fifo/queue_size is unnecessary: a slow platform
+    only slows its own reader, and MediaMTX's per-reader write queue absorbs short stalls the
+    same way the old per-branch fifo did (a stall long enough to exhaust it drops+reconnects
+    that ONE platform — truthful — never the others). Reading the same return path with N
+    concurrent readers is MediaMTX's native 1-publisher→N-reader fan-out. (A standalone `fifo`
+    muxer wrapper with attempt_recovery/recovery_wait_time could later smooth a >queue stall
+    into an in-process recovery instead of a ~2s runner restart — add ONLY with the option
+    escaping proven on the LIVE relay; see the fifo_options saga in CLAUDE.md.)"""
     return [
         "ffmpeg", "-hide_banner", "-loglevel", "warning",
         "-i", return_url,
         "-map", "0:v", "-map", "0:a", "-c", "copy",
-        "-flush_packets", "1", "-f", "tee", _tee_targets(targets),
+        "-flush_packets", "1", "-f", "flv", _full_rtmp_url(target),
     ]
 
 
@@ -839,7 +831,8 @@ def plan_runners(cfg: dict, source: str = LOCAL_SOURCE, role: str = "vps") -> di
     diff against currently-running processes:
       passthrough:<platform>   one HEVC copy per passthrough/ertmp output (hub)
       source_forward           push the tenant HEVC to the GPU bridge (hub)
-      deliver:<orientation>    tee the GPU's H.264 return to its platforms (hub)
+      deliver:<platform>       one `-c copy` push of the GPU's H.264 return per transcode
+                               platform (hub; STREAM-02 de-tee — was one tee per orientation)
       gpu:transcode            the GPU backend's single decode -> N-encode runner
 
     `source` is the loopback URL each runner reads (per-tenant on a multi-tenant VPS
@@ -916,10 +909,23 @@ def plan_runners(cfg: dict, source: str = LOCAL_SOURCE, role: str = "vps") -> di
                 orient = ro.get("orientation", "landscape")
                 targets = ro.get("targets", [])
                 frm = ro.get("from", "")
-                if targets and frm:
-                    plan[f"deliver:{orient}"] = {
-                        "cmd": build_deliver_cmd(f"rtmp://127.0.0.1:1935/{frm}", targets),
-                        "platforms": [t.get("name") for t in targets],
+                if not frm:
+                    continue
+                return_url = f"rtmp://127.0.0.1:1935/{frm}"
+                # STREAM-02 de-tee: ONE runner per platform (keyed deliver:<platform>), not one
+                # shared deliver:<orientation> tee. A platform drop then exits only that
+                # platform's ffmpeg → OutputRunner reconnects just it, and each platform's
+                # runner state is its own → the dock's per-platform dots are truthful (the tee
+                # reported ONE state for every platform in the orientation, so a dropped one
+                # still read 'live'). Platform names are unique per tenant (one orientation per
+                # platform_connection row), so deliver:<name> keys never collide.
+                for t in targets:
+                    name = t.get("name")
+                    if not name or not _url_safe(_full_rtmp_url(t)):
+                        continue
+                    plan[f"deliver:{name}"] = {
+                        "cmd": build_deliver_one_cmd(return_url, t),
+                        "platforms": [name],
                         "mode": f"deliver:{orient}",
                     }
 
