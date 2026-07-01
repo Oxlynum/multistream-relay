@@ -738,7 +738,10 @@ void RelayDock::onObsStreamingStarting()
 
 void RelayDock::onObsStreamingStopped()
 {
-    if (m_autoLaunching) return;
+    // m_failoverPending: handleServerLost already stopped OBS + destroyed the dead session and
+    // armed a reconnect — don't fire a redundant destroy or clobber the "reconnecting…" status
+    // (also guards the late stop-event-vs-new-provision reorder, alongside m_autoLaunching).
+    if (m_autoLaunching || m_failoverPending) return;
     m_api->destroyGpu();
     setStatus("Stopping…", C_MUTE);
 }
@@ -758,6 +761,20 @@ void RelayDock::onGpuStatusUpdated(GpuInfo info)
 {
     m_lastGpuInfo = info;
     m_statusKnown = true;   // entitlement (has2kAddon) is now trustworthy for the Go-Live gate
+
+    // REL-01 shared-hub failover: the server flips a tenant to status=='error' when its
+    // shared hub was hard-destroyed (box-lease lapse / OOM / network partition) or a
+    // provision failed. Nothing else in this reducer handles 'error', so without this OBS
+    // keeps auto-reconnecting its SRT output to the now-deleted hub IP forever while the
+    // dock shows a stale/idle state — every platform goes silently dark. Latch on
+    // m_serverLostHandled so a sustained run of 'error' polls fires the stop+reconnect
+    // exactly ONCE per episode; any non-error status clears the latch, re-arming it for a
+    // future hub death.
+    if (info.status == "error") {
+        if (!m_serverLostHandled) { m_serverLostHandled = true; handleServerLost(); }
+        return;
+    }
+    m_serverLostHandled = false;
 
     // If OBS opens and finds a pod already in 'provisioning' state (e.g. from a
     // previous Go Live that was interrupted or whose dock timed out), auto-resume
@@ -812,6 +829,12 @@ void RelayDock::onGpuStatusUpdated(GpuInfo info)
     // That means OBS reached the pod and FFmpeg is running — the connection is good.
     if (m_streamWatchdog && m_streamWatchdog->isActive() && info.streaming)
         m_streamWatchdog->stop();
+
+    // REL-01: intentionally NO "reset the failover budget on a healthy poll" here. A
+    // mid-stream hub death is ALWAYS preceded by healthy streaming polls, so resetting on
+    // health would refill the cap every cycle and let a flapping/overloaded hub spin an
+    // unbounded provision→destroy→bill loop. The budget is a ROLLING-WINDOW ceiling (see
+    // handleServerLost) refilled only by elapsed quiet time or an explicit manual Go-Live.
 
     // SAFETY: a running pod while OBS is not streaming (and we aren't mid-launch)
     // is an orphan — e.g. OBS crashed and was reopened, or a Stop teardown failed.
@@ -1201,6 +1224,78 @@ void RelayDock::abortLaunch(const QString &message)
     QMessageBox::warning(this, "SlimCast — couldn't go live", message);
 }
 
+// REL-01 shared-hub failover. The server flipped this tenant to status=='error' — its
+// shared hub was hard-destroyed (box-lease lapse / OOM / partition) or a provision failed.
+// The server-side teardown already set status='error' + vps_hub_id=null "expecting a restart
+// to re-provision onto a fresh hub" (pod-teardown.ts), so this is that restart: stop OBS so
+// it stops auto-reconnecting to the dead hub IP, then re-launch onto a new hub — bounded so a
+// persistently-failing backend can't spin a provision/bill loop.
+void RelayDock::handleServerLost()
+{
+    // ROLLING-WINDOW reconnect ceiling: at most kMaxFailoversPerWindow auto-reconnects per
+    // kFailoverWindowMs, refilled ONLY by elapsed quiet time (or a manual Go-Live). This is
+    // the fix for the flap loop: a hub that connects, serves briefly, and dies repeatedly
+    // (overloaded pool) is ALWAYS preceded by healthy streaming polls, so a health-based
+    // reset would refill the budget every cycle and loop forever — the window ceiling does
+    // not, because health can't refill it mid-window.
+    static constexpr int    kMaxFailoversPerWindow = 3;
+    static constexpr qint64 kFailoverWindowMs      = 10 * 60 * 1000;  // 10 min
+    static constexpr int    kFailoverBaseDelayMs   = 2500;            // ×count → 2.5s, 5s, 7.5s backoff
+
+    // Did this 'error' interrupt an in-flight launch or a live stream (→ auto-reconnect), or
+    // is it just a stale background error with OBS idle (→ plain reset, no relaunch)?
+    const bool wasActive =
+        m_autoLaunching || m_resumingStream || obs_frontend_streaming_active();
+
+    // Stop reacting to the dead session.
+    if (m_launchTimeout)  m_launchTimeout->stop();
+    if (m_streamWatchdog) m_streamWatchdog->stop();
+    m_autoLaunching  = false;
+    m_resumingStream = false;
+    m_orphanTicks    = 0;
+
+    // Stop OBS so it stops hammering the deleted hub IP (the core REL-01 bug), and drop the
+    // stale server-side session so the next Go-Live provisions cleanly. destroyGpu() is the
+    // same idempotent cleanup abortLaunch() uses for a half-provisioned pod.
+    if (obs_frontend_streaming_active()) obs_frontend_streaming_stop();
+    m_api->destroyGpu();
+
+    // Open a fresh window if this is the first failover, or the last one was long ago (a
+    // stream that ran clean for the whole window then died gets a full budget again).
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    if (m_failoverWindowStartMs == 0 || nowMs - m_failoverWindowStartMs > kFailoverWindowMs) {
+        m_failoverWindowStartMs = nowMs;
+        m_failoverCount = 0;
+    }
+
+    if (wasActive && m_failoverCount < kMaxFailoversPerWindow) {
+        m_failoverCount++;
+        setStatus(QString("Server interrupted — reconnecting to a new server (%1/%2)…")
+                      .arg(m_failoverCount).arg(kMaxFailoversPerWindow),
+                  C_WARN);
+        // Re-launch onto a fresh hub after an escalating settle. onGoLiveClicked provisions
+        // when not already live; the delay lets obs_frontend_streaming_active() go false first
+        // so its "already live → treat as Stop" branch can't fire, lets destroyGpu() clear the
+        // error'd row so the fresh provision doesn't 409, and backs off a struggling pool.
+        m_failoverPending = true;   // suppress onObsStreamingStopped's destroy + status clobber
+        const int delayMs = kFailoverBaseDelayMs * m_failoverCount;
+        QTimer::singleShot(delayMs, this, [this]() {
+            m_failoverPending = false;
+            if (m_shuttingDown) return;                    // user hit Stop in the meantime
+            if (obs_frontend_streaming_active()) return;   // safety: never relaunch while live
+            onGoLiveClicked();
+        });
+    } else {
+        // Not mid-session, or the window's reconnect budget is spent → clear, actionable stop
+        // (no dead-IP push, no loop). Do NOT refill the window here: a persistently-flapping
+        // backend must stay capped until the window naturally expires (or the user manually
+        // hits Go Live), so a transient health blip can't re-arm it into a loop.
+        restoreObsStreamBtn();
+        if (wasActive) setStatus("Server lost — too many drops. Press Go Live to reconnect.", C_ERR);
+        else           setStatus("Idle — not streaming", C_IDLE);
+    }
+}
+
 
 void RelayDock::onPollTick()
 {
@@ -1433,6 +1528,12 @@ void RelayDock::onMainBtnClicked()
         return;
     }
 
+    // Manual Go-Live (or Stop) is explicit user intent, not an automatic loop — refill the
+    // REL-01 auto-reconnect budget so a user who deliberately retries after "too many drops"
+    // gets a fresh set of failovers. The auto-failover path calls onGoLiveClicked() directly
+    // (bypassing this dispatcher), so it never refills the budget this way.
+    m_failoverWindowStartMs = 0;
+    m_failoverCount = 0;
     onGoLiveClicked();
 }
 

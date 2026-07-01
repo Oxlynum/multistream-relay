@@ -70,6 +70,10 @@ private:
     void saveSettings();
     void enterActive();   // switch to the active page + start polling
     void abortLaunch(const QString &message);   // give up + clean up a failed Go Live
+    // REL-01 shared-hub failover: the server flipped this tenant to status=='error' (its
+    // hub was hard-destroyed / a provision failed). Stop OBS cleanly so it stops pushing to
+    // the dead hub IP, then auto-reconnect onto a fresh hub (bounded retries).
+    void handleServerLost();
     void applyObsStreamUrl(const QString &server, const QString &key);
     void setSlimcastService(const QString &server, const QString &key);
     // Write SlimCast's recommended encoder settings into the active OBS profile.
@@ -142,6 +146,10 @@ private:
     bool m_has2kAddon     = false;  // account 2K entitlement (from /api/gpu/status) — gates the resolution warning
     bool m_statusKnown    = false;  // a /api/gpu/status response has landed → m_has2kAddon is trustworthy
     int  m_orphanTicks    = 0;      // consecutive polls of "pod up, OBS not streaming"
+    int    m_failoverCount = 0;         // REL-01: auto-reconnects used in the current rolling window
+    qint64 m_failoverWindowStartMs = 0; // REL-01: start of the rolling failover-count window (0 = none yet)
+    bool m_serverLostHandled = false;   // REL-01: latch so a sustained run of status=='error' polls fires failover ONCE per episode
+    bool m_failoverPending = false;     // REL-01: a reconnect singleShot is armed — suppress the stop-handler's destroy + "Stopping…" overwrite
     int  m_appliedThrottleKbps = 0; // last throttle bitrate we pushed (0 = none/unthrottled)
     int  m_originalBitrateKbps = 0; // user's configured bitrate, captured before first throttle
 
