@@ -2,10 +2,12 @@
 // Provider-agnostic policy knobs only — price ceiling, readiness timeouts, fallback
 // geo. Per-provider catalogs/filters live in each provider module (providers/vast.ts).
 
-// Never auto-provision a host above this all-in hourly price. Enforced twice: the
-// provider's candidate filter (pricePerHr) AND the live cost guard against the
-// provider's real reported price. This is the baseline (1080p) ceiling — 2K streams
-// use a higher ceiling set at provision time in SLIMCAST_COST_CEILING_USD.
+// Never auto-provision a host above this all-in hourly price — enforced by the provider's
+// candidate filter (pricePerHr) at PROVISION time. (COST-02: there is no runtime hard
+// cost-CAP — the margin-throttle lever was removed, CLAUDE.md §9a, and killing a paying
+// user's live stream to protect OUR margin is too drastic. Instead a real-time ALERT fires
+// when a live box's reported cost_usd_hr exceeds SLIMCAST_COST_ALERT_USD_HR — see
+// maybePeriodicMaintenance.) Baseline (1080p) ceiling; 2K uses a higher provision-time ceiling.
 export const PRICE_CEILING = 0.50
 
 // VPS-hub GPU BACKEND ceiling (the bridge race). Higher than the all-in-one ceiling
@@ -158,3 +160,9 @@ export const ORPHAN_RECONCILE_THROTTLE_MS = 15 * 60_000
 //   fleet-wide. 30 min keeps the table tight between daily crons; each prune deletes only
 //   the newly-aged tail (BRIN-indexed), so it stays cheap.
 export const METRICS_PRUNE_THROTTLE_MS = 30 * 60_000
+//
+//   COST ALERT (COST-02) — how often the real-time cost-tripwire scan may fire fleet-wide.
+//   15 min turns a runaway-cost box's worst-case detection latency from ~24h (daily reaper
+//   digest) into ~15 min. Level-triggered (re-alerts while a box stays over); inert without
+//   SLIMCAST_ALERT_WEBHOOK.
+export const COST_ALERT_THROTTLE_MS = 15 * 60_000

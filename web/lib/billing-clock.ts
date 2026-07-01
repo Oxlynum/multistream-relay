@@ -42,6 +42,9 @@ export interface BillResult {
   spendableAfter: number
   /** true iff a real deduction hit the DB this interval. */
   charged: boolean
+  /** CORR-04: tokens owed but NOT yet persisted — carried forward when deduct_tokens failed,
+   *  0 once settled. The caller persists this on the session row so it accrues across beats. */
+  unbilledDebt: number
   /** the resolved plan used for the rate. */
   plan: Plan
 }
@@ -57,13 +60,15 @@ export async function billStreamInterval(opts: {
   profile: BillProfile | null
   platforms: BillingPlatformRow[]
   streaming: boolean
+  /** CORR-04: tokens carried over from prior beats whose deduct_tokens RPC failed. */
+  priorDebt?: number
   lastSeenAtMs: number
   nowMs: number
   billingActive: boolean
   devBypass?: boolean
 }): Promise<BillResult> {
   const {
-    userId, profile, platforms, streaming,
+    userId, profile, platforms, streaming, priorDebt = 0,
     lastSeenAtMs, nowMs, billingActive, devBypass = false,
   } = opts
 
@@ -79,20 +84,37 @@ export async function billStreamInterval(opts: {
   // non-zero charge that the numeric(12,6) balance accumulates — otherwise passthrough
   // rounds to free at the heartbeat cadence (revenue leak; violates "never free").
   const deduct = parseFloat((burnRate * elapsed / 3600).toFixed(6))
+  // CORR-04: charge this beat's cost PLUS any debt carried from prior beats whose deduct_tokens
+  // RPC failed. Settling the whole `owed` at once on recovery keeps billing accurate. (deduct
+  // stays this-beat-only for telemetry; owed is what we actually try to collect.)
+  const owed = parseFloat((deduct + Math.max(0, priorDebt)).toFixed(6))
 
   let spendableAfter = spendableTokens(profile)
   let charged = false
+  let unbilledDebt = 0
 
-  if (billingActive && deduct > 0 && !devBypass) {
-    const after = await deductTokens(userId, deduct)
+  if (billingActive && owed > 0 && !devBypass) {
+    const after = await deductTokens(userId, owed)
     if (after !== null) {
+      // Settled this beat's charge AND all carried debt.
       spendableAfter = after
       charged = true
     } else {
-      // RPC failed — fall back to a local estimate so the kill logic still behaves.
-      spendableAfter = Math.max(0, spendableAfter - deduct)
+      // CORR-04 fail-closed: deduct_tokens failed. Carry the FULL owed forward (the caller
+      // persists it on the session row so it accrues across beats) and drop the local spendable
+      // estimate by it, so kill-on-empty trips once accrued debt reaches the balance — instead
+      // of the OLD behaviour, which discarded the charge and reset to the full un-decremented
+      // balance every beat → silent free streaming for the entire duration of the fault.
+      // NB AT-LEAST-ONCE: if the RPC actually COMMITTED but its response was lost (timeout after
+      // commit), the balance is already decremented yet we treat it as failed and carry `owed`
+      // forward → the next successful beat over-charges by ~one beat's owed. Bounded (~one beat),
+      // self-limiting, and in the SAFE over-charge direction — an accepted price of closing the
+      // far larger silent-free-streaming leak; a future idempotent deduct (request-id dedup)
+      // would eliminate it.
+      unbilledDebt = owed
+      spendableAfter = Math.max(0, spendableAfter - owed)
     }
   }
 
-  return { burnRate, deduct, spendableAfter, charged, plan }
+  return { burnRate, deduct, spendableAfter, charged, unbilledDebt, plan }
 }

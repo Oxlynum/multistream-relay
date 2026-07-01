@@ -2,8 +2,8 @@ import { createServerClient } from '@/lib/supabase'
 import { reraceGpuBackend } from '@/lib/vps-broker'
 import { ACTIVE_GPU_PROVIDERS, ACTIVE_VPS_PROVIDERS, getProvider } from '@/lib/providers'
 import { nodeTokenOfPodName } from '@/lib/managed-identity'
-import { captureError } from '@/lib/observability'
-import { ORPHAN_RECONCILE_THROTTLE_MS, METRICS_PRUNE_THROTTLE_MS } from '@/lib/datacenters'
+import { captureError, sendAlert } from '@/lib/observability'
+import { ORPHAN_RECONCILE_THROTTLE_MS, METRICS_PRUNE_THROTTLE_MS, COST_ALERT_THROTTLE_MS } from '@/lib/datacenters'
 import type { RacerEntry } from '@/lib/gpu-broker'
 
 // The ROW-LESS orphan reconcile + racer cleanup + mid-stream GPU re-race, extracted from the
@@ -357,5 +357,33 @@ export async function maybePeriodicMaintenance(): Promise<void> {
     if (won === true) await supabase.rpc('prune_old_connection_metrics')
   } catch (e) {
     captureError('periodic.metrics_prune', e)
+  }
+
+  // COST-02: real-time cost-tripwire alert. The daily reaper digest also scans this, but a
+  // runaway box (live cost_usd_hr > ceiling) shouldn't wait up to 24h to surface — scan every
+  // ~15min off the heartbeat and alert. ALERT-not-kill: the margin-throttle lever is gone
+  // (CLAUDE.md §9a) and tearing down a paying user's LIVE stream to protect OUR margin is too
+  // drastic; the operator gets a real-time signal and decides. Inert unless SLIMCAST_ALERT_WEBHOOK
+  // is set. Level-triggered (re-alerts each window while a box stays over) — a persistent
+  // over-cost box SHOULD keep nagging until fixed.
+  try {
+    const { data: won } = await supabase.rpc('try_begin_periodic', {
+      p_task: 'cost_alert', p_throttle_ms: COST_ALERT_THROTTLE_MS,
+    })
+    if (won === true) {
+      const tripwire = Number(process.env.SLIMCAST_COST_ALERT_USD_HR ?? '2.0')
+      const [{ count: gpuOver }, { count: hubOver }] = await Promise.all([
+        supabase.from('gpu_instances').select('id', { count: 'exact', head: true })
+          .neq('status', 'stopped').gt('cost_usd_hr', tripwire),
+        supabase.from('vps_hubs').select('id', { count: 'exact', head: true })
+          .neq('status', 'ended').gt('cost_usd_hr', tripwire),
+      ])
+      const over = (gpuOver ?? 0) + (hubOver ?? 0)
+      if (over > 0) await sendAlert('SlimCast cost tripwire (real-time)', {
+        boxes_over_cost_usd_hr: over, tripwire_usd_hr: tripwire,
+      })
+    }
+  } catch (e) {
+    captureError('periodic.cost_alert', e)
   }
 }

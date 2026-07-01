@@ -175,7 +175,7 @@ async function handleVpsStatus(request: NextRequest, hubId: string): Promise<Res
   const reported = body.streams ?? []
   const { data: sessions } = await supabase
     .from('gpu_instances')
-    .select('id, user_id, ingest_key, idle_since, max_session_at, last_seen_at')
+    .select('id, user_id, ingest_key, idle_since, max_session_at, last_seen_at, unbilled_debt')
     .eq('vps_hub_id', hubId)
 
   // Batch-load the billing inputs for every tenant on this hub (the VPS heartbeat is the
@@ -225,6 +225,8 @@ async function handleVpsStatus(request: NextRequest, hubId: string): Promise<Res
       profile: profileById.get(userId) ?? null,
       platforms: platformsByUser.get(userId) ?? [],
       streaming,
+      // CORR-04: carry forward any debt this tenant accrued when a prior beat's deduct RPC failed.
+      priorDebt: Number((s as { unbilled_debt?: number | string | null }).unbilled_debt ?? 0),
       lastSeenAtMs: prevSeen,
       nowMs: now,
       billingActive: BILLING_ACTIVE,
@@ -240,6 +242,10 @@ async function handleVpsStatus(request: NextRequest, hubId: string): Promise<Res
     await supabase.from('gpu_instances')
       .update({
         last_seen_at: nowIso, streaming, idle_since: idleSince, burn_rate: bill.burnRate,
+        // CORR-04: persist the carried-forward debt (0 when settled / billing off) so it
+        // accrues across beats and the kill-on-empty below eventually trips during a
+        // sustained deduct_tokens fault instead of granting free streaming every beat.
+        unbilled_debt: bill.unbilledDebt,
         // Per-platform runner states for the dock's status dots (/api/gpu/status reads
         // this column). The reaped all-in-one pod heartbeat used to be the writer; the
         // hub is now the sole producer. Default [] so a tenant that reports no outputs
