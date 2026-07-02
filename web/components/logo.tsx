@@ -32,9 +32,9 @@ export function Logo({
   className?: string
 }) {
   const inner = (
-    <span className={`inline-flex items-center gap-2.5 ${className}`}>
-      <LogoMark className="h-10" />
-      <span className="font-pixel text-[15px] leading-none tracking-tight text-ink">
+    <span className={`inline-flex items-center gap-3 ${className}`}>
+      <LogoMark className="h-14 sm:h-20" />
+      <span className="font-pixel text-[18px] leading-none tracking-tight text-ink sm:text-[30px]">
         SlimCast
       </span>
     </span>

@@ -45,7 +45,7 @@ export function SiteNav() {
 
   return (
     <header className="sticky top-0 z-50 border-b border-line/70 bg-bg/80 backdrop-blur-xl">
-      <nav className="mx-auto flex h-16 max-w-6xl items-center justify-between px-6">
+      <nav className="mx-auto flex h-20 max-w-6xl items-center justify-between px-6 sm:h-24">
         <Logo />
 
         <div className="hidden items-center gap-8 text-sm md:flex">
