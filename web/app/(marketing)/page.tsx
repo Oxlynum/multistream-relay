@@ -17,70 +17,70 @@ import { cn } from '@/lib/utils'
 const PLATFORMS: PlatformKey[] = ['twitch', 'youtube', 'kick', 'tiktok']
 
 const SUBHEAD =
-  'Push one HEVC feed from OBS. SlimCast transcodes it on a cloud GPU and goes live on Twitch, YouTube, Kick, and TikTok at once — no second PC, no config files, no terminal.'
+  'Bad WiFi? Mobile hotspot? SlimCast holds your stream together through the connection drops that freeze everyone else — up to 8% packet loss with no buffering — and puts you live on Twitch, YouTube, Kick, and TikTok at the same time. 1080p60 today, 1440p coming soon.'
 
 const STEPS = [
   {
     n: '01',
-    title: 'Paste your stream keys',
-    body: 'Add your platforms once in the dashboard. Keys are stored AES-256-GCM encrypted — you never touch an RTMP URL again.',
+    title: 'Connect your platforms',
+    body: 'Link Twitch, YouTube, Kick, and TikTok once in the dashboard. We keep your keys locked down — you never mess with stream URLs again.',
   },
   {
     n: '02',
     title: 'Install the OBS plugin',
-    body: 'One double-click on Mac or Windows. The SlimCast panel appears inside OBS; paste your API key a single time.',
+    body: 'One double-click on Mac or Windows. A SlimCast panel shows up right inside OBS — paste your key once and you’re set.',
   },
   {
     n: '03',
-    title: 'Hit Start Streaming',
-    body: 'SlimCast spins up a cloud GPU in ~45 seconds, then sends your feed live to every platform automatically.',
+    title: 'Hit Start in OBS',
+    body: 'That’s it. In about 45 seconds you’re live on every platform at once — nothing else to click.',
   },
   {
     n: '04',
     title: 'Stop when you’re done',
-    body: 'Ending the stream tears the GPU down instantly. No idle billing — nothing runs when you’re not live.',
+    body: 'Hit Stop and everything shuts off. You’re only ever charged while you’re actually live.',
   },
 ]
 
 const FEATURES = [
   {
-    title: 'HEVC uplink',
-    body: 'Push one H.265 feed from OBS and send ~40% less data upstream than parallel H.264 streams.',
+    title: 'Survives bad internet',
+    body: 'Up to 8% packet loss with no drops and no buffering. Stream with confidence from home WiFi, a hotel, or a phone hotspot.',
   },
   {
-    title: 'Cloud GPU transcode',
-    body: 'A dedicated NVENC/NVDEC GPU transcodes your feed per platform — zero load on your PC.',
+    title: 'Go live everywhere',
+    body: 'Twitch, YouTube, Kick, and TikTok all at once — Facebook coming soon. One stream from OBS, we send it everywhere.',
   },
   {
-    title: 'Four platforms at once',
-    body: 'Twitch, YouTube, Kick, and TikTok simultaneously from a single OBS output.',
+    title: 'Easy on your PC',
+    body: 'The heavy lifting happens in the cloud, so your computer stays free for your game and your framerate stays high.',
   },
   {
-    title: 'Per-platform tuning',
-    body: 'Independent bitrate, frame rate, and orientation for each destination — TikTok in portrait, Twitch at full quality.',
+    title: 'Quality that self-heals',
+    body: 'If your connection dips, SlimCast eases the quality down and brings it right back — your stream never face-plants.',
   },
   {
-    title: 'Quality auto-adjust',
-    body: 'If your bandwidth dips, SlimCast steps quality down smoothly and recovers — your stream never face-plants.',
+    title: 'Tuned per platform',
+    body: 'Each platform gets its own settings — full quality on Twitch, portrait for TikTok. Set it once and forget it.',
   },
   {
-    title: 'Twitch HEVC passthrough',
-    body: 'Eligible Twitch accounts get HEVC passed through untouched — maximum quality per bit, automatically.',
+    title: '1080p60 today',
+    body: 'Crisp 1080p at 60fps right now, with 1440p landing soon. Casual-friendly by default, room to grow.',
   },
 ]
 
 const CHECKLIST = [
-  'Hardware NVENC decode + encode — zero load on your PC',
-  'Per-output supervisor with automatic reconnect & backoff',
-  'Stream keys encrypted at rest (AES-256-GCM), injected only at stream time',
-  'SRT internal loopback preserves temporal-layered HEVC cleanly',
+  'Rides out rough connections — up to 8% packet loss, no drops or buffering',
+  'Every platform reconnects on its own if it blips — the rest keep running',
+  'All the heavy work runs in the cloud, never on your PC',
+  'Your stream keys stay private and encrypted — never exposed',
 ]
 
 const STATS = [
-  { value: '1080p60', label: 'Standard output · 2K add-on available' },
-  { value: '~45s', label: 'Cold start from click to live' },
-  { value: '4', label: 'Platforms fanned out in parallel' },
-  { value: '0', label: 'Idle billing — torn down the instant you stop' },
+  { value: '8%', label: 'Packet loss absorbed — no drops, no buffering' },
+  { value: '1080p60', label: 'Crisp today · 1440p coming soon' },
+  { value: '4', label: 'Platforms at once · Facebook soon' },
+  { value: '~45s', label: 'From hitting Start to fully live' },
 ]
 
 const SECTION_HEADING =
@@ -172,13 +172,13 @@ export default function Home() {
             {/* Solid status pill — no alpha, no blur (over the aurora) */}
             <span className="inline-flex items-center gap-2.5 rounded-full border border-line bg-surface px-4 py-1.5 text-xs font-medium">
               <LiveDot color="live" size={8} />
-              <span className="text-ink">Streaming infrastructure for creators</span>
+              <span className="text-ink">Stream smooth on any connection</span>
             </span>
 
             <h1 className="mt-7 font-pixel text-[clamp(1.1rem,3.4vw,2.25rem)] leading-[1.45] tracking-tight text-ink crt-chroma">
-              One stream up.
+              Stream anywhere.
               <GradientText as="span" className="mt-3 block">
-                Four platforms live.
+                Go live everywhere.
               </GradientText>
             </h1>
 
@@ -223,7 +223,7 @@ export default function Home() {
                 <span className="flex items-center gap-2.5">
                   <LiveDot color="cyan" size={7} />
                   <span className="font-mono text-[0.7rem] font-semibold tracking-[0.2em] text-ink-faint uppercase">
-                    SRT · NVENC
+                    Live · Stable
                   </span>
                 </span>
                 <span aria-hidden className="flex items-center gap-1.5">
@@ -280,26 +280,26 @@ export default function Home() {
         <div aria-hidden className="pointer-events-none absolute inset-0 bg-dotgrid opacity-60" />
         <div className="relative mx-auto max-w-6xl px-6">
           <div className="mx-auto max-w-3xl text-center">
-            <Kicker color="cyan">Under the hood</Kicker>
+            <Kicker color="cyan">How it works</Kicker>
             <h2 className={cn('mt-4', SECTION_HEADING)}>
-              {"A broadcast GPU that only exists while you're live."}
+              We do the hard part in the cloud.
             </h2>
           </div>
 
           <div className="mt-16 flex flex-col items-stretch lg:flex-row lg:items-center">
-            <FlowNode label="Your PC" title="OBS on your PC" body="One HEVC feed out." />
+            <FlowNode label="Your PC" title="You hit Start" body="Send one stream from OBS." />
             <FlowConnector />
             <FlowNode
               featured
               label="SlimCast"
-              title="SlimCast GPU · NVENC"
-              body="Decode HEVC, re-encode per platform in parallel."
+              title="We handle it"
+              body="We steady your stream through rough internet and copy it for every platform."
             />
             <FlowConnector />
             <FlowNode
               label="Your audience"
-              title="4 platforms live"
-              body="Twitch, YouTube, Kick, and TikTok — each tuned to its own limits."
+              title="You’re live everywhere"
+              body="Twitch, YouTube, Kick & TikTok — Facebook coming soon."
             >
               <div className="mt-4 flex items-center justify-center gap-3">
                 {PLATFORMS.map((p) => (
@@ -317,8 +317,8 @@ export default function Home() {
       <section className="py-24 md:py-32">
         <div className="mx-auto max-w-6xl px-6">
           <div className="mx-auto max-w-2xl text-center">
-            <Kicker color="pink">Capabilities</Kicker>
-            <h2 className={cn('mt-4', SECTION_HEADING)}>Everything your multistream needs.</h2>
+            <Kicker color="pink">Why SlimCast</Kicker>
+            <h2 className={cn('mt-4', SECTION_HEADING)}>Built for real-world streaming.</h2>
           </div>
 
           <div className="mt-14 grid gap-5 md:grid-cols-2 lg:grid-cols-3">
@@ -340,12 +340,12 @@ export default function Home() {
           <div className="grid items-start gap-12 lg:grid-cols-2 lg:gap-16">
             {/* Left: claim + checklist */}
             <div>
-              <Kicker color="cyan">Enterprise-grade</Kicker>
-              <h2 className={cn('mt-4', SECTION_HEADING)}>Built like broadcast infrastructure.</h2>
+              <Kicker color="cyan">Reliable by design</Kicker>
+              <h2 className={cn('mt-4', SECTION_HEADING)}>Built to stay live.</h2>
               <p className="mt-5 max-w-xl text-base leading-relaxed text-ink-muted">
-                Every stream runs on a dedicated cloud GPU with hardware NVENC decode and encode. A
-                per-output supervisor watches each destination and reconnects on its own — so a
-                hiccup on one platform never touches the rest.
+                SlimCast is made for real-world internet. It rides out the rough patches that would
+                freeze a normal stream, and watches every platform separately — so if one hiccups,
+                the rest keep right on going.
               </p>
               <ul className="mt-8 space-y-4">
                 {CHECKLIST.map((item) => (

@@ -61,7 +61,7 @@ export default async function OpengraphImage() {
               flexDirection: 'column',
             }}
           >
-            <span>One stream up.</span>
+            <span>Stream anywhere.</span>
             <span
               style={{
                 backgroundImage:
@@ -70,12 +70,12 @@ export default async function OpengraphImage() {
                 color: 'transparent',
               }}
             >
-              Four platforms live.
+              Go live everywhere.
             </span>
           </div>
           <div style={{ marginTop: '28px', fontSize: '30px', color: '#8fae6e', maxWidth: '900px' }}>
-            One HEVC feed from OBS, transcoded on a cloud GPU, live on Twitch, YouTube, Kick, and
-            TikTok at once.
+            Smooth streams even on bad WiFi — up to 8% packet loss, no drops — live on Twitch,
+            YouTube, Kick, and TikTok at once.
           </div>
         </div>
 

@@ -43,8 +43,8 @@ export function SiteFooter() {
           <div className="col-span-2">
             <Logo href={null} />
             <p className="mt-4 max-w-xs text-sm leading-relaxed text-ink-muted">
-              One stream up, every platform live. Multistream infrastructure built
-              for creators on Twitch, YouTube, Kick, and TikTok.
+              Smooth streams on any connection — live on Twitch, YouTube, Kick, and
+              TikTok at once, even when your WiFi isn’t perfect.
             </p>
             <div className="mt-5 inline-flex items-center gap-2 text-xs text-ink-faint">
               <LiveDot color="success" size={8} />

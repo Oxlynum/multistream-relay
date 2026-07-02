@@ -19,7 +19,8 @@ function CountUp({ target, run, durationMs = 1100 }: { target: number; run: bool
     raf = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(raf)
   }, [run, target, durationMs])
-  return <>{n.toLocaleString()}</>
+  // Plain digits (no thousands separator) so values like "1080p60" don't render "1,080p60".
+  return <>{String(n)}</>
 }
 
 /** Stat tile: big aurora mono number (count-up on scroll into view) + label. */

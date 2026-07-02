@@ -27,27 +27,27 @@ const mono = JetBrains_Mono({
 export const metadata: Metadata = {
   metadataBase: new URL("https://slimcast.io"),
   title: {
-    default: "SlimCast — One stream up. Every platform live.",
+    default: "SlimCast — Stream anywhere. Go live everywhere.",
     template: "%s · SlimCast",
   },
   description:
-    "Push one HEVC stream from OBS and go live on Twitch, YouTube, Kick, and TikTok at once. Cloud GPU transcoding, no second PC, no terminal. Free during early access.",
+    "Stream smooth even on bad WiFi or a hotspot — up to 8% packet loss with no drops or buffering — and go live on Twitch, YouTube, Kick, and TikTok at once. 1080p60 now, 1440p soon. Free during early access.",
   keywords: [
-    "multistream", "OBS multistream", "stream to Twitch and YouTube",
-    "HEVC streaming", "restream alternative", "multistreaming for creators",
+    "multistream", "stream on bad wifi", "stream to Twitch and YouTube",
+    "streaming with packet loss", "restream alternative", "multistreaming for creators",
   ],
   openGraph: {
-    title: "SlimCast — One stream up. Every platform live.",
+    title: "SlimCast — Stream anywhere. Go live everywhere.",
     description:
-      "Multistream infrastructure for creators. One HEVC feed from OBS, live on four platforms, on a cloud GPU that only exists while you're streaming.",
+      "Rock-solid streaming for creators on real-world internet. Push through the connection drops that freeze everyone else, and go live on every platform at once.",
     url: "https://slimcast.io",
     siteName: "SlimCast",
     type: "website",
   },
   twitter: {
     card: "summary_large_image",
-    title: "SlimCast — One stream up. Every platform live.",
-    description: "One HEVC feed from OBS, live on four platforms at once. Free during early access.",
+    title: "SlimCast — Stream anywhere. Go live everywhere.",
+    description: "Stream through bad WiFi and go live on Twitch, YouTube, Kick & TikTok at once. Free during early access.",
   },
 };
 
