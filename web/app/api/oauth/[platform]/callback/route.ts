@@ -12,6 +12,7 @@ import {
   fetchYouTubeStreamKey,
   fetchKickStreamKey,
   fetchFacebookStreamKey,
+  YouTubeNotEnabledError,
 } from '@/lib/oauth'
 
 const PLATFORM_DEFAULTS: Record<string, { rtmp_url: string; bitrate_kbps: number; orientation: string }> = {
@@ -132,6 +133,9 @@ export async function GET(
     }
   } catch (err) {
     console.error(`[oauth/callback] platform setup failed for ${platform}:`, err)
+    if (err instanceof YouTubeNotEnabledError) {
+      return dashboardRedirect(platform, 'youtube_not_enabled')
+    }
     return dashboardRedirect(platform, 'setup_failed')
   }
 

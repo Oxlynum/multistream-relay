@@ -26,7 +26,7 @@ const OAUTH_PLATFORMS = new Set(['twitch', 'youtube', 'kick', 'facebook'])
 const PLATFORMS: Array<{ id: PlatformKey; label: string; note: string | null; comingSoon?: boolean }> = [
   { id: 'twitch',   label: 'Twitch',   note: null },
   { id: 'kick',     label: 'Kick',     note: null },
-  { id: 'youtube',  label: 'YouTube',  note: null, comingSoon: true },
+  { id: 'youtube',  label: 'YouTube',  note: null },
   { id: 'tiktok',   label: 'TikTok',   note: 'Requires LIVE access (1000+ followers or manual approval). Portrait mode is enabled automatically.' },
 ]
 
@@ -84,7 +84,11 @@ function PlatformsContent() {
       const connected = searchParams.get('connected')
       const oauthError = searchParams.get('oauth_error')
       if (connected) toast.success(`${connected.charAt(0).toUpperCase() + connected.slice(1)} connected successfully`)
-      if (oauthError) toast.error(`Connection failed: ${oauthError}`)
+      if (oauthError === 'youtube_not_enabled') {
+        toast.error("Your YouTube channel isn't enabled for live streaming yet — verify your phone number in YouTube Studio and wait up to 24 hours, then try connecting again.")
+      } else if (oauthError) {
+        toast.error(`Connection failed: ${oauthError}`)
+      }
     }
     init()
   }, [router, searchParams, loadConnections, loadOAuthStatus])

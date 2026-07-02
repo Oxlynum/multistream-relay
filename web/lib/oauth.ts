@@ -254,6 +254,32 @@ export async function fetchTwitchStreamKey(accessToken: string): Promise<string>
 }
 
 /**
+ * Thrown when YouTube's own liveStreamingNotEnabled error comes back — the account hasn't
+ * verified its phone number / cleared YouTube's up-to-24h first-time live streaming
+ * activation gate. Distinct from a generic API failure so the callback can surface an
+ * actionable message instead of a bare "setup_failed".
+ */
+export class YouTubeNotEnabledError extends Error {
+  constructor() {
+    super('YouTube live streaming is not enabled for this account yet')
+    this.name = 'YouTubeNotEnabledError'
+  }
+}
+
+async function throwYouTubeApiError(res: Response, context: string): Promise<never> {
+  const raw = await res.text()
+  let reason: string | undefined
+  try {
+    reason = (JSON.parse(raw) as { error?: { errors?: Array<{ reason?: string }> } })
+      .error?.errors?.[0]?.reason
+  } catch {
+    // Non-JSON body — fall through to the generic error below.
+  }
+  if (reason === 'liveStreamingNotEnabled') throw new YouTubeNotEnabledError()
+  throw new Error(`${context}: ${raw}`)
+}
+
+/**
  * Get or create a YouTube live stream resource and return its RTMP ingest key.
  * YouTube stream keys are persistent and reusable across sessions.
  */
@@ -264,10 +290,7 @@ export async function fetchYouTubeStreamKey(accessToken: string): Promise<{ rtmp
     { headers: { Authorization: `Bearer ${accessToken}` } }
   )
 
-  if (!listRes.ok) {
-    const err = await listRes.text()
-    throw new Error(`YouTube liveStreams.list failed: ${err}`)
-  }
+  if (!listRes.ok) await throwYouTubeApiError(listRes, 'YouTube liveStreams.list failed')
 
   const listJson = await listRes.json() as {
     items?: Array<{
@@ -303,10 +326,7 @@ export async function fetchYouTubeStreamKey(accessToken: string): Promise<{ rtmp
     }
   )
 
-  if (!createRes.ok) {
-    const err = await createRes.text()
-    throw new Error(`YouTube liveStreams.insert failed: ${err}`)
-  }
+  if (!createRes.ok) await throwYouTubeApiError(createRes, 'YouTube liveStreams.insert failed')
 
   const created = await createRes.json() as {
     cdn?: { ingestionInfo?: { ingestionAddress?: string; streamName?: string } }
