@@ -395,7 +395,7 @@ export default function OnboardingPage() {
           <Card className="relative overflow-hidden text-center shadow-glow">
             <div aria-hidden className="aurora-bg pointer-events-none absolute inset-0 opacity-70" />
             <CardContent className="relative space-y-4 py-8">
-              <span className="mx-auto flex size-14 items-center justify-center rounded-full bg-gradient-brand text-[#0A0A12] shadow-glow">
+              <span className="mx-auto flex size-14 items-center justify-center bg-gradient-brand text-[color:var(--primary-foreground)] shadow-glow">
                 <Check className="size-7" strokeWidth={3} />
               </span>
               <div>

@@ -146,7 +146,7 @@ export default function PricingPage() {
               'Optional auto-refill for long streams',
             ]}
             ctaHref="/signup"
-            ctaLabel="Start free"
+            ctaLabel="▶ Press Start"
           />
           <PricingCard
             featured
@@ -161,7 +161,7 @@ export default function PricingPage() {
               'Top up anytime with pay-as-you-go tokens',
             ]}
             ctaHref="/signup"
-            ctaLabel="Start free"
+            ctaLabel="▶ Press Start"
           />
         </div>
         <p className="mx-auto mt-6 max-w-4xl px-6 text-center text-xs text-ink-faint">
@@ -256,10 +256,10 @@ export default function PricingPage() {
               href="/signup"
               className={cn(
                 buttonVariants({ variant: 'default' }),
-                'h-12 rounded-xl px-8 text-base font-semibold shadow-glow',
+                'h-12 px-8 text-base shadow-glow',
               )}
             >
-              Create your account
+              ▶ Insert Coin
             </Link>
           </div>
         </div>

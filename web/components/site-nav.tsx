@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react'
 import Link from 'next/link'
 import { Menu } from 'lucide-react'
 import { Logo } from './logo'
+import { ScanlineToggle } from './scanline-toggle'
 import { createBrowserClient } from '@/lib/supabase'
 import { Button, buttonVariants } from '@/components/ui/button'
 import {
@@ -60,6 +61,7 @@ export function SiteNav() {
         </div>
 
         <div className="hidden min-w-[200px] items-center justify-end gap-2 md:flex">
+          <ScanlineToggle />
           {loading ? null : isLoggedIn ? (
             <Link href="/dashboard" className={buttonVariants({ variant: 'secondary' })}>
               Dashboard
@@ -70,7 +72,7 @@ export function SiteNav() {
                 Log in
               </Link>
               <Link href="/signup" className={cn(buttonVariants(), 'shadow-glow')}>
-                Start free
+                ▶ Press Start
               </Link>
             </>
           )}
@@ -104,6 +106,9 @@ export function SiteNav() {
               ))}
             </div>
             <div className="mt-4 flex flex-col gap-2 px-4">
+              <div className="pb-2">
+                <ScanlineToggle />
+              </div>
               {loading ? null : isLoggedIn ? (
                 <Link
                   href="/dashboard"
@@ -126,7 +131,7 @@ export function SiteNav() {
                     onClick={() => setOpen(false)}
                     className={cn(buttonVariants(), 'w-full shadow-glow')}
                   >
-                    Start free
+                    ▶ Press Start
                   </Link>
                 </>
               )}

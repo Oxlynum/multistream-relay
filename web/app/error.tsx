@@ -19,11 +19,11 @@ export default function Error({
 
   return (
     <div className="min-h-[60vh] flex flex-col items-center justify-center gap-4 px-6 text-center">
-      <h1 className="text-xl font-semibold text-ink">Something went wrong</h1>
+      <h1 className="font-pixel text-2xl text-brand crt-chroma">GAME OVER</h1>
       <p className="text-ink-faint max-w-md">
         This page hit an unexpected error. Your stream and account are safe.
       </p>
-      <Button onClick={() => reset()}>Try again</Button>
+      <Button onClick={() => reset()}>▶ Continue?</Button>
     </div>
   );
 }

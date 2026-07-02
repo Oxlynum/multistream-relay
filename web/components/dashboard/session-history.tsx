@@ -21,7 +21,7 @@ export function SessionHistory({ sessions }: { sessions: StreamSession[] }) {
 
   return (
     <div>
-      <div className="mb-3 text-sm text-ink-muted">Stream history</div>
+      <div className="mb-3 font-pixel text-[0.6rem] uppercase text-ink-muted">Match History</div>
       <div className="overflow-hidden rounded-2xl border border-line bg-surface">
         <table className="w-full text-sm">
           <thead>

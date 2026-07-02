@@ -22,9 +22,9 @@ export default function GlobalError({
       <body
         style={{
           margin: 0,
-          background: "#0a0a0f",
-          color: "#e6e6ec",
-          fontFamily: "system-ui, -apple-system, sans-serif",
+          background: "#050505",
+          color: "#eaffd6",
+          fontFamily: "ui-monospace, 'JetBrains Mono', 'SF Mono', monospace",
         }}
       >
         <div
@@ -39,25 +39,29 @@ export default function GlobalError({
             textAlign: "center",
           }}
         >
-          <h1 style={{ fontSize: 22, fontWeight: 600, margin: 0 }}>Something went wrong</h1>
-          <p style={{ color: "#9a9aa5", maxWidth: 440, margin: 0, lineHeight: 1.5 }}>
-            An unexpected error broke this page. Your stream and account are unaffected. Try
-            again — if it keeps happening, please let us know.
+          <h1 style={{ fontSize: 26, fontWeight: 800, letterSpacing: 1, margin: 0, textTransform: "uppercase" }}>
+            Game Over
+          </h1>
+          <p style={{ color: "#8fae6e", maxWidth: 440, margin: 0, lineHeight: 1.5 }}>
+            An unexpected error broke this page. Your stream and account are unaffected. Hit
+            continue — if it keeps happening, please let us know.
           </p>
           <button
             onClick={() => reset()}
             style={{
-              background: "#7c5cfc",
-              color: "#fff",
-              border: 0,
-              borderRadius: 8,
+              background: "#a3f000",
+              color: "#0a0f00",
+              border: "2px solid #a3f000",
+              borderRadius: 0,
               padding: "10px 18px",
               fontSize: 14,
-              fontWeight: 600,
+              fontWeight: 700,
+              textTransform: "uppercase",
+              letterSpacing: 1,
               cursor: "pointer",
             }}
           >
-            Try again
+            Continue?
           </button>
         </div>
       </body>

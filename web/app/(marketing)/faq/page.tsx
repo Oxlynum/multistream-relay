@@ -101,10 +101,10 @@ export default function FAQPage() {
               href="/signup"
               className={cn(
                 buttonVariants({ variant: 'default' }),
-                'h-12 rounded-xl px-8 text-base font-semibold shadow-glow',
+                'h-12 px-8 text-base shadow-glow',
               )}
             >
-              Start free
+              ▶ Insert Coin
             </Link>
           </div>
         </div>

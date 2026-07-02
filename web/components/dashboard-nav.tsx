@@ -4,6 +4,7 @@ import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import { createBrowserClient } from '@/lib/supabase'
 import { Logo } from './logo'
+import { ScanlineToggle } from './scanline-toggle'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 
@@ -30,9 +31,12 @@ export function DashboardNav() {
       <div className="mx-auto max-w-5xl px-6">
         <div className="flex h-16 items-center justify-between">
           <Logo href="/" />
-          <Button variant="ghost" size="sm" onClick={signOut}>
-            Sign out
-          </Button>
+          <div className="flex items-center gap-3">
+            <ScanlineToggle />
+            <Button variant="ghost" size="sm" onClick={signOut}>
+              Sign out
+            </Button>
+          </div>
         </div>
         <nav className="-mb-px flex gap-1 overflow-x-auto">
           {TABS.map(t => {

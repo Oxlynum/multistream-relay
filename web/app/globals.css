@@ -5,92 +5,93 @@
 @custom-variant dark (&:is(.dark *));
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   SlimCast design system — "Creator Energy, Premium Grade"
-   Space-black canvas · signature violet→pink→cyan aurora · broadcast-coded live.
-   App is DARK-ONLY: :root and .dark carry the same palette so the .dark variant
-   (and class="dark" on <html>) always resolves correctly.
+   SlimCast design system — "16-BIT ARCADE" reskin
+   Pure-black CRT canvas · neon-lime primary (sampled from the logo) · magenta /
+   cyan / amber / red arcade accents · pixel-square corners · Press Start 2P +
+   JetBrains Mono. App is DARK-ONLY: :root and .dark carry the same palette so
+   the .dark variant (and class="dark" on <html>) always resolves correctly.
    ═══════════════════════════════════════════════════════════════════════════ */
 
 :root {
-  --radius: 0.875rem;
+  --radius: 0;                   /* pixel-square everything */
 
-  /* ── shadcn semantic tokens (dark palette) ── */
-  --background: #0a0a12;
-  --foreground: #f5f4fb;
-  --card: #14141f;
-  --card-foreground: #f5f4fb;
-  --popover: #1c1c2b;
-  --popover-foreground: #f5f4fb;
-  --primary: #7c5cfc;            /* brand violet */
-  --primary-foreground: #0a0a12; /* dark text on bright violet → AA */
-  --secondary: #1c1c2b;
-  --secondary-foreground: #f5f4fb;
-  --muted: #14141f;
-  --muted-foreground: #a2a1b8;
-  --accent: #1c1c2b;             /* shadcn "accent" = a SURFACE, not the brand color */
-  --accent-foreground: #f5f4fb;
-  --destructive: #fb4e5a;
-  --destructive-foreground: #0a0a12;
-  --border: #262635;
-  --input: #3a3a52;
-  --ring: #7c5cfc;
+  /* ── shadcn semantic tokens (arcade palette) ── */
+  --background: #050505;
+  --foreground: #eaffd6;         /* lime-white phosphor */
+  --card: #0d0f0a;
+  --card-foreground: #eaffd6;
+  --popover: #12140c;
+  --popover-foreground: #eaffd6;
+  --primary: #a3f000;            /* neon lime — from the logo (#a0f000 dominant) */
+  --primary-foreground: #0a0f00; /* near-black text on bright lime → AA */
+  --secondary: #12140c;
+  --secondary-foreground: #eaffd6;
+  --muted: #0d0f0a;
+  --muted-foreground: #8fae6e;
+  --accent: #12140c;             /* shadcn "accent" = a SURFACE, not the brand color */
+  --accent-foreground: #eaffd6;
+  --destructive: #ff414d;        /* arcade red */
+  --destructive-foreground: #0a0f00;
+  --border: #2a3320;             /* dim lime-gray hairline */
+  --input: #4d5f33;
+  --ring: #a3f000;
 
-  --chart-1: #7c5cfc;
-  --chart-2: #22d3ee;
-  --chart-3: #ff5da2;
-  --chart-4: #34d399;
-  --chart-5: #fbbf24;
+  --chart-1: #a3f000;            /* lime */
+  --chart-2: #22e8ff;            /* cyan */
+  --chart-3: #ff4df2;            /* magenta */
+  --chart-4: #ffb400;            /* amber */
+  --chart-5: #ff414d;            /* red */
 
-  --sidebar: #0e0e18;
-  --sidebar-foreground: #f5f4fb;
-  --sidebar-primary: #7c5cfc;
-  --sidebar-primary-foreground: #0a0a12;
-  --sidebar-accent: #1c1c2b;
-  --sidebar-accent-foreground: #f5f4fb;
-  --sidebar-border: #262635;
-  --sidebar-ring: #7c5cfc;
+  --sidebar: #080a06;
+  --sidebar-foreground: #eaffd6;
+  --sidebar-primary: #a3f000;
+  --sidebar-primary-foreground: #0a0f00;
+  --sidebar-accent: #12140c;
+  --sidebar-accent-foreground: #eaffd6;
+  --sidebar-border: #2a3320;
+  --sidebar-ring: #a3f000;
 
-  /* ── signature gradients + glows ── */
-  --gradient-brand: linear-gradient(115deg, #7c5cfc 0%, #c247e6 46%, #ff5da2 78%, #22d3ee 100%);
-  --gradient-brand-quiet: linear-gradient(120deg, #7c5cfc 0%, #6a45f0 100%);
-  --gradient-live: linear-gradient(120deg, #22d3ee 0%, #7c5cfc 100%);
-  --shadow-glow: 0 0 0 1px rgba(124, 92, 252, 0.35), 0 10px 40px -10px rgba(124, 92, 252, 0.5);
-  --shadow-live: 0 0 0 1px rgba(255, 59, 107, 0.35), 0 0 32px -6px rgba(255, 59, 107, 0.45);
+  /* ── signature gradients + neon glows ── */
+  --gradient-brand: linear-gradient(115deg, #a3f000 0%, #22e8ff 52%, #ff4df2 100%);
+  --gradient-brand-quiet: linear-gradient(120deg, #a3f000 0%, #8fd400 100%);
+  --gradient-live: linear-gradient(120deg, #a3f000 0%, #22e8ff 100%);
+  --shadow-glow: 0 0 0 2px rgba(163, 240, 0, 0.55), 0 0 26px -4px rgba(163, 240, 0, 0.6);
+  --shadow-live: 0 0 0 2px rgba(255, 65, 77, 0.55), 0 0 26px -6px rgba(255, 65, 77, 0.55);
 }
 
 .dark {
-  --background: #0a0a12;
-  --foreground: #f5f4fb;
-  --card: #14141f;
-  --card-foreground: #f5f4fb;
-  --popover: #1c1c2b;
-  --popover-foreground: #f5f4fb;
-  --primary: #7c5cfc;
-  --primary-foreground: #0a0a12;
-  --secondary: #1c1c2b;
-  --secondary-foreground: #f5f4fb;
-  --muted: #14141f;
-  --muted-foreground: #a2a1b8;
-  --accent: #1c1c2b;
-  --accent-foreground: #f5f4fb;
-  --destructive: #fb4e5a;
-  --destructive-foreground: #0a0a12;
-  --border: #262635;
-  --input: #3a3a52;
-  --ring: #7c5cfc;
-  --chart-1: #7c5cfc;
-  --chart-2: #22d3ee;
-  --chart-3: #ff5da2;
-  --chart-4: #34d399;
-  --chart-5: #fbbf24;
-  --sidebar: #0e0e18;
-  --sidebar-foreground: #f5f4fb;
-  --sidebar-primary: #7c5cfc;
-  --sidebar-primary-foreground: #0a0a12;
-  --sidebar-accent: #1c1c2b;
-  --sidebar-accent-foreground: #f5f4fb;
-  --sidebar-border: #262635;
-  --sidebar-ring: #7c5cfc;
+  --background: #050505;
+  --foreground: #eaffd6;
+  --card: #0d0f0a;
+  --card-foreground: #eaffd6;
+  --popover: #12140c;
+  --popover-foreground: #eaffd6;
+  --primary: #a3f000;
+  --primary-foreground: #0a0f00;
+  --secondary: #12140c;
+  --secondary-foreground: #eaffd6;
+  --muted: #0d0f0a;
+  --muted-foreground: #8fae6e;
+  --accent: #12140c;
+  --accent-foreground: #eaffd6;
+  --destructive: #ff414d;
+  --destructive-foreground: #0a0f00;
+  --border: #2a3320;
+  --input: #4d5f33;
+  --ring: #a3f000;
+  --chart-1: #a3f000;
+  --chart-2: #22e8ff;
+  --chart-3: #ff4df2;
+  --chart-4: #ffb400;
+  --chart-5: #ff414d;
+  --sidebar: #080a06;
+  --sidebar-foreground: #eaffd6;
+  --sidebar-primary: #a3f000;
+  --sidebar-primary-foreground: #0a0f00;
+  --sidebar-accent: #12140c;
+  --sidebar-accent-foreground: #eaffd6;
+  --sidebar-border: #2a3320;
+  --sidebar-ring: #a3f000;
 }
 
 /* ── Map shadcn vars into Tailwind theme namespace (inline = live var() → dark works) ── */
@@ -127,43 +128,57 @@
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
 
-  --radius-sm: calc(var(--radius) - 4px);
-  --radius-md: calc(var(--radius) - 2px);
-  --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) + 4px);
-  --radius-2xl: calc(var(--radius) + 12px);
-  --radius-3xl: calc(var(--radius) + 24px);
+  /* Arcade: every corner is square. Flattened so rounded-lg/xl/2xl/3xl all → 0. */
+  --radius-sm: 0px;
+  --radius-md: 0px;
+  --radius-lg: 0px;
+  --radius-xl: 0px;
+  --radius-2xl: 0px;
+  --radius-3xl: 0px;
 }
 
 /* ── Brand tokens + fonts (plain @theme → bg-brand / text-cyan / font-display generate,
       fonts resolve at RUNTIME against the next/font classNames on <html>) ── */
 @theme {
-  --color-bg: #0a0a12;
-  --color-bg-subtle: #0e0e18;
-  --color-surface: #14141f;
-  --color-surface-2: #1c1c2b;
-  --color-surface-3: #262638;
-  --color-line: #262635;
-  --color-line-strong: #3a3a52;
+  --color-bg: #050505;
+  --color-bg-subtle: #080a06;
+  --color-surface: #0d0f0a;
+  --color-surface-2: #12140c;
+  --color-surface-3: #1a1e12;
+  --color-line: #2a3320;
+  --color-line-strong: #4d5f33;
 
-  --color-brand: #7c5cfc;
-  --color-brand-strong: #6a45f0;
-  --color-cyan: #22d3ee;
-  --color-pink: #ff5da2;
+  --color-brand: #a3f000;        /* neon lime */
+  --color-brand-strong: #8fd400;
+  --color-brand-glow: #c8ff5c;   /* brighter tint for bloom/text-shadow */
+  --color-cyan: #22e8ff;
+  --color-pink: #ff4df2;         /* now hot magenta (key kept for existing utils) */
+  --color-magenta: #ff4df2;
+  --color-amber: #ffb400;
+  --color-red: #ff414d;
 
-  --color-live: #ff3b6b;
-  --color-success: #34d399;
-  --color-warning: #fbbf24;
-  --color-danger: #fb4e5a;
+  --color-live: #ff414d;
+  --color-success: #a3f000;      /* lime = good */
+  --color-warning: #ffb400;
+  --color-danger: #ff414d;
 
-  --color-ink: #f5f4fb;
-  --color-ink-muted: #a2a1b8;
-  --color-ink-faint: #6a6982;
+  --color-ink: #eaffd6;
+  --color-ink-muted: #8fae6e;
+  --color-ink-faint: #5f7444;
 
-  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
-  --font-display: var(--font-space-grotesk), ui-sans-serif, system-ui, sans-serif;
-  --font-heading: var(--font-space-grotesk), ui-sans-serif, system-ui, sans-serif;
+  /* Square the badge pill: rounded-4xl is a Tailwind default (2rem), not covered
+     by the @theme inline radius scale above. */
+  --radius-4xl: 0px;
+
+  /* Body/data/headings = JetBrains Mono (terminal) — including the existing
+     `font-display`/`font-heading` heading classes, which sit on many LONG strings
+     that would overflow Press Start 2P. `font-pixel` is the surgical opt-in for
+     SHORT/big text only (logo, hero words, kickers, stat numbers, short CTAs). */
+  --font-sans: var(--font-jetbrains), ui-monospace, "SF Mono", monospace;
+  --font-display: var(--font-jetbrains), ui-monospace, "SF Mono", monospace;
+  --font-heading: var(--font-jetbrains), ui-monospace, "SF Mono", monospace;
   --font-mono: var(--font-jetbrains), ui-monospace, "SF Mono", monospace;
+  --font-pixel: var(--font-press-start), ui-sans-serif, system-ui, sans-serif;
 }
 
 @layer base {
@@ -179,16 +194,25 @@
     text-rendering: optimizeLegibility;
   }
   ::selection {
-    background: rgba(124, 92, 252, 0.3);
-    color: #fff;
+    background: rgba(163, 240, 0, 0.35);
+    color: #050505;
   }
   :focus-visible {
     @apply outline-none ring-2 ring-brand ring-offset-2;
     --tw-ring-offset-color: var(--color-bg);
   }
-  /* Headings default to the display grotesk */
+  /* Headings default to bold terminal mono (fits the legacy type scale). Opt into
+     the pixel display font with `font-pixel` on short/big text only. */
   h1, h2, h3 {
-    font-family: var(--font-display);
+    font-family: var(--font-heading);
+    font-weight: 700;
+    letter-spacing: -0.01em;
+  }
+  /* Press Start 2P is tall + wide — give it room. Applied via `font-pixel`. */
+  .font-pixel {
+    line-height: 1.4;
+    letter-spacing: 0;
+    font-weight: 400; /* Press Start 2P ships a single weight */
   }
 }
 
@@ -196,21 +220,22 @@
    Signature utilities (aurora text, ambient aurora bg, marquee, live pulse)
    ═══════════════════════════════════════════════════════════════════════════ */
 @layer utilities {
-  /* Aurora gradient text — the hero brand device */
+  /* Neon-chase gradient text — the hero brand device (lime→cyan→magenta scroll + bloom) */
   .text-aurora {
     background: var(--gradient-brand);
-    background-size: 200% 200%;
+    background-size: 300% 100%;
     -webkit-background-clip: text;
     background-clip: text;
     color: transparent;
-    animation: aurora-pan 8s ease-in-out infinite;
+    filter: drop-shadow(0 0 8px rgba(163, 240, 0, 0.45));
+    animation: aurora-pan 6s linear infinite;
   }
   @keyframes aurora-pan {
-    0%, 100% { background-position: 0% 50%; }
-    50% { background-position: 100% 50%; }
+    from { background-position: 0% 50%; }
+    to { background-position: 300% 50%; }
   }
 
-  /* Ambient drifting aurora — hero + final CTA only */
+  /* Arcade backdrop — lime glow + faint pixel grid (hero + final CTA) */
   .aurora-bg {
     position: relative;
     overflow: hidden;
@@ -220,32 +245,35 @@
     content: "";
     position: absolute;
     inset: -25% -10% auto -10%;
-    height: 150%;
+    height: 160%;
     background:
-      radial-gradient(40% 50% at 20% 20%, rgba(124, 92, 252, 0.22), transparent 70%),
-      radial-gradient(38% 45% at 80% 15%, rgba(255, 93, 162, 0.16), transparent 70%),
-      radial-gradient(45% 55% at 60% 80%, rgba(34, 211, 238, 0.14), transparent 70%);
-    filter: blur(40px);
+      radial-gradient(60% 50% at 50% 0%, rgba(163, 240, 0, 0.16), transparent 70%),
+      radial-gradient(40% 45% at 82% 12%, rgba(255, 77, 242, 0.10), transparent 70%),
+      radial-gradient(45% 55% at 15% 85%, rgba(34, 232, 255, 0.10), transparent 70%),
+      repeating-linear-gradient(rgba(163, 240, 0, 0.05) 0 1px, transparent 1px 30px),
+      repeating-linear-gradient(90deg, rgba(34, 232, 255, 0.035) 0 1px, transparent 1px 30px);
     pointer-events: none;
     z-index: -1;
-    animation: aurora-drift 22s ease-in-out infinite alternate;
+    animation: aurora-drift 24s linear infinite;
   }
   @keyframes aurora-drift {
-    from { transform: translate3d(-2%, -1%, 0) scale(1); }
-    to { transform: translate3d(3%, 2%, 0) scale(1.08); }
+    from { background-position: 0 0, 0 0, 0 0, 0 0, 0 0; }
+    to { background-position: 0 0, 0 0, 0 0, 0 30px, 30px 0; }
   }
 
-  /* Brand glow + gradient fills */
+  /* Neon glow + gradient fills (colors flow from the arcade tokens) */
   .shadow-glow { box-shadow: var(--shadow-glow); }
   .shadow-live { box-shadow: var(--shadow-live); }
   .bg-gradient-brand { background-image: var(--gradient-brand); }
   .bg-gradient-brand-quiet { background-image: var(--gradient-brand-quiet); }
   .bg-gradient-live { background-image: var(--gradient-live); }
 
-  /* Faint dotted broadcast grid (optional section texture) */
+  /* Pixel grid (square lines, hard edges) — section texture */
   .bg-dotgrid {
-    background-image: radial-gradient(rgba(124, 92, 252, 0.10) 1px, transparent 1px);
-    background-size: 28px 28px;
+    background-image:
+      repeating-linear-gradient(rgba(163, 240, 0, 0.08) 0 1px, transparent 1px 24px),
+      repeating-linear-gradient(90deg, rgba(163, 240, 0, 0.08) 0 1px, transparent 1px 24px);
+    background-size: 24px 24px;
     -webkit-mask-image: radial-gradient(ellipse 70% 60% at 50% 0%, #000 35%, transparent 100%);
     mask-image: radial-gradient(ellipse 70% 60% at 50% 0%, #000 35%, transparent 100%);
   }
@@ -285,5 +313,99 @@
     .animate-rise {
       animation: none !important;
     }
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   CRT SCREEN — full-screen effect layer (mounted once via <CrtOverlay/>).
+   Vignette + curvature always on; scanlines toggle via `.crt-scanlines` on
+   <html>; the refresh band + flicker are motion-gated for accessibility.
+   ═══════════════════════════════════════════════════════════════════════════ */
+@layer utilities {
+  .crt-screen {
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+    pointer-events: none;
+  }
+  /* Vignette + faint barrel-curvature darkening at the screen edges. */
+  .crt-screen::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(
+      118% 118% at 50% 50%,
+      transparent 58%,
+      rgba(0, 0, 0, 0.28) 82%,
+      rgba(0, 0, 0, 0.6) 100%
+    );
+  }
+  /* Scanlines — hidden until <html> has .crt-scanlines (default ON via layout script). */
+  .crt-lines {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    transition: opacity 0.25s ease;
+    background: repeating-linear-gradient(
+      to bottom,
+      rgba(0, 0, 0, 0) 0,
+      rgba(0, 0, 0, 0) 2px,
+      rgba(0, 0, 0, 0.22) 3px
+    );
+  }
+  .crt-scanlines .crt-lines {
+    opacity: 1;
+  }
+  /* Slow refresh band drifting down the screen. */
+  .crt-bar {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 0;
+    height: 22%;
+    opacity: 0;
+    background: linear-gradient(
+      to bottom,
+      transparent,
+      rgba(163, 240, 0, 0.05),
+      transparent
+    );
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .crt-bar {
+      opacity: 1;
+      animation: crt-scan 7s linear infinite;
+    }
+    .crt-screen {
+      animation: crt-flicker 6s steps(48) infinite;
+    }
+  }
+  @keyframes crt-scan {
+    from {
+      transform: translateY(-120%);
+    }
+    to {
+      transform: translateY(560%);
+    }
+  }
+  @keyframes crt-flicker {
+    0%, 94%, 100% { opacity: 1; }
+    95% { opacity: 0.93; }
+    96% { opacity: 0.99; }
+    97% { opacity: 0.95; }
+    98% { opacity: 1; }
+  }
+
+  /* Chromatic-aberration fringe for big pixel display text (hero-scale only —
+     apply `.crt-chroma` deliberately; NOT on small button/label pixel text). */
+  .crt-chroma {
+    text-shadow:
+      -1.5px 0 rgba(255, 77, 242, 0.55),
+      1.5px 0 rgba(34, 232, 255, 0.55),
+      0 0 18px rgba(163, 240, 0, 0.35);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .crt-bar { animation: none !important; }
+    .crt-screen { animation: none !important; }
   }
 }

@@ -71,7 +71,7 @@ export default function SignupPage() {
 
           <Card className="shadow-lg">
             <CardHeader>
-              <CardTitle className="font-display text-xl">Create your account</CardTitle>
+              <CardTitle className="font-pixel text-base">New Game</CardTitle>
               <CardDescription>Start streaming everywhere in minutes.</CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
@@ -127,7 +127,7 @@ export default function SignupPage() {
                 <Button
                   type="submit"
                   disabled={loading}
-                  className="h-11 w-full rounded-xl text-sm font-semibold shadow-glow"
+                  className="h-11 w-full text-sm shadow-glow"
                 >
                   {loading ? (
                     <>
@@ -135,7 +135,7 @@ export default function SignupPage() {
                       Creating account…
                     </>
                   ) : (
-                    'Create account'
+                    '▶ Insert Coin'
                   )}
                 </Button>
               </form>

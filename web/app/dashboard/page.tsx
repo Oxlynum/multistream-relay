@@ -119,6 +119,8 @@ export default function DashboardPage() {
 
       <main className="mx-auto max-w-5xl space-y-5 px-6 py-10">
 
+        <p className="font-pixel text-xs text-brand">PLAYER 1 — READY</p>
+
         {/* Token balance hero */}
         <BalanceCard
           tokens={credits}
@@ -132,9 +134,9 @@ export default function DashboardPage() {
             <Button
               render={<Link href="/dashboard/credits" />}
               size="lg"
-              className="h-10 px-5 font-semibold"
+              className="h-10 px-5"
             >
-              Buy tokens
+              ▶ Insert Coin
             </Button>
           }
         />
@@ -143,7 +145,7 @@ export default function DashboardPage() {
         <Card className="border-line">
           <CardContent className="space-y-5 py-1">
             <div className="flex items-center justify-between gap-3">
-              <div className="text-sm text-ink-muted">Streaming stats</div>
+              <div className="font-pixel text-[0.6rem] uppercase text-ink-muted">Hi-Scores</div>
               <Tabs value={period} onValueChange={(v) => setPeriod(v as string)}>
                 <TabsList>
                   {PERIODS.map(({ value, label }) => (

@@ -33,7 +33,7 @@ export default function StreamPage() {
       <main className="mx-auto max-w-3xl space-y-6 px-6 py-10">
         <div>
           <Kicker color="cyan">Control room</Kicker>
-          <h1 className="mt-3 font-display text-2xl font-semibold text-ink">Live status</h1>
+          <h1 className="mt-3 font-pixel text-lg text-ink">On Air</h1>
           <p className="mt-1 text-sm text-ink-muted">
             Start streaming from OBS — SlimCast spins up a GPU and goes live automatically.
           </p>

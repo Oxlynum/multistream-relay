@@ -13,7 +13,7 @@ const ACHIEVEMENTS = [
 export function AchievementGrid({ earnedKeys }: { earnedKeys: string[] }) {
   return (
     <div>
-      <div className="mb-3 text-sm text-ink-muted">Achievements</div>
+      <div className="mb-3 font-pixel text-[0.6rem] uppercase text-ink-muted">Achievements</div>
       <div className="space-y-2">
         {ACHIEVEMENTS.map((a) => {
           const earned = earnedKeys.includes(a.key)
@@ -21,15 +21,20 @@ export function AchievementGrid({ earnedKeys }: { earnedKeys: string[] }) {
             <div
               key={a.key}
               className={cn(
-                'flex items-center justify-between rounded-xl border px-4 py-3',
+                'flex items-center justify-between border-2 px-4 py-3',
                 earned ? 'border-line bg-surface' : 'border-line/50 bg-surface-2/40',
               )}
             >
               <div className="flex items-center gap-3">
-                <span className={cn('text-lg', earned ? 'text-success' : 'text-ink-faint opacity-40')}>
-                  {earned ? '✓' : '○'}
+                <span className={cn('text-lg leading-none', earned ? 'text-success' : 'text-ink-faint opacity-40')}>
+                  {earned ? '★' : '☆'}
                 </span>
-                <span className={cn('text-sm', earned ? 'text-ink' : 'text-ink-faint')}>{a.label}</span>
+                <div className="flex flex-col gap-0.5">
+                  <span className={cn('text-sm', earned ? 'text-ink' : 'text-ink-faint')}>{a.label}</span>
+                  <span className={cn('font-pixel text-[7px] uppercase', earned ? 'text-success' : 'text-ink-faint/60')}>
+                    {earned ? 'Unlocked' : 'Locked'}
+                  </span>
+                </div>
               </div>
               <span className={cn('font-mono text-sm', earned ? 'text-success' : 'text-ink-faint')}>
                 {a.reward}

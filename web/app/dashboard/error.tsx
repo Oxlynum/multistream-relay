@@ -19,11 +19,11 @@ export default function DashboardError({
 
   return (
     <div className="min-h-[50vh] flex flex-col items-center justify-center gap-4 px-6 text-center">
-      <h1 className="text-xl font-semibold text-ink">This section failed to load</h1>
+      <h1 className="font-pixel text-xl text-brand crt-chroma">GAME OVER</h1>
       <p className="text-ink-faint max-w-md">
         Something went wrong loading your dashboard. Your stream and account are unaffected.
       </p>
-      <Button onClick={() => reset()}>Try again</Button>
+      <Button onClick={() => reset()}>▶ Continue?</Button>
     </div>
   );
 }

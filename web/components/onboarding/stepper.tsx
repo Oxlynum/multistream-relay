@@ -26,7 +26,7 @@ export function Stepper({ steps, step }: { steps: string[]; step: number }) {
               className={cn(
                 'text-center font-mono text-[0.62rem] uppercase tracking-[0.12em] transition-colors sm:text-[0.68rem]',
                 active
-                  ? 'text-ink [text-shadow:0_0_12px_rgba(124,92,252,0.55)]'
+                  ? 'text-ink [text-shadow:0_0_12px_rgba(163,240,0,0.55)]'
                   : filled
                     ? 'text-ink-muted'
                     : 'text-ink-faint',

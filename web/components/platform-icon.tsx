@@ -2,11 +2,14 @@ import { cn } from "@/lib/utils"
 
 export type PlatformKey = "twitch" | "youtube" | "kick" | "tiktok"
 
+// Arcade neon remap. Kick's brand green (#53FC18) collides with the lime primary,
+// so all four get a distinct neon that never competes with lime: purple / red /
+// amber / cyan. (Lime is reserved for the SlimCast brand, never a platform.)
 export const PLATFORM_META: Record<PlatformKey, { label: string; tint: string }> = {
-  twitch: { label: "Twitch", tint: "#9146FF" },
-  youtube: { label: "YouTube", tint: "#FF0033" },
-  kick: { label: "Kick", tint: "#53FC18" },
-  tiktok: { label: "TikTok", tint: "#25F4EE" },
+  twitch: { label: "Twitch", tint: "#b44dff" },  // neon purple
+  youtube: { label: "YouTube", tint: "#ff414d" }, // arcade red
+  kick: { label: "Kick", tint: "#ffb400" },       // amber (remapped off clashing green)
+  tiktok: { label: "TikTok", tint: "#22e8ff" },   // electric cyan
 }
 
 const PATHS: Record<PlatformKey, string> = {
@@ -47,10 +50,10 @@ export function PlatformBadge({
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-2 rounded-full border px-3 py-1 text-sm font-medium",
+        "inline-flex items-center gap-2 border-2 px-3 py-1 font-mono text-sm font-medium",
         className,
       )}
-      style={{ borderColor: `${tint}40`, color: tint, background: `${tint}14` }}
+      style={{ borderColor: `${tint}55`, color: tint, background: `${tint}14` }}
     >
       <PlatformIcon platform={platform} className="h-4 w-4" />
       {label}

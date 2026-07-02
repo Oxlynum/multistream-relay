@@ -175,9 +175,9 @@ export default function Home() {
               <span className="text-ink">Streaming infrastructure for creators</span>
             </span>
 
-            <h1 className="mt-7 font-display text-[clamp(2.75rem,6.5vw,4.75rem)] leading-[1.02] font-bold tracking-[-0.02em] text-ink">
+            <h1 className="mt-7 font-pixel text-[clamp(1.1rem,3.4vw,2.25rem)] leading-[1.45] tracking-tight text-ink crt-chroma">
               One stream up.
-              <GradientText as="span" className="block">
+              <GradientText as="span" className="mt-3 block">
                 Four platforms live.
               </GradientText>
             </h1>
@@ -189,16 +189,16 @@ export default function Home() {
                 href="/signup"
                 className={cn(
                   buttonVariants({ variant: 'default' }),
-                  'h-12 rounded-xl px-7 text-base font-semibold shadow-glow',
+                  'h-12 px-7 text-base shadow-glow',
                 )}
               >
-                Start free — 2 free tokens
+                ▶ Press Start
               </Link>
               <a
                 href="#how"
                 className={cn(
                   buttonVariants({ variant: 'outline' }),
-                  'h-12 rounded-xl px-7 text-base font-semibold',
+                  'h-12 px-7 text-base',
                 )}
               >
                 See how it works
@@ -206,7 +206,7 @@ export default function Home() {
             </div>
 
             <p className="mt-5 text-xs text-ink-faint">
-              Free during early access · account verification required
+              Free during early access · 2 free tokens · account verification required
             </p>
           </div>
 
@@ -423,10 +423,10 @@ export default function Home() {
               href="/signup"
               className={cn(
                 buttonVariants({ variant: 'default' }),
-                'h-12 rounded-xl px-8 text-base font-semibold shadow-glow',
+                'h-12 px-8 text-base shadow-glow',
               )}
             >
-              Create your account
+              ▶ Insert Coin
             </Link>
           </div>
         </div>

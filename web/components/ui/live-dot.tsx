@@ -24,9 +24,9 @@ export function LiveDot({
       className={cn("relative inline-flex shrink-0", className)}
       style={{ width: size, height: size }}
     >
-      <span className={cn("absolute inset-0 rounded-full animate-ping-slow", bg)} />
+      <span className={cn("absolute inset-0 animate-ping-slow", bg)} />
       <span
-        className={cn("relative rounded-full", bg)}
+        className={cn("relative", bg)}
         style={{ width: size, height: size }}
       />
     </span>

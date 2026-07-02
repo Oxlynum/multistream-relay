@@ -15,12 +15,12 @@ export function Kicker({
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-2 font-mono text-xs font-semibold uppercase tracking-[0.2em]",
+        "inline-flex items-center gap-2 font-pixel text-[0.6rem] uppercase tracking-normal",
         colorClass,
         className,
       )}
     >
-      <span aria-hidden className="inline-block h-3 w-[3px] rounded-full bg-current" />
+      <span aria-hidden className="inline-block h-2 w-2 bg-current" />
       {children}
     </span>
   )

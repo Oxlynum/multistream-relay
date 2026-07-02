@@ -182,14 +182,14 @@ function PlatformTile({ platform, state, active }: { platform: string; state: st
   const isRestarting = active && state === 'restarting'
   const isError      = active && state === 'error'
 
-  const dotColor = isLive ? '#37d67a' : isRestarting ? '#ffb020' : isError ? '#ff5470' : '#555e6e'
+  const dotColor = isLive ? '#a3f000' : isRestarting ? '#ffb400' : isError ? '#ff414d' : '#4d5f33'
   const label    = isLive ? 'live' : isRestarting ? 'reconnecting' : isError ? 'error' : active ? 'connecting…' : 'idle'
   const labelCls = isLive ? 'text-success' : isRestarting ? 'text-warning' : isError ? 'text-danger' : 'text-ink-faint'
 
   return (
     <div className={`bg-surface-2 border rounded-xl px-3 py-2.5 ${isError ? 'border-danger/40' : 'border-line'}`}>
       <div className="flex items-center gap-1.5 mb-0.5">
-        <span style={{ color: dotColor }} className="text-[10px] leading-none">●</span>
+        <span style={{ color: dotColor }} className="text-[10px] leading-none">■</span>
         <span className="text-xs font-medium text-ink">{PLATFORM_LABELS[platform]}</span>
       </div>
       <div className={`text-xs ${labelCls}`}>{label}</div>
@@ -297,7 +297,7 @@ export function StreamManager() {
   if (phase === 'provisioning') {
     return (
       <div className="bg-surface border border-warning/30 rounded-2xl p-6 flex items-start gap-3">
-        <PingDot color="#fbbf24" />
+        <PingDot color="#ffb400" />
         <div>
           <div className="text-sm font-semibold text-warning mb-1">Finding the nearest server…</div>
           <div className="text-xs text-ink-faint">
@@ -313,7 +313,7 @@ export function StreamManager() {
     return (
       <div className="bg-surface border border-warning/30 rounded-2xl p-6 space-y-4">
         <div className="flex items-center gap-2.5">
-          <PingDot color="#fbbf24" />
+          <PingDot color="#ffb400" />
           <div>
             <div className="text-sm font-semibold text-warning">Server ready · waiting for OBS</div>
             <div className="text-xs text-ink-faint mt-0.5">
@@ -337,7 +337,7 @@ export function StreamManager() {
     return (
       <div className="bg-surface border border-warning/30 rounded-2xl p-6 space-y-4">
         <div className="flex items-center gap-2.5">
-          <PingDot color="#fbbf24" />
+          <PingDot color="#ffb400" />
           <div>
             <div className="text-sm font-semibold text-warning">OBS connected · starting streams…</div>
             <div className="text-xs text-ink-faint mt-0.5">
@@ -370,7 +370,7 @@ export function StreamManager() {
       {/* Header */}
       <div className="flex items-start justify-between gap-4">
         <div className="flex items-center gap-2.5">
-          <PingDot color={anyError ? '#f87171' : anyRestarting ? '#fbbf24' : '#37d67a'} />
+          <PingDot color={anyError ? '#ff414d' : anyRestarting ? '#ffb400' : '#a3f000'} />
           <div>
             <div className={`text-sm font-semibold leading-none
               ${anyError ? 'text-danger' : anyRestarting ? 'text-warning' : 'text-ink'}`}>

@@ -28,13 +28,13 @@ const PLATFORM_LABELS: Record<string, string> = {
   twitch: 'Twitch', kick: 'Kick', youtube: 'YouTube', tiktok: 'TikTok',
 }
 
-const LINE_COLOR = '#3b82f6'
+const LINE_COLOR = '#a3f000' // neon lime
 
 function healthColor(score: number | null): string {
-  if (score === null) return '#475569'
-  if (score >= 80) return '#10b981'
-  if (score >= 50) return '#f59e0b'
-  return '#f43f5e'
+  if (score === null) return '#4d5f33'
+  if (score >= 80) return '#a3f000' // lime = good
+  if (score >= 50) return '#ffb400' // amber
+  return '#ff414d'                  // red
 }
 
 function fmtTime(iso: string): string {
@@ -50,7 +50,7 @@ function CustomTooltip({ active, payload, label }: {
   if (!active || !payload?.length) return null
   const pt = payload[0]?.payload
   return (
-    <div className="bg-surface-2 border border-line rounded-lg px-3 py-2 text-xs space-y-1">
+    <div className="bg-surface-2 border-2 border-line px-3 py-2 text-xs space-y-1">
       <div className="text-ink-faint font-mono mb-1">{label}</div>
       {pt?.health !== null && pt?.health !== undefined && (
         <div style={{ color: healthColor(pt.health) }}>
@@ -131,12 +131,12 @@ export function ConnectionHealthGraph({ enabledPlatforms }: { enabledPlatforms?:
     : `→ ${PLATFORM_LABELS[selectedKey] ?? selectedKey}`
 
   return (
-    <div className="bg-surface border border-line rounded-2xl p-5 space-y-4">
+    <div className="bg-surface border-2 border-line p-5 space-y-4">
       {/* Header */}
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-2">
           <span
-            className="h-2 w-2 rounded-full flex-shrink-0"
+            className="h-2 w-2 flex-shrink-0"
             style={{ backgroundColor: healthColor(latest?.health ?? null) }}
           />
           <span className="text-xs text-ink-faint">{label}</span>
@@ -168,17 +168,17 @@ export function ConnectionHealthGraph({ enabledPlatforms }: { enabledPlatforms?:
       {/* Chart */}
       {isEmpty ? (
         <div className="flex flex-col items-center justify-center h-36 gap-2">
-          <span className="h-2 w-2 rounded-full animate-pulse bg-ink-faint/40" />
+          <span className="h-2 w-2 animate-pulse bg-ink-faint/40" />
           <span className="text-xs text-ink-faint">Start streaming to see connection health</span>
         </div>
       ) : (
         <div className="h-44">
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={points} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="rgba(30,41,59,0.8)" vertical={false} />
+              <CartesianGrid strokeDasharray="3 3" stroke="rgba(163,240,0,0.1)" vertical={false} />
               <XAxis
                 dataKey="t"
-                tick={{ fontSize: 10, fill: '#475569', fontFamily: 'monospace' }}
+                tick={{ fontSize: 10, fill: '#8fae6e', fontFamily: 'monospace' }}
                 tickLine={false}
                 axisLine={false}
                 interval="preserveStartEnd"
@@ -186,7 +186,7 @@ export function ConnectionHealthGraph({ enabledPlatforms }: { enabledPlatforms?:
               />
               <YAxis
                 domain={[0, 100]}
-                tick={{ fontSize: 10, fill: '#475569' }}
+                tick={{ fontSize: 10, fill: '#8fae6e' }}
                 tickLine={false}
                 axisLine={false}
                 tickFormatter={v => `${v}%`}

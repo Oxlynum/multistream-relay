@@ -1,22 +1,24 @@
 import type { Metadata } from "next";
-import { Space_Grotesk, Inter, JetBrains_Mono } from "next/font/google";
+import { Press_Start_2P, JetBrains_Mono } from "next/font/google";
 import { Analytics } from "@vercel/analytics/next";
 import { SpeedInsights } from "@vercel/speed-insights/next";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
+import { CrtOverlay } from "@/components/crt-overlay";
 import "./globals.css";
 
-const display = Space_Grotesk({
-  variable: "--font-space-grotesk",
+// Runs before first paint: apply the saved scanline preference (default ON) to
+// <html> so there's no flash and no hydration mismatch on the toggled class.
+const SCANLINE_INIT = `(function(){try{var v=localStorage.getItem('slimcast-scanlines');if(v===null||v==='1')document.documentElement.classList.add('crt-scanlines');}catch(e){document.documentElement.classList.add('crt-scanlines');}})();`;
+
+// Pixel display font for short/big text (hero words, logo, buttons, kickers).
+const display = Press_Start_2P({
+  variable: "--font-press-start",
   subsets: ["latin"],
-  weight: ["500", "600", "700"],
+  weight: ["400"],
 });
 
-const sans = Inter({
-  variable: "--font-inter",
-  subsets: ["latin"],
-});
-
+// Terminal mono carries all body/data/headings.
 const mono = JetBrains_Mono({
   variable: "--font-jetbrains",
   subsets: ["latin"],
@@ -58,11 +60,14 @@ export default function RootLayout({
     <html
       lang="en"
       data-scroll-behavior="smooth"
-      className={`dark ${display.variable} ${sans.variable} ${mono.variable} h-full antialiased`}
+      suppressHydrationWarning
+      className={`dark ${display.variable} ${mono.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col bg-bg text-ink">
+        <script dangerouslySetInnerHTML={{ __html: SCANLINE_INIT }} />
         <TooltipProvider delay={150}>{children}</TooltipProvider>
         <Toaster />
+        <CrtOverlay />
         <Analytics />
         <SpeedInsights />
       </body>

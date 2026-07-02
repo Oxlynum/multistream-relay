@@ -64,7 +64,7 @@ function LoginInner() {
 
           <Card className="shadow-lg">
             <CardHeader>
-              <CardTitle className="font-display text-xl">Welcome back</CardTitle>
+              <CardTitle className="font-pixel text-base">Continue?</CardTitle>
               <CardDescription>Sign in to your SlimCast account.</CardDescription>
             </CardHeader>
             <CardContent>
@@ -103,7 +103,7 @@ function LoginInner() {
                 <Button
                   type="submit"
                   disabled={loading}
-                  className="h-11 w-full rounded-xl text-sm font-semibold shadow-glow"
+                  className="h-11 w-full text-sm shadow-glow"
                 >
                   {loading ? (
                     <>
@@ -111,7 +111,7 @@ function LoginInner() {
                       Signing in…
                     </>
                   ) : (
-                    'Sign in'
+                    '▶ Press Start'
                   )}
                 </Button>
               </form>
@@ -121,7 +121,7 @@ function LoginInner() {
           <p className="mt-6 text-center text-sm text-ink-muted">
             No account?{' '}
             <Link href="/signup" className="font-medium text-brand hover:text-brand-strong">
-              Start free
+              ▶ Press Start
             </Link>
           </p>
         </div>
