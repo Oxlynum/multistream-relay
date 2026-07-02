@@ -7,7 +7,7 @@
 import {
   buildBillingContext,
   computeBurnRate,
-  deductTokens,
+  billStreamIntervalTx,
   spendableTokens,
   type BillingPlatformRow,
   type OutputSettingsMap,
@@ -57,19 +57,26 @@ export interface BillResult {
  */
 export async function billStreamInterval(opts: {
   userId: string
+  /** gpu_instances.id — the billing cursor lives here (last_billed_at) and anchors the ledger. */
+  instanceId: string
+  /** stream_sessions.id (nullable) — the running credits_deducted total accrues here. */
+  sessionId: string | null
   profile: BillProfile | null
   platforms: BillingPlatformRow[]
   streaming: boolean
-  /** CORR-04: tokens carried over from prior beats whose deduct_tokens RPC failed. */
+  /** CORR-04: tokens carried over from prior beats whose deduction RPC failed. */
   priorDebt?: number
+  /** Billing cursor (last_billed_at). null on the first bill of a session. */
+  lastBilledAtMs: number | null
+  /** Liveness stamp (last_seen_at) — the fallback elapsed anchor on the first bill only. */
   lastSeenAtMs: number
   nowMs: number
   billingActive: boolean
   devBypass?: boolean
 }): Promise<BillResult> {
   const {
-    userId, profile, platforms, streaming, priorDebt = 0,
-    lastSeenAtMs, nowMs, billingActive, devBypass = false,
+    userId, instanceId, sessionId, profile, platforms, streaming, priorDebt = 0,
+    lastBilledAtMs, lastSeenAtMs, nowMs, billingActive, devBypass = false,
   } = opts
 
   const plan: Plan = profile?.plan === 'subscription' ? 'subscription' : 'payg'
@@ -79,14 +86,18 @@ export async function billStreamInterval(opts: {
   const ctx = buildBillingContext(platforms, outputSettings, has2kAddon, streaming)
   const burnRate = computeBurnRate(ctx, streaming, plan)
 
-  const elapsed = Math.min(Math.max(0, (nowMs - lastSeenAtMs) / 1000), MAX_BILL_INTERVAL_S)
+  // Bill from the last BILLED moment (the cursor), NOT the liveness stamp — decoupled so a
+  // liveness-only update can't shift the billing anchor (M5). First bill (cursor null) anchors on
+  // the last liveness beat. Capped so a long gap (missed beats / restart) can't surprise-overcharge.
+  const anchorMs = lastBilledAtMs ?? lastSeenAtMs
+  const elapsed = Math.min(Math.max(0, (nowMs - anchorMs) / 1000), MAX_BILL_INTERVAL_S)
   // 6dp (not 3) so a 10s passthrough beat (0.05–0.1 tok/hr → ~0.0001–0.0003 tok) is a
   // non-zero charge that the numeric(12,6) balance accumulates — otherwise passthrough
   // rounds to free at the heartbeat cadence (revenue leak; violates "never free").
   const deduct = parseFloat((burnRate * elapsed / 3600).toFixed(6))
-  // CORR-04: charge this beat's cost PLUS any debt carried from prior beats whose deduct_tokens
-  // RPC failed. Settling the whole `owed` at once on recovery keeps billing accurate. (deduct
-  // stays this-beat-only for telemetry; owed is what we actually try to collect.)
+  // CORR-04: charge this beat's cost PLUS any debt carried from prior beats whose deduction RPC
+  // failed. Settling the whole `owed` at once on recovery keeps billing accurate. (deduct stays
+  // this-beat-only for telemetry; owed is what we actually try to collect.)
   const owed = parseFloat((deduct + Math.max(0, priorDebt)).toFixed(6))
 
   let spendableAfter = spendableTokens(profile)
@@ -94,25 +105,32 @@ export async function billStreamInterval(opts: {
   let unbilledDebt = 0
 
   if (billingActive && owed > 0 && !devBypass) {
-    const after = await deductTokens(userId, owed)
-    if (after !== null) {
-      // Settled this beat's charge AND all carried debt.
-      spendableAfter = after
-      charged = true
-    } else {
-      // CORR-04 fail-closed: deduct_tokens failed. Carry the FULL owed forward (the caller
+    // Idempotent + atomic: CAS the cursor, append the ledger row, deduct allotment-first — all in
+    // one txn. A duplicate/overlapping beat for the same interval charges nothing (M5).
+    const res = await billStreamIntervalTx({
+      instanceId, userId, sessionId,
+      prevBilledAt: lastBilledAtMs !== null ? new Date(lastBilledAtMs).toISOString() : null,
+      periodStart: new Date(anchorMs).toISOString(),
+      periodEnd: new Date(nowMs).toISOString(),
+      seconds: elapsed, tokens: owed, burnRate, billedModel: plan,
+    })
+    if (res === null) {
+      // CORR-04 fail-closed: the RPC call errored. Carry the FULL owed forward (the caller
       // persists it on the session row so it accrues across beats) and drop the local spendable
-      // estimate by it, so kill-on-empty trips once accrued debt reaches the balance — instead
-      // of the OLD behaviour, which discarded the charge and reset to the full un-decremented
-      // balance every beat → silent free streaming for the entire duration of the fault.
-      // NB AT-LEAST-ONCE: if the RPC actually COMMITTED but its response was lost (timeout after
-      // commit), the balance is already decremented yet we treat it as failed and carry `owed`
-      // forward → the next successful beat over-charges by ~one beat's owed. Bounded (~one beat),
-      // self-limiting, and in the SAFE over-charge direction — an accepted price of closing the
-      // far larger silent-free-streaming leak; a future idempotent deduct (request-id dedup)
-      // would eliminate it.
+      // estimate by it, so kill-on-empty trips once accrued debt reaches the balance — instead of
+      // silently granting free streaming for the whole duration of the fault.
+      // NB AT-LEAST-ONCE: if the txn COMMITTED but its response was lost (timeout after commit),
+      // the balance is already decremented yet we carry `owed` forward → the next successful beat
+      // over-charges by ~one beat. Bounded, self-limiting, and in the SAFE over-charge direction.
       unbilledDebt = owed
       spendableAfter = Math.max(0, spendableAfter - owed)
+    } else {
+      // res.charged=true  → we won the CAS and deducted `owed`.
+      // res.charged=false → a concurrent/retried beat already billed this exact interval.
+      // BOTH mean the interval is fully accounted for, so settle any carried debt either way.
+      spendableAfter = res.spendable
+      charged = res.charged
+      unbilledDebt = 0
     }
   }
 

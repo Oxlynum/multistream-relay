@@ -294,6 +294,55 @@ export async function deductTokens(userId: string, amount: number): Promise<numb
   return data === null || data === undefined ? null : Number(data)
 }
 
+export interface BillIntervalTxResult {
+  /** true iff THIS call won the CAS and actually deducted; false on an idempotent skip. */
+  charged: boolean
+  /** spendable (allotment + purchased) after the deduction (or the current value on a skip). */
+  spendable: number
+}
+
+/**
+ * Idempotent, atomic meter for ONE heartbeat interval (M5 + M6). In one transaction it
+ * CAS-advances the billing cursor, appends the usage_events ledger row, deducts allotment-first,
+ * and accrues the session total. A duplicate/overlapping beat for the same interval charges
+ * NOTHING (charged=false). Returns null on RPC error so the caller can apply the CORR-04
+ * fail-closed debt carry. See migration 20260702000001_billing_ledger.
+ */
+export async function billStreamIntervalTx(args: {
+  instanceId: string
+  userId: string
+  sessionId: string | null
+  prevBilledAt: string | null
+  periodStart: string
+  periodEnd: string
+  seconds: number
+  tokens: number
+  burnRate: number
+  billedModel: string
+}): Promise<BillIntervalTxResult | null> {
+  const { createServerClient } = await import('@/lib/supabase')
+  const supabase = createServerClient()
+  const { data, error } = await supabase.rpc('bill_stream_interval', {
+    p_instance_id: args.instanceId,
+    p_user_id: args.userId,
+    p_session_id: args.sessionId,
+    p_prev_billed_at: args.prevBilledAt,
+    p_period_start: args.periodStart,
+    p_period_end: args.periodEnd,
+    p_seconds: args.seconds,
+    p_tokens: args.tokens,
+    p_burn_rate: args.burnRate,
+    p_billed_model: args.billedModel,
+  })
+  if (error) {
+    console.error('[billing] bill_stream_interval failed:', error.message)
+    return null
+  }
+  const row = Array.isArray(data) ? data[0] : data
+  if (!row) return null
+  return { charged: !!row.out_charged, spendable: Number(row.out_spendable ?? 0) }
+}
+
 /**
  * Grant the monthly subscription allotment exactly once per Stripe invoice (rollover,
  * capped). Returns true if granted now, false if already granted (idempotent).

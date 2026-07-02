@@ -175,7 +175,7 @@ async function handleVpsStatus(request: NextRequest, hubId: string): Promise<Res
   const reported = body.streams ?? []
   const { data: sessions } = await supabase
     .from('gpu_instances')
-    .select('id, user_id, ingest_key, idle_since, max_session_at, last_seen_at, unbilled_debt')
+    .select('id, user_id, ingest_key, idle_since, max_session_at, last_seen_at, last_billed_at, session_id, unbilled_debt')
     .eq('vps_hub_id', hubId)
 
   // Batch-load the billing inputs for every tenant on this hub (the VPS heartbeat is the
@@ -220,13 +220,19 @@ async function handleVpsStatus(request: NextRequest, hubId: string): Promise<Res
     const prevSeen = s.last_seen_at ? new Date(s.last_seen_at).getTime() : now
 
     // Plan-aware per-tenant billing (allotment-first; passthrough cheaper for subscribers).
+    // Idempotent + ledgered via bill_stream_interval — the billing cursor (last_billed_at) is
+    // the anchor, so a duplicate/overlapping hub beat can't double-charge this interval (M5).
+    const lastBilled = (s as { last_billed_at?: string | null }).last_billed_at
     const bill = await billStreamInterval({
       userId,
+      instanceId: s.id as string,
+      sessionId: (s as { session_id?: string | null }).session_id ?? null,
       profile: profileById.get(userId) ?? null,
       platforms: platformsByUser.get(userId) ?? [],
       streaming,
       // CORR-04: carry forward any debt this tenant accrued when a prior beat's deduct RPC failed.
       priorDebt: Number((s as { unbilled_debt?: number | string | null }).unbilled_debt ?? 0),
+      lastBilledAtMs: lastBilled ? new Date(lastBilled).getTime() : null,
       lastSeenAtMs: prevSeen,
       nowMs: now,
       billingActive: BILLING_ACTIVE,
