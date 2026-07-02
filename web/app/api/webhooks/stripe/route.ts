@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { stripe } from '@/lib/stripe'
+import { stripe, TOKEN_PRICE_CENTS } from '@/lib/stripe'
 import { createServerClient } from '@/lib/supabase'
 import { creditPaymentOnce, grantSubscriptionAllotment, SUB_ALLOTMENT_TOKENS, SUB_ALLOTMENT_CAP } from '@/lib/billing'
 import { captureError } from '@/lib/observability'
@@ -41,6 +41,13 @@ export async function POST(req: NextRequest) {
   }
 
   const supabase = createServerClient()
+
+  // Event-level idempotency (defense-in-depth over the per-payment/invoice guards): Stripe can
+  // redeliver an event. Skip one we've already fully processed. Recorded AFTER the switch below,
+  // so a transiently-failed event (which 500s and does NOT record) is still reprocessed on retry.
+  const { data: alreadyProcessed } = await supabase
+    .from('stripe_events').select('event_id').eq('event_id', event.id).maybeSingle()
+  if (alreadyProcessed) return NextResponse.json({ received: true, duplicate: true })
 
   // H8: any handler throw (transient Stripe/DB error, or a bug) is captured + alerted, then we
   // return 500 so Stripe RETRIES on its backoff schedule. Every money path here is idempotent
@@ -88,7 +95,18 @@ export async function POST(req: NextRequest) {
 
       if (session.mode !== 'payment' || session.payment_status !== 'paid') break
 
-      const tokens = parseFloat(session.metadata?.credits_tokens ?? '0') || 0
+      const claimedTokens = parseFloat(session.metadata?.credits_tokens ?? '0') || 0
+      // Hardening: never credit more tokens than the money actually paid for. credits_tokens is
+      // server-set (so it matches today), but cross-checking amount_total stops a tampered or
+      // mismatched session from over-crediting. 1 token = TOKEN_PRICE_CENTS (=$2).
+      const paidTokens = (session.amount_total ?? 0) / TOKEN_PRICE_CENTS
+      let tokens = claimedTokens
+      if (claimedTokens > paidTokens + 0.001) {
+        captureError('webhook.stripe.token_amount_mismatch',
+          new Error('credited tokens exceed amount paid — capping to amount'),
+          { eventId: event.id, claimedTokens, paidTokens, amountTotal: session.amount_total ?? 0, alert: true })
+        tokens = paidTokens
+      }
       // Idempotent on the payment_intent id: a Stripe webhook retry (or the
       // session firing twice) can never double-credit.
       const payId = (session.payment_intent as string) ?? session.id
@@ -268,6 +286,10 @@ export async function POST(req: NextRequest) {
     // Retry-safe (idempotent money paths above) → ask Stripe to retry rather than swallow it.
     return NextResponse.json({ error: 'handler error' }, { status: 500 })
   }
+
+  // Processed successfully → record the event id so a redelivery is skipped at the top. Best-
+  // effort: a concurrent delivery may have raced us to the insert (harmless — money is idempotent).
+  await supabase.from('stripe_events').insert({ event_id: event.id, type: event.type })
 
   return NextResponse.json({ received: true })
 }

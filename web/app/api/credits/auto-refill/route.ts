@@ -1,5 +1,5 @@
 import { createServerClient } from '@/lib/supabase'
-import { stripe, HOURLY_PRICE_ID, hoursToTokens } from '@/lib/stripe'
+import { stripe, hoursToTokens } from '@/lib/stripe'
 import { creditPaymentOnce } from '@/lib/billing'
 
 // GET — return current auto-refill settings + saved card info.
@@ -88,8 +88,11 @@ export async function triggerAutoRefill(userId: string): Promise<boolean> {
 
   if (!profile?.auto_refill_enabled) return false
   if (!profile.stripe_customer_id || !profile.stripe_payment_method_id) return false
-  // Don't double-refill if balance already climbed above 1 token (race guard).
-  if ((parseFloat(profile.streaming_credits ?? '0') || 0) > 1.0) return false
+  // Don't double-refill if the balance is already at/above 1 token (race guard). Uses >= (not >):
+  // the minimum refill is 1 token (hours >= 1), so refilling from ~0 lands the balance at exactly
+  // 1.0 — with the old `> 1.0` that value slips through and triggers a SECOND refill → double
+  // charge. `>= 1.0` treats a full 1-token balance as "no refill needed".
+  if ((parseFloat(profile.streaming_credits ?? '0') || 0) >= 1.0) return false
 
   const hours = profile.auto_refill_hours ?? 10
   const amountCents = hours * 200 // $2/hr
