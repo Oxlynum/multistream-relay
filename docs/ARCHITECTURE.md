@@ -77,7 +77,7 @@ The GPU's shared H.264 encode is tuned for high-motion quality — `p7 / tune hq
 
 ## Roadmap & test runbooks
 
-**Active plans** (`plans/`): `enterprise-audit.md` (hardening roadmap) · `dualstream.md` (vertical 9:16).
+**Active plans** (`plans/`): `fableroadmap.md` (audit + Phase A/D hardening — mostly shipped 2026-07-02) · `enterprise-audit.md` (hardening roadmap) · `dualstream.md` (vertical 9:16) · `gpu-multitenant.md` (GPU multi-tenancy scale plan).
 **Reference:** `PRODUCT_PLAN.md` (business/licensing) · `production-checklist.md` (pre-launch cutover) ·
 `macvpc.md` (Windows enablement).
 **History** (`archive/`): `gputest.md` (GPU transcode-bridge — Phase 2 passed) · `hevcpasstest.md`

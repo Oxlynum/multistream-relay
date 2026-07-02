@@ -2,7 +2,19 @@
 
 Pre-production cutover steps. Nothing here is required during dev (everything is gated
 OFF), but each must be done before real users / real money. Grouped by area; check off as
-done. Last updated 2026-06-28.
+done. Last updated 2026-07-02.
+
+> **Already shipped (fableroadmap Phase A + pre-billing hardening, 2026-07-02)** — no cutover
+> action needed, listed so you don't re-do them:
+> - **Security lockdown applied to prod** (`…deny_by_default`): deny-by-default on schema public
+>   closed the credit-mint RPC hole + eligibility-forge + secret-leak (Mgmt-API-verified).
+> - **web-ci is a REQUIRED status check** on `main` (tsc + billing/provider tests + migration
+>   replay). `enforce_admins=false` (admins still direct-push); flip strict when ready.
+> - **Observability live** — `SENTRY_DSN` is set; errors + webhook money-drops report to Sentry.
+> - **Billing correctness** — deduction is idempotent (`bill_stream_interval` CAS cursor) with a
+>   `usage_events` ledger; auto-refill `>=` edge fixed; webhook amount cross-check + Stripe event
+>   idempotency (`stripe_events`) in place. Still inert until the master switch below.
+> - **Relay** — fail-static reconciliation, `-rw_timeout` on ffmpeg legs, bridge auth fail-closed.
 
 > **Env-var note:** `vercel env pull` in this workspace returns empty values for *every*
 > key (even known-good ones), so you can only confirm whether a key *exists*, not its value.
@@ -53,12 +65,17 @@ are done. See `memory/phase3_billing_model.md` and CLAUDE.md "Business model".
       Vercel so signups aren't restricted to the dev allowlist. Then **delete the gate code
       block** in `web/app/api/gpu/provision/route.ts` (marked "⚠️ TEMPORARY PRIVATE-DEV GATE
       — DELETE BEFORE PRODUCTION"). See `memory/prelaunch_repo_private.md`.
-- [ ] **Confirm the VPS-hub flag** (`SLIMCAST_VPS_HUB`) is in the intended state for launch
-      (currently the all-in-one path is prod; the hub path is flag-gated and pending its
-      consolidated live debug).
-- [ ] Confirm `CRON_SECRET` is set (protects `/api/cron/reap`).
-- [ ] Confirm the `:8080` relay debug panel fails closed (`RELAY_PASSWORD` set) — see
-      CLAUDE.md architecture #11.
+- [ ] Confirm `CRON_SECRET` is set (protects `/api/cron/reap` + the `/api/health` detail
+      snapshot). **Now fail-CLOSED in production (2026-07-02):** if unset, both refuse in prod —
+      so this is enforced, not just advisory. Set it, or the daily reaper cron won't run.
+- [ ] **Validate the GPU bridge lock live:** `SLIMCAST_BRIDGE_AUTH=true` is set in prod
+      (fail-closed default), but the authenticated `bridge_proxy` path hasn't yet run a live
+      stream. Confirm one transcode stream connects end-to-end; rollback is
+      `SLIMCAST_BRIDGE_AUTH=false` + reprovision.
+- ~~Confirm the VPS-hub flag `SLIMCAST_VPS_HUB`~~ — **N/A:** the all-in-one path was deleted
+  2026-06-29; the VPS-hub is the ONLY path and `SLIMCAST_VPS_HUB` is no longer a gate.
+- ~~Confirm the `:8080` relay debug panel fails closed~~ — **N/A:** the `:8080` FastAPI panel was
+  deleted 2026-06-29 (relay stderr now goes to `docker logs`).
 
 ## 3. Repository
 
@@ -77,7 +94,9 @@ From `memory/web_todo.md`:
 
 ## 5. Final verification
 
-- [ ] `cd web && npx tsc --noEmit` clean; `node scripts/test-billing.ts` green.
+- [ ] Confirm the latest `main` **web-ci** run is green — it runs `tsc --noEmit` + the billing &
+      provider unit suites + a `postgres:17` migration replay on every push (now a required check),
+      so this is largely automated.
 - [ ] Run one real end-to-end paid stream on a non-dev account in Stripe **live** mode and
       confirm the credit ledger, burn rate, and teardown behave (this is the first real
       "billing on" smoke test).
