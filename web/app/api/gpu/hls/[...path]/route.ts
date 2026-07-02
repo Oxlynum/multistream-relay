@@ -20,6 +20,7 @@
 import { createHmac } from 'crypto'
 import { createServerClient } from '@/lib/supabase'
 import { authenticateAgent } from '@/lib/agent-auth'
+import { timingSafeEqualStr } from '@/lib/crypto'
 
 // ── HMAC session token ─────────────────────────────────────────────────────────
 
@@ -52,7 +53,9 @@ function verifyHlsToken(token: string): string | null {
       const expected = createHmac('sha256', secret)
         .update(`hls:${userId}:${w}`)
         .digest('hex')
-      if (expected === sig) return userId
+      // Constant-time compare — an HMAC verify with `===` leaks, via timing, how many leading
+      // bytes matched, which can be walked to forge a token.
+      if (timingSafeEqualStr(expected, sig)) return userId
     }
     return null
   } catch {

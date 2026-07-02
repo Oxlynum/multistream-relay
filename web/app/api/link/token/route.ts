@@ -1,6 +1,7 @@
 import { createServerClient } from '@/lib/supabase'
 import { generateApiKey, hashApiKey } from '@/lib/agent-auth'
 import { checkRateLimit, clientIp } from '@/lib/rate-limit'
+import { timingSafeEqualStr } from '@/lib/crypto'
 import { createHash } from 'crypto'
 
 // Step 3 of device linking: the plugin redeems the one-time code, proving it
@@ -46,8 +47,9 @@ export async function POST(request: Request) {
     return Response.json({ error: 'code_expired' }, { status: 400 })
   }
 
-  // PKCE: the verifier must hash to the challenge the plugin registered.
-  if (base64urlSha256(verifier) !== row.code_challenge) {
+  // PKCE: the verifier must hash to the challenge the plugin registered. Constant-time compare
+  // (the challenge is attacker-influenced input; `!==` would leak match progress via timing).
+  if (!timingSafeEqualStr(base64urlSha256(verifier), row.code_challenge as string)) {
     console.error('[link/token] pkce mismatch', { got: base64urlSha256(verifier).slice(0, 8), want: row.code_challenge.slice(0, 8) })
     return Response.json({ error: 'pkce_verification_failed' }, { status: 400 })
   }

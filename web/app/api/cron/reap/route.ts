@@ -3,6 +3,7 @@ import { createServerClient } from '@/lib/supabase'
 import { sweepExpiredLeases } from '@/lib/pod-teardown'
 import { reconcileOrphans } from '@/lib/orphan-reconcile'
 import { sendAlert, captureError } from '@/lib/observability'
+import { timingSafeEqualStr } from '@/lib/crypto'
 
 // The reconcile does cross-provider listInstances() (Vast + RunPod + Hetzner, ~8-10s each)
 // + serial destroys + possible reraceGpuBackend provisions. Give it real budget so the
@@ -27,14 +28,21 @@ export const maxDuration = 300
 // an unauthenticated hit can't kill a healthy box).
 
 export async function GET(request: Request) {
-  // Protect the endpoint. Vercel cron includes `Authorization: Bearer $CRON_SECRET`
-  // when CRON_SECRET is set. If unset (local/dev), allow through.
+  // Protect the endpoint. Vercel cron sends `Authorization: Bearer $CRON_SECRET` when set.
+  // Fail-CLOSED in production: if CRON_SECRET is unset in prod, refuse — this runs an expensive
+  // ~300s cross-provider reconcile and must not be world-runnable. (Even an unauthenticated hit
+  // can't kill a healthy box — the reaper only reaps past-deadline/row-less boxes — this is about
+  // not leaving a costly endpoint open.) In dev (no secret) it stays open for convenience.
   const secret = process.env.CRON_SECRET
+  const isProd = process.env.VERCEL_ENV === 'production' || process.env.NODE_ENV === 'production'
   if (secret) {
-    const auth = request.headers.get('authorization')
-    if (auth !== `Bearer ${secret}`) {
+    const auth = request.headers.get('authorization') ?? ''
+    if (!timingSafeEqualStr(auth, `Bearer ${secret}`)) {
       return new Response('Unauthorized', { status: 401 })
     }
+  } else if (isProd) {
+    console.error('[cron/reap] CRON_SECRET unset in production — refusing (set it to enable the cron).')
+    return new Response('Unauthorized', { status: 401 })
   }
 
   const supabase = createServerClient()

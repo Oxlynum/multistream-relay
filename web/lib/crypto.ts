@@ -1,4 +1,17 @@
-import { createCipheriv, createDecipheriv, randomBytes, createHash } from 'crypto'
+import { createCipheriv, createDecipheriv, randomBytes, createHash, timingSafeEqual } from 'crypto'
+
+/**
+ * Constant-time string equality for comparing secrets/tokens/HMAC signatures — avoids the
+ * timing side-channel of `===` (which short-circuits at the first differing byte). The length
+ * fast-path leaks only length, which for our fixed-width tokens (HMAC hex, base64url SHA-256,
+ * `Bearer <secret>`) reveals nothing about the content.
+ */
+export function timingSafeEqualStr(a: string, b: string): boolean {
+  const ab = Buffer.from(a)
+  const bb = Buffer.from(b)
+  if (ab.length !== bb.length) return false
+  return timingSafeEqual(ab, bb)
+}
 
 // AES-256-GCM envelope encryption for at-rest secrets (platform stream keys,
 // and later any OAuth refresh tokens). The encryption key lives ONLY in

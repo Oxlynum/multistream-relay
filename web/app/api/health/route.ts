@@ -1,4 +1,5 @@
 import { createServerClient } from '@/lib/supabase'
+import { timingSafeEqualStr } from '@/lib/crypto'
 
 // Liveness + (secret-gated) fleet/cost snapshot (enterprise-audit REL-03). This is the
 // endpoint an uptime monitor / load balancer polls: 200 = DB reachable, 503 = DB or the
@@ -33,7 +34,13 @@ export async function GET(request: Request) {
   }
 
   const secret = process.env.CRON_SECRET
-  const authed = !secret || request.headers.get('authorization') === `Bearer ${secret}`
+  const isProd = process.env.VERCEL_ENV === 'production' || process.env.NODE_ENV === 'production'
+  // Fail-CLOSED in prod: the detailed snapshot (fleet counts, cost, which env vars are set) is
+  // secret-gated. If CRON_SECRET is unset in production, treat the caller as UNauthed so only the
+  // public liveness payload is returned — never expose fleet/config publicly. Dev (no secret): authed.
+  const authed = secret
+    ? timingSafeEqualStr(request.headers.get('authorization') ?? '', `Bearer ${secret}`)
+    : !isProd
 
   // Public probe (or DB down): minimal payload, correct status code.
   if (!authed || !dbOk) {
