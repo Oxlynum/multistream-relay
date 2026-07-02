@@ -26,13 +26,20 @@ const COLUMNS = [
       { href: '/#trust', label: 'How it’s built' },
     ],
   },
+  {
+    title: 'Legal',
+    links: [
+      { href: '/privacy', label: 'Privacy Policy' },
+      { href: '/terms', label: 'Terms of Service' },
+    ],
+  },
 ]
 
 export function SiteFooter() {
   return (
     <footer className="border-t border-line bg-bg">
       <div className="mx-auto max-w-6xl px-6 py-14">
-        <div className="grid grid-cols-2 gap-10 md:grid-cols-5">
+        <div className="grid grid-cols-2 gap-10 md:grid-cols-6">
           <div className="col-span-2">
             <Logo href={null} />
             <p className="mt-4 max-w-xs text-sm leading-relaxed text-ink-muted">
