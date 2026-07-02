@@ -10,7 +10,9 @@ export const size = { width: 1200, height: 630 }
 export const contentType = 'image/png'
 
 export default async function OpengraphImage() {
-  const logo = await fetch(new URL('../public/logo-mark.png', import.meta.url)).then(res =>
+  // Use the small quantized logo (not the full 448KB mark) — bundling the big one
+  // pushed this edge function over Vercel's 1 MB size limit and failed the deploy.
+  const logo = await fetch(new URL('../public/logo-og.png', import.meta.url)).then(res =>
     res.arrayBuffer(),
   )
 
