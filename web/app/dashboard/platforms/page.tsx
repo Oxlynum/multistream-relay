@@ -23,10 +23,10 @@ interface PlatformConfig {
 // Platforms that support OAuth "Connect" flow
 const OAUTH_PLATFORMS = new Set(['twitch', 'youtube', 'kick', 'facebook'])
 
-const PLATFORMS: Array<{ id: PlatformKey; label: string; note: string | null }> = [
+const PLATFORMS: Array<{ id: PlatformKey; label: string; note: string | null; comingSoon?: boolean }> = [
   { id: 'twitch',   label: 'Twitch',   note: null },
   { id: 'kick',     label: 'Kick',     note: null },
-  { id: 'youtube',  label: 'YouTube',  note: null },
+  { id: 'youtube',  label: 'YouTube',  note: null, comingSoon: true },
   { id: 'tiktok',   label: 'TikTok',   note: 'Requires LIVE access (1000+ followers or manual approval). Portrait mode is enabled automatically.' },
 ]
 
@@ -245,6 +245,7 @@ function PlatformsContent() {
               id={p.id}
               label={p.label}
               note={p.note}
+              comingSoon={!!p.comingSoon}
               connected={isConnected}
               enabled={!!conn?.enabled}
               isOAuthPlatform={isOAuthPlatform}

@@ -16,6 +16,7 @@ export interface PlatformConnectCardProps {
   enabled: boolean
   isOAuthPlatform: boolean
   isOAuthConnected: boolean
+  comingSoon?: boolean
   streamKey: string
   connecting: boolean
   saving: boolean
@@ -37,6 +38,7 @@ export function PlatformConnectCard({
   enabled,
   isOAuthPlatform,
   isOAuthConnected,
+  comingSoon,
   streamKey,
   connecting,
   saving,
@@ -100,6 +102,13 @@ export function PlatformConnectCard({
                   {removing ? 'Disconnecting…' : 'Disconnect'}
                 </Button>
               </div>
+            ) : comingSoon ? (
+              <Button
+                disabled
+                className="h-9 w-full"
+              >
+                {label} (coming soon)
+              </Button>
             ) : (
               <Button
                 onClick={onConnectOAuth}
