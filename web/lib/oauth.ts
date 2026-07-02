@@ -221,12 +221,26 @@ export async function fetchTwitchStreamKey(accessToken: string): Promise<string>
   const clientId = process.env.TWITCH_CLIENT_ID
   if (!clientId) throw new Error('TWITCH_CLIENT_ID not set')
 
-  const res = await fetch('https://api.twitch.tv/helix/streams/key', {
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      'Client-Id': clientId,
-    },
-  })
+  const headers = {
+    Authorization: `Bearer ${accessToken}`,
+    'Client-Id': clientId,
+  }
+
+  // Get Stream Key requires broadcaster_id explicitly — Twitch doesn't infer it
+  // from the token alone. Look up the authenticated user's id first.
+  const userRes = await fetch('https://api.twitch.tv/helix/users', { headers })
+  if (!userRes.ok) {
+    const err = await userRes.text()
+    throw new Error(`Twitch user lookup failed: ${err}`)
+  }
+  const userJson = await userRes.json() as { data?: Array<{ id: string }> }
+  const broadcasterId = userJson.data?.[0]?.id
+  if (!broadcasterId) throw new Error('No Twitch user id returned')
+
+  const res = await fetch(
+    `https://api.twitch.tv/helix/streams/key?broadcaster_id=${broadcasterId}`,
+    { headers },
+  )
 
   if (!res.ok) {
     const err = await res.text()
