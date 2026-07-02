@@ -90,8 +90,15 @@ export async function proxy(request: NextRequest) {
 
   const { pathname } = request.nextUrl
 
-  // Protect all dashboard and onboarding routes.
-  if (pathname.startsWith('/dashboard') || pathname.startsWith('/onboarding')) {
+  // Protect all dashboard and onboarding routes. Match on a path boundary so
+  // public assets that merely share the prefix (e.g. /dashboard-preview.png) are
+  // NOT redirected to /login — that boundary bug had been breaking the hero image.
+  const isProtected =
+    pathname === '/dashboard' ||
+    pathname.startsWith('/dashboard/') ||
+    pathname === '/onboarding' ||
+    pathname.startsWith('/onboarding/')
+  if (isProtected) {
     let response = NextResponse.next({ request })
 
     const supabase = createServerClient(

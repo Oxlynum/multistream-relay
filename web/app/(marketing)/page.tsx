@@ -192,7 +192,7 @@ export default function Home() {
                   'h-12 px-7 text-base shadow-glow',
                 )}
               >
-                ▶ Press Start
+                Sign up
               </Link>
               <a
                 href="#how"
@@ -239,10 +239,10 @@ export default function Home() {
 
               <div className="relative p-2">
                 <Image
-                  src="/dashboard-preview.jpg"
+                  src="/dashboard-preview.png"
                   alt="SlimCast dashboard"
-                  width={1920}
-                  height={1080}
+                  width={1057}
+                  height={659}
                   priority
                   className="h-auto w-full rounded-xl"
                 />
@@ -372,11 +372,11 @@ export default function Home() {
                   </div>
                   <div className="p-2">
                     <Image
-                      src="/obs-plugin-preview.jpg"
+                      src="/obs-plugin-preview.png"
                       alt="SlimCast OBS plugin"
-                      width={1200}
-                      height={900}
-                      className="h-auto w-full rounded-xl"
+                      width={351}
+                      height={420}
+                      className="mx-auto h-auto w-full max-w-[300px] rounded-xl"
                     />
                   </div>
                 </div>
@@ -426,7 +426,7 @@ export default function Home() {
                 'h-12 px-8 text-base shadow-glow',
               )}
             >
-              ▶ Insert Coin
+              Sign up
             </Link>
           </div>
         </div>

@@ -72,7 +72,7 @@ export function SiteNav() {
                 Log in
               </Link>
               <Link href="/signup" className={cn(buttonVariants(), 'shadow-glow')}>
-                ▶ Press Start
+                Sign up
               </Link>
             </>
           )}
@@ -131,7 +131,7 @@ export function SiteNav() {
                     onClick={() => setOpen(false)}
                     className={cn(buttonVariants(), 'w-full shadow-glow')}
                   >
-                    ▶ Press Start
+                    Sign up
                   </Link>
                 </>
               )}

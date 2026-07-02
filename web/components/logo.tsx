@@ -1,9 +1,9 @@
 import Link from 'next/link'
 import Image from 'next/image'
 
-// intrinsic size of public/logo-mark.png (691×584) — CSS controls the rendered size
-const MARK_W = 691
-const MARK_H = 584
+// intrinsic size of public/logo-mark.png (compact lockup) — CSS controls rendered size
+const MARK_W = 100
+const MARK_H = 80
 
 export function LogoMark({
   className = 'h-6 w-6',
@@ -33,8 +33,8 @@ export function Logo({
 }) {
   const inner = (
     <span className={`inline-flex items-center gap-2.5 ${className}`}>
-      <LogoMark className="h-7" />
-      <span className="font-pixel text-[13px] leading-none tracking-tight text-ink">
+      <LogoMark className="h-10" />
+      <span className="font-pixel text-[15px] leading-none tracking-tight text-ink">
         SlimCast
       </span>
     </span>

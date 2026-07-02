@@ -2,13 +2,12 @@ import { cn } from "@/lib/utils"
 
 export type PlatformKey = "twitch" | "youtube" | "kick" | "tiktok"
 
-// Arcade neon remap. Kick's brand green (#53FC18) collides with the lime primary,
-// so all four get a distinct neon that never competes with lime: purple / red /
-// amber / cyan. (Lime is reserved for the SlimCast brand, never a platform.)
+// Arcade neon platform tints. Kick keeps its brand green (per owner) even though
+// it's near the lime primary; the others get distinct neons.
 export const PLATFORM_META: Record<PlatformKey, { label: string; tint: string }> = {
   twitch: { label: "Twitch", tint: "#b44dff" },  // neon purple
   youtube: { label: "YouTube", tint: "#ff414d" }, // arcade red
-  kick: { label: "Kick", tint: "#ffb400" },       // amber (remapped off clashing green)
+  kick: { label: "Kick", tint: "#53fc18" },       // Kick brand green
   tiktok: { label: "TikTok", tint: "#22e8ff" },   // electric cyan
 }
 

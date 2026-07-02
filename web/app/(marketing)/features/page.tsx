@@ -180,7 +180,7 @@ export default function FeaturesPage() {
                 'h-12 px-8 text-base shadow-glow',
               )}
             >
-              ▶ Insert Coin
+              Sign up
             </Link>
           </div>
         </div>

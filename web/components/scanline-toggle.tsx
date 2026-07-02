@@ -48,7 +48,7 @@ export function ScanlineToggle({ className }: { className?: string }) {
       type="button"
       onClick={toggle}
       aria-pressed={on}
-      title="Toggle CRT scanlines"
+      title="Toggle CRT effect"
       className={cn(
         'font-pixel inline-flex items-center gap-1 border-2 border-line bg-surface px-2 py-1 text-[8px] uppercase leading-none text-ink-muted transition-colors hover:border-brand hover:text-brand',
         className,

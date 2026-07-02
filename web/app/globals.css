@@ -318,8 +318,10 @@
 
 /* ═══════════════════════════════════════════════════════════════════════════
    CRT SCREEN — full-screen effect layer (mounted once via <CrtOverlay/>).
-   Vignette + curvature always on; scanlines toggle via `.crt-scanlines` on
-   <html>; the refresh band + flicker are motion-gated for accessibility.
+   The ENTIRE effect (vignette + scanlines + refresh band + flicker) is gated by
+   `.crt-scanlines` on <html> — the "CRT" nav toggle (default ON). Turning it OFF
+   removes all of it (incl. the moving refresh line), leaving a clean flat theme.
+   Motion (band + flicker) additionally respects prefers-reduced-motion.
    ═══════════════════════════════════════════════════════════════════════════ */
 @layer utilities {
   .crt-screen {
@@ -327,6 +329,11 @@
     inset: 0;
     z-index: 60;
     pointer-events: none;
+    opacity: 0;                 /* whole overlay hidden when CRT is off */
+    transition: opacity 0.25s ease;
+  }
+  .crt-scanlines .crt-screen {
+    opacity: 1;
   }
   /* Vignette + faint barrel-curvature darkening at the screen edges. */
   .crt-screen::before {
@@ -340,21 +347,16 @@
       rgba(0, 0, 0, 0.6) 100%
     );
   }
-  /* Scanlines — hidden until <html> has .crt-scanlines (default ON via layout script). */
+  /* Scanlines. */
   .crt-lines {
     position: absolute;
     inset: 0;
-    opacity: 0;
-    transition: opacity 0.25s ease;
     background: repeating-linear-gradient(
       to bottom,
       rgba(0, 0, 0, 0) 0,
       rgba(0, 0, 0, 0) 2px,
       rgba(0, 0, 0, 0.22) 3px
     );
-  }
-  .crt-scanlines .crt-lines {
-    opacity: 1;
   }
   /* Slow refresh band drifting down the screen. */
   .crt-bar {
@@ -372,11 +374,11 @@
     );
   }
   @media (prefers-reduced-motion: no-preference) {
-    .crt-bar {
+    .crt-scanlines .crt-bar {
       opacity: 1;
       animation: crt-scan 7s linear infinite;
     }
-    .crt-screen {
+    .crt-scanlines .crt-screen {
       animation: crt-flicker 6s steps(48) infinite;
     }
   }
