@@ -355,27 +355,46 @@ def main_vps() -> None:
             mediamtx_proc = start_mediamtx_vps()
 
         resp = _api("GET", "/api/agent/hub-config")
-        streams = (resp or {}).get("streams", []) if resp else []
-        wanted = {s["ingest_key"]: s for s in streams if s.get("ingest_key")}
+        if resp is not None:
+            streams = resp.get("streams", [])
+            wanted = {s["ingest_key"]: s for s in streams if s.get("ingest_key")}
 
-        # Drop tenants the cloud no longer assigns (detached / torn down by Clock A).
-        for key in list(tenants):
-            if key not in wanted:
-                log.info("Tenant %s… detached — stopping its pipeline.", key[:8])
-                tenants.pop(key)["sup"].stop_all()
+            # Drop tenants the cloud no longer assigns (detached / torn down by Clock A).
+            for key in list(tenants):
+                if key not in wanted:
+                    log.info("Tenant %s… detached — stopping its pipeline.", key[:8])
+                    tenants.pop(key)["sup"].stop_all()
 
+            # Attach newly-assigned tenants and refresh each tenant's desired spec.
+            for key, s in wanted.items():
+                t = tenants.get(key)
+                if t is None:
+                    pp = (s.get("srt_passphrase") or "").strip()
+                    src = f"srt://127.0.0.1:8890?streamid=read:{key}&latency=120&timeout=5000000"
+                    if pp:
+                        src += f"&passphrase={pp}&pbkeylen=16"
+                    t = {"sup": Supervisor(source=src, role="vps"), "applied_hash": None, "spec": s}
+                    tenants[key] = t
+                    log.info("Tenant %s… attached — pipeline ready (waiting for OBS).", key[:8])
+                else:
+                    t["spec"] = s
+        else:
+            # Fail-STATIC (C2): a control-plane blip (5xx / timeout / network) must NOT be
+            # read as "zero tenants" — dropping them here would stop_all() every live stream
+            # on this shared hub, turning one Vercel 502 into a fleet-wide outage. Keep the
+            # last-known tenants + specs running and retry next poll; the box lease has ~210s
+            # of grace, far more than a transient blip. Do NOT `continue` — the report/
+            # heartbeat below still runs so the lease keeps being renewed while OBS is up.
+            log.warning("hub-config unreachable — keeping current tenants this cycle (fail-static).")
+
+        # Per-tenant OBS connect/disconnect + status report. Runs EVERY cycle over the
+        # CURRENT tenants (not the freshly-fetched `wanted`), driven by the local per-path
+        # hook flags — so a config blip never interrupts a live pipeline, and the heartbeat
+        # still renews the box lease. After a successful reconcile `tenants` == `wanted`, so
+        # the happy path is unchanged; during a blip we act on the last-known specs.
         report: list[dict] = []
-        for key, s in wanted.items():
-            t = tenants.get(key)
-            if t is None:
-                pp = (s.get("srt_passphrase") or "").strip()
-                src = f"srt://127.0.0.1:8890?streamid=read:{key}&latency=120&timeout=5000000"
-                if pp:
-                    src += f"&passphrase={pp}&pbkeylen=16"
-                t = {"sup": Supervisor(source=src, role="vps"), "applied_hash": None}
-                tenants[key] = t
-                log.info("Tenant %s… attached — pipeline ready (waiting for OBS).", key[:8])
-
+        for key, t in tenants.items():
+            s = t["spec"]
             connected = os.path.exists(f"{OBS_FLAG}.{key}")
             # `bridge` (present only when this tenant has a 'ready' GPU backend, set by
             # hub-config) drives the source_forward → GPU + deliver ← GPU runners. Folded
@@ -580,26 +599,34 @@ def main_gpu() -> None:
         if bridge_gw is not None and bridge_gw.poll() is not None:
             log.error("bridge_proxy gateway exited (code %s) — restarting", bridge_gw.returncode)
             bridge_gw = _start_bridge_gateway()
-        cfg_resp = _api("GET", "/api/agent/gpu-config") or {}
-        groups = cfg_resp.get("groups", [])
-        returns = cfg_resp.get("return")
-        cfg = {
-            "groups": groups,
-            "return": returns,
-            "crop": cfg_resp.get("crop", {}),
-            "source_width": cfg_resp.get("source_width"),
-            "source_height": cfg_resp.get("source_height"),
-        }
-        new_hash = json.dumps(cfg, sort_keys=True)
-        if groups and returns:
-            if new_hash != last_hash:
-                log.info("gpu-config: %d group(s) — (re)applying transcode.", len(groups))
-                sup.apply(cfg)
-                last_hash = new_hash
-        elif last_hash is not None:
-            log.info("gpu-config empty — stopping transcode.")
-            sup.stop_all()
-            last_hash = None
+        cfg_resp = _api("GET", "/api/agent/gpu-config")
+        if cfg_resp is None:
+            # Fail-STATIC (C2): a control-plane blip must NOT tear down a live transcode.
+            # Keep the current pipeline this cycle; a SUSTAINED outage is still caught by the
+            # heartbeat-failure counter below (HEARTBEAT_FAIL_LIMIT) — hysteresis, not a single
+            # missed poll. The heartbeat still runs, so the box lease keeps being renewed
+            # whenever /api/agent/status is reachable.
+            log.warning("gpu-config unreachable — keeping current transcode this cycle (fail-static).")
+        else:
+            groups = cfg_resp.get("groups", [])
+            returns = cfg_resp.get("return")
+            cfg = {
+                "groups": groups,
+                "return": returns,
+                "crop": cfg_resp.get("crop", {}),
+                "source_width": cfg_resp.get("source_width"),
+                "source_height": cfg_resp.get("source_height"),
+            }
+            new_hash = json.dumps(cfg, sort_keys=True)
+            if groups and returns:
+                if new_hash != last_hash:
+                    log.info("gpu-config: %d group(s) — (re)applying transcode.", len(groups))
+                    sup.apply(cfg)
+                    last_hash = new_hash
+            elif last_hash is not None:
+                log.info("gpu-config empty — stopping transcode.")
+                sup.stop_all()
+                last_hash = None
 
         # Bridge telemetry → the dock's "GPU bridge" health series. GB/hr → kbps is
         # *1e9*8/3600/1000 ≈ *2222.22. egress = the H.264 returned to the VPS (the

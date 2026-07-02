@@ -21,11 +21,21 @@ export async function GET(request: NextRequest) {
   const nowIso = new Date().toISOString()
 
   // Sessions attached to this hub that should be serving.
-  const { data: sessions } = await supabase
+  const { data: sessions, error: sessionsErr } = await supabase
     .from('gpu_instances')
     .select('id, user_id, ingest_key, srt_passphrase, needs_transcode, gpu_node_id, bridge_secret')
     .eq('vps_hub_id', node.hubId)
     .in('status', ['running', 'provisioning'])
+
+  // Fail-STATIC (C2): NEVER return 200 + an empty/partial stream list on a DB error. The
+  // hub reconciles its live pipelines to whatever this returns, so a 200 with streams:[]
+  // reads as "zero tenants" and stop_all()s every live stream on this shared box — one
+  // transient query error becomes a fleet-wide outage. A non-200 makes the agent's _api()
+  // return None, so it keeps its last-known tenants running and retries next poll.
+  if (sessionsErr) {
+    console.error('[hub-config] tenant query failed:', sessionsErr.message)
+    return Response.json({ error: 'tenant query failed' }, { status: 503 })
+  }
 
   const tenants = (sessions ?? []).filter(s => s.ingest_key)
 
@@ -41,7 +51,7 @@ export async function GET(request: NextRequest) {
   }
 
   const userIds = tenants.map(t => t.user_id)
-  const [{ data: platforms }, { data: profiles }] = await Promise.all([
+  const [{ data: platforms, error: platformsErr }, { data: profiles, error: profilesErr }] = await Promise.all([
     supabase
       .from('platform_connections')
       .select('user_id, platform, rtmp_url, stream_key_encrypted, bitrate_kbps, fps, orientation, enabled, twitch_hevc_eligible, twitch_use_passthrough')
@@ -51,6 +61,14 @@ export async function GET(request: NextRequest) {
       .select('id, portrait_zoom, portrait_pos_x, portrait_pos_y, landscape_bitrate_kbps, portrait_bitrate_kbps, output_settings')
       .in('id', userIds),
   ])
+
+  // Fail-STATIC (C2): a partial config (missing platform keys / profile settings) would
+  // hand the hub degraded per-tenant outputs and stop live deliveries. Bail non-200 so the
+  // hub keeps its last-known pipelines rather than applying a half-built config.
+  if (platformsErr || profilesErr) {
+    console.error('[hub-config] platform/profile query failed:', platformsErr?.message, profilesErr?.message)
+    return Response.json({ error: 'config query failed' }, { status: 503 })
+  }
 
   const platformsByUser = new Map<string, PlatformRow[]>()
   for (const p of platforms ?? []) {
@@ -66,10 +84,16 @@ export async function GET(request: NextRequest) {
   const gpuNodeIds = tenants.map(t => t.gpu_node_id).filter(Boolean) as string[]
   const gpuNodeById = new Map<string, { ip_address: string | null; bridge_in_port: number | null; phase: string | null }>()
   if (gpuNodeIds.length) {
-    const { data: gpuNodes } = await supabase
+    const { data: gpuNodes, error: gpuNodesErr } = await supabase
       .from('relay_nodes')
       .select('id, ip_address, bridge_in_port, phase')
       .in('id', gpuNodeIds)
+    // Fail-STATIC (C2): on error, don't silently drop the bridge target — that would dark
+    // every transcode tenant's GPU forward. 503 so the hub keeps its last-known bridge.
+    if (gpuNodesErr) {
+      console.error('[hub-config] gpu-node query failed:', gpuNodesErr.message)
+      return Response.json({ error: 'gpu-node query failed' }, { status: 503 })
+    }
     for (const n of gpuNodes ?? []) gpuNodeById.set(n.id as string, n)
   }
 

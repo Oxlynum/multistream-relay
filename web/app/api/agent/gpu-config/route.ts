@@ -21,17 +21,25 @@ export async function GET(request: NextRequest) {
   }
   const supabase = createServerClient()
 
-  const { data: session } = await supabase
+  const { data: session, error: sessionErr } = await supabase
     .from('gpu_instances')
     .select('user_id, ingest_key, vps_hub_id, bridge_secret')
     .eq('id', node.instanceId)
     .maybeSingle()
+  // Fail-STATIC (C2): a DB error must NOT read as "nothing to transcode" — that stops a live
+  // transcode on a transient blip. 503 → the agent's _api() returns None → it keeps its
+  // current pipeline. A clean null (GPU not yet hub-linked) is a legitimate empty, handled
+  // below with a 200.
+  if (sessionErr) {
+    console.error('[gpu-config] session query failed:', sessionErr.message)
+    return Response.json({ error: 'session query failed' }, { status: 503 })
+  }
   if (!session?.ingest_key || !session.vps_hub_id) {
     // Not yet linked to a hub (or torn down) → nothing to transcode yet.
     return Response.json({ groups: [], credits_seconds: 999999 })
   }
 
-  const [{ data: hub }, { data: profile }, { data: platforms }] = await Promise.all([
+  const [{ data: hub, error: hubErr }, { data: profile, error: profileErr }, { data: platforms, error: platformsErr }] = await Promise.all([
     supabase.from('vps_hubs').select('ip_address').eq('id', session.vps_hub_id).maybeSingle(),
     supabase
       .from('profiles')
@@ -43,6 +51,13 @@ export async function GET(request: NextRequest) {
       .select('platform, rtmp_url, stream_key_encrypted, bitrate_kbps, fps, orientation, enabled, twitch_hevc_eligible, twitch_use_passthrough')
       .eq('user_id', session.user_id),
   ])
+
+  // Fail-STATIC (C2): a partial config would build degraded/empty encode groups and stop a
+  // live transcode. 503 so the agent keeps its last-known pipeline instead.
+  if (hubErr || profileErr || platformsErr) {
+    console.error('[gpu-config] config query failed:', hubErr?.message, profileErr?.message, platformsErr?.message)
+    return Response.json({ error: 'config query failed' }, { status: 503 })
+  }
 
   const outputSettings: OutputSettingsMap = (profile?.output_settings as OutputSettingsMap) ?? {}
   const groups = buildGpuConfig(

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { stripe } from '@/lib/stripe'
 import { createServerClient } from '@/lib/supabase'
 import { creditPaymentOnce, grantSubscriptionAllotment, SUB_ALLOTMENT_TOKENS, SUB_ALLOTMENT_CAP } from '@/lib/billing'
+import { captureError } from '@/lib/observability'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import Stripe from 'stripe'
 
@@ -41,6 +42,12 @@ export async function POST(req: NextRequest) {
 
   const supabase = createServerClient()
 
+  // H8: any handler throw (transient Stripe/DB error, or a bug) is captured + alerted, then we
+  // return 500 so Stripe RETRIES on its backoff schedule. Every money path here is idempotent
+  // (creditPaymentOnce / grantSubscriptionAllotment keyed on the Stripe id; profile writes are
+  // idempotent), so a retry can't double-charge or double-credit — making retry the money-SAFE
+  // choice over silently 200-ing away a transient failure and losing the event.
+  try {
   switch (event.type) {
     case 'checkout.session.completed': {
       const session = event.data.object as Stripe.Checkout.Session
@@ -87,6 +94,12 @@ export async function POST(req: NextRequest) {
       const payId = (session.payment_intent as string) ?? session.id
       if (userId && tokens > 0) {
         await creditPaymentOnce(payId, userId, tokens)
+      } else if (tokens > 0 && !userId) {
+        // H8: a PAID checkout we can't map to a user (metadata lost) — money received, nobody
+        // credited. NEVER silently drop it: alert so a human can reconcile from the Stripe id.
+        captureError('webhook.stripe.paid_no_user',
+          new Error('paid checkout with no resolvable user_id'),
+          { eventId: event.id, payId, tokens, customer: String(session.customer ?? ''), alert: true })
       }
 
       // Persist stripe_customer_id.
@@ -155,7 +168,14 @@ export async function POST(req: NextRequest) {
       }
       const customerId = typeof sub.customer === 'string' ? sub.customer : sub.customer?.id
       const userId = await resolveUserId(supabase, sub.metadata?.user_id, customerId)
-      if (!userId) break
+      if (!userId) {
+        // H8: a subscriber we can't map to a user → their plan/allotment silently won't update
+        // (they pay for a sub, get PAYG treatment). Alert for manual reconciliation.
+        captureError('webhook.stripe.sub_no_user',
+          new Error('subscription event with no resolvable user_id'),
+          { eventId: event.id, eventType: event.type, subId: sub.id, customer: String(customerId ?? ''), alert: true })
+        break
+      }
 
       const isSubscriber = SUBSCRIBER_STATUSES.has(sub.status)
       const priceId = sub.items?.data?.[0]?.price?.id ?? null
@@ -219,7 +239,14 @@ export async function POST(req: NextRequest) {
       } catch { /* fall back to customer lookup */ }
       const customerId = typeof inv.customer === 'string' ? inv.customer : inv.customer?.id
       const userId = await resolveUserId(supabase, metaUserId, customerId)
-      if (!userId) break
+      if (!userId) {
+        // H8: a PAID subscription invoice we can't map → allotment silently not granted (the
+        // subscriber paid and gets nothing). Alert so a human can grant it from the invoice id.
+        captureError('webhook.stripe.invoice_no_user',
+          new Error('paid invoice with no resolvable user_id'),
+          { eventId: event.id, invoiceId: inv.id ?? null, subId, customer: String(customerId ?? ''), alert: true })
+        break
+      }
 
       // Idempotent on the invoice id: rollover-capped monthly allotment grant.
       await grantSubscriptionAllotment(inv.id, userId, SUB_ALLOTMENT_TOKENS, SUB_ALLOTMENT_CAP)
@@ -235,6 +262,11 @@ export async function POST(req: NextRequest) {
       }
       break
     }
+  }
+  } catch (err) {
+    captureError('webhook.stripe.handler', err, { eventType: event.type, eventId: event.id, alert: true })
+    // Retry-safe (idempotent money paths above) → ask Stripe to retry rather than swallow it.
+    return NextResponse.json({ error: 'handler error' }, { status: 500 })
   }
 
   return NextResponse.json({ received: true })

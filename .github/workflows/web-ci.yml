@@ -1,0 +1,74 @@
+name: web-ci
+
+# H6: gate every web change on a green build. This is a PAYMENTS app with unit-tested billing
+# math and no prior automated gate — a one-character rate inversion in billingLineItems used to
+# deploy clean. Make this a REQUIRED status check in branch protection: that keeps `main` always
+# green, which also satisfies M17 (the relay workflow's deploy-from-main can't ship untested web).
+#
+# Runs on ALL PRs + pushes to main (no path filter) so the required check always reports a
+# definite success/failure — a path-filtered required check that gets "skipped" on a relay-only
+# PR would block the merge instead.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+defaults:
+  run:
+    working-directory: web
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - name: Typecheck (pre-push gate)
+        run: npx tsc --noEmit
+      # ADVISORY for now: the existing dashboard/stream-manager code carries pre-existing
+      # react-hooks lint errors (setState-in-effect, ref-in-render) unrelated to this gate. Keep
+      # lint visible but non-blocking until that debt is cleared, THEN drop continue-on-error to
+      # promote it to a hard gate (these overlap the frontend-phase M12/M13/M14 fixes).
+      - name: Lint (advisory)
+        run: npm run lint
+        continue-on-error: true
+      - name: Billing-math unit tests
+        run: npx tsx scripts/test-billing.ts
+      - name: Provider-universality unit tests
+        run: npx tsx scripts/test-provider-universality.ts
+
+  migrations:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      PGHOST: localhost
+      PGPORT: 5432
+      PGUSER: postgres
+    steps:
+      - uses: actions/checkout@v4.2.2
+      # Fresh-history replay: bootstrap the Supabase-like environment, apply every migration in
+      # order, then assert the deny-by-default lockdown held (regression guard on C1/H1/H3/M1/M22)
+      # and that no migration errors. Catches a broken/ordering-dependent migration before deploy.
+      - name: Migrations fresh-replay + lockdown assertions
+        run: |
+          set -euo pipefail
+          psql -v ON_ERROR_STOP=1 -c 'create database slim'
+          cat supabase/test/bootstrap.sql $(ls supabase/migrations/*.sql | sort) supabase/test/assert.sql \
+            | psql -v ON_ERROR_STOP=1 -d slim

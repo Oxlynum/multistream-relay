@@ -11,10 +11,20 @@ export function generateApiKey(): string {
   return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('')
 }
 
+// Only human-held key labels may authenticate as a *user*. Node keys ('vps'/'gpu')
+// and the legacy all-in-one 'pod' key resolve exclusively through authenticateNode —
+// they must NEVER stand in for their spawner's user (H2). Without this, an untrusted
+// rented GPU holding its own 'gpu' key could call GET /api/gpu/status and read the
+// live srt_url with its ingest_key + srt_passphrase (hijacking the OBS source), or
+// stop/provision/read settings as the user — defeating the "GPU never receives ingress
+// credentials" guarantee.
+const USER_KEY_LABELS = new Set(['user', 'device'])
+
 /** Validate a raw API key from Authorization header and return the user_id. */
 export async function authenticateAgent(request: Request): Promise<string | null> {
   const detail = await authenticateAgentDetailed(request)
-  return detail?.userId ?? null
+  if (!detail || !USER_KEY_LABELS.has(detail.label)) return null
+  return detail.userId
 }
 
 /**

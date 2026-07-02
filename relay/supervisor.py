@@ -323,11 +323,18 @@ def _redact(msg: str) -> str:
 # `cid`) + SRT passphrase is registered in _SECRETS and scrubbed by _redact above.
 _FFMPEG_STDERR_TO_STDOUT = os.environ.get("RELAY_ROLE", "") in ("gpu", "vps")
 
-# SEC-03: enforce the per-session bridge_secret on the VPS↔GPU mpegts bridge. Default OFF
-# keeps the (not-yet-live-proven) baseline bridge byte-identical; flip SLIMCAST_BRIDGE_AUTH
-# =true (both ends) to route the bridge through bridge_proxy.py (TLS terminated + secret
-# checked by the gateway; ffmpeg reads/writes a plaintext localhost socket). See bridge_proxy.py.
-BRIDGE_AUTH = os.environ.get("SLIMCAST_BRIDGE_AUTH", "").strip().lower() == "true"
+# SEC-03 / H4: enforce the per-session bridge_secret on the VPS↔GPU mpegts bridge.
+# FAIL-CLOSED — auth is ON unless SLIMCAST_BRIDGE_AUTH is EXPLICITLY "false". The bridge
+# carries the tenant's live video into the platform fan-out; an unauthenticated public :8899
+# lets anyone reaching the (provider-mapped) GPU IP inject mpegts into the victim's broadcast
+# during a reconnect window, or occupy the single-accept TLS listener (DoS). Both ends read
+# THIS SAME var (the hub's source_forward + the GPU's gateway), so they always agree — no
+# split-brain. Routing goes through bridge_proxy.py (TLS terminated + secret checked by the
+# gateway; ffmpeg reads/writes a plaintext localhost socket).
+#   ⚠ This activates the wired-but-not-yet-live-proven bridge_proxy path. To fall back to the
+#   proven no-auth baseline while live-validating it on a fresh provision, set
+#   SLIMCAST_BRIDGE_AUTH=false in Vercel (the web plumbs it verbatim to both ends).
+BRIDGE_AUTH = os.environ.get("SLIMCAST_BRIDGE_AUTH", "").strip().lower() != "false"
 # The private localhost port ffmpeg listens on for the GPU transcode INPUT when the auth
 # gateway owns the public :8899 (gateway → 127.0.0.1:BRIDGE_BACKEND_PORT).
 BRIDGE_BACKEND_PORT = 8898
@@ -466,6 +473,17 @@ def _url_safe(url: str) -> bool:
 
 _RES_HEIGHT = {"720p": 720, "1080p": 1080, "1440p": 1440}
 
+# H5: max time (microseconds) ffmpeg waits on a single network read/write before it aborts
+# the process (→ OutputRunner reconnects the leg). Applied to the OUTPUT legs that face a
+# remote endpoint which can half-open (FIN/RST lost) on the lossy/mobile paths we target: a
+# stalled platform or bridge socket otherwise never EOFs, so ffmpeg never exits, the dock dot
+# stays green, and no data flows — silently defeating the STREAM-02 truthful-status/reconnect
+# design. 10s is deliberately generous (platforms buffer seconds), so a full 10s of zero I/O
+# means a genuinely dead socket, not a slow one. NOT applied to the GPU's `tls://…?listen=1`
+# INPUT (it would abort the listener while waiting for the hub to connect during boot/pair) nor
+# to the SRT/MediaMTX loopback INPUTS (127.0.0.1; the SRT URLs already carry &timeout=5000000).
+RW_TIMEOUT_US = "10000000"
+
 
 def build_passthrough_cmd(out: dict, source: str = LOCAL_SOURCE) -> list[str]:
     """HEVC copy -> HLS PUT to YouTube's HLS ingest URL (no re-encode).
@@ -499,6 +517,7 @@ def build_passthrough_cmd(out: dict, source: str = LOCAL_SOURCE) -> list[str]:
         "-hls_list_size", "5",
         "-hls_segment_type", "mpegts",
         "-hls_flags", "delete_segments+omit_endlist+independent_segments",
+        "-rw_timeout", RW_TIMEOUT_US,  # H5: abort a stalled HTTP PUT to YouTube → runner reconnects
         out["url"],
     ]
 
@@ -539,6 +558,7 @@ def build_ertmp_cmd(out: dict, source: str = LOCAL_SOURCE) -> list[str]:
         # Twitch drops the HEVC stream ~2s in with no error — the client never
         # announced enhanced-codec capability at connect time.
         "-rtmp_enhanced_codecs hvc1 "
+        f"-rw_timeout {RW_TIMEOUT_US} "  # H5: abort a stalled Twitch socket → runner reconnects
         f"'{ingest_url}'"
     )
     return ["bash", "-c", pipeline]
@@ -585,7 +605,9 @@ def build_gpu_transcode_cmd(
         elif max_h < src_h:
             cmd += ["-vf", f"scale_cuda=-2:{max_h}"]
         cmd += _encode_flags(bv, fps)
-        cmd += ["-flush_packets", "1", "-f", "flv", url]
+        # H5: abort a stalled RTMPS return to the hub → OutputRunner reconnects (input listener
+        # is deliberately left untimed; see RW_TIMEOUT_US).
+        cmd += ["-flush_packets", "1", "-rw_timeout", RW_TIMEOUT_US, "-f", "flv", url]
     return cmd
 
 
@@ -604,7 +626,11 @@ def build_source_forward_cmd(source: str, dest: str) -> list[str]:
             "ffmpeg", "-hide_banner", "-loglevel", "warning",
             *_input_args(source),
             "-i", source,
-            "-c", "copy", "-f", "mpegts", dest,
+            # H5: abort a stalled mpegts push to the GPU → OutputRunner reconnects (also lets
+            # the hub notice a half-open GPU faster). The auth-path variant below writes to a
+            # local pipe (bridge_proxy owns the TLS socket), so rw_timeout there is a no-op —
+            # bridge_proxy would need its own socket timeout (deferred; BRIDGE_AUTH gates it).
+            "-c", "copy", "-rw_timeout", RW_TIMEOUT_US, "-f", "mpegts", dest,
         ]
     u = urllib.parse.urlparse(dest)
     host, port = u.hostname or "", int(u.port or 0)
@@ -648,7 +674,9 @@ def build_deliver_one_cmd(return_url: str, target: dict) -> list[str]:
         "ffmpeg", "-hide_banner", "-loglevel", "warning",
         "-i", return_url,
         "-map", "0:v", "-map", "0:a", "-c", "copy",
-        "-flush_packets", "1", "-f", "flv", _full_rtmp_url(target),
+        # H5: abort a stalled platform socket → OutputRunner reconnects THIS platform (input is
+        # the local MediaMTX return, which EOFs naturally when the GPU stops, so it's untimed).
+        "-flush_packets", "1", "-rw_timeout", RW_TIMEOUT_US, "-f", "flv", _full_rtmp_url(target),
     ]
 
 

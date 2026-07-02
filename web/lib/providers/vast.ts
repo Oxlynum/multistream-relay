@@ -309,7 +309,9 @@ export const vastProvider: GpuProvider = {
     // to a docker-login string ("-u USER -p TOKEN ghcr.io"); omit if the image is public.
     if (process.env.VAST_IMAGE_LOGIN) body.image_login = process.env.VAST_IMAGE_LOGIN
 
-    const res = await fetch(`${BASE}/asks/${offerId}/`, { method: 'PUT', headers: authHeaders(), body: JSON.stringify(body) })
+    // M2: bound the create call. A hung Vast PUT would otherwise stall the whole provision to
+    // maxDuration=300s; on timeout it throws → the race moves to the next candidate.
+    const res = await fetch(`${BASE}/asks/${offerId}/`, { method: 'PUT', headers: authHeaders(), body: JSON.stringify(body), signal: AbortSignal.timeout(8000) })
     const text = await res.text()
     let j: { success?: boolean; new_contract?: number; msg?: string } = {}
     try { j = JSON.parse(text) } catch { /* non-JSON */ }
@@ -354,7 +356,9 @@ export const vastProvider: GpuProvider = {
     // hide a still-billing box behind a "destroyed" log. 404 = already gone = idempotent
     // success; any other non-ok throws so the caller's catch surfaces the leak (the
     // reaper/teardown all wrap destroy in try/catch + log, and re-list it next pass).
-    const res = await fetch(`${BASE}/instances/${podId}/`, { method: 'DELETE', headers: authHeaders() })
+    // M2: bound the destroy call — a hung DELETE would otherwise stall the SERIAL sweep/reaper
+    // behind it (a GPU billing leak). Timeout throws; the reaper/teardown catch + re-list it.
+    const res = await fetch(`${BASE}/instances/${podId}/`, { method: 'DELETE', headers: authHeaders(), signal: AbortSignal.timeout(8000) })
     if (!res.ok && res.status !== 404) {
       throw new Error(`[vast] destroy ${podId} → ${res.status}: ${(await res.text().catch(() => '')).slice(0, 300)}`)
     }

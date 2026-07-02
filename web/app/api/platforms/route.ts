@@ -14,6 +14,18 @@ const PLATFORM_DEFAULTS: Record<string, { rtmp_url: string; max_bitrate: number;
   tiktok:   { rtmp_url: 'rtmp://push.tiktok.com/live',      max_bitrate: 4500, orientation: 'portrait' },
 }
 
+// M9: a user-supplied rtmp_url is concatenated into the pod's ffmpeg output arg and, for the
+// Twitch eRTMP path, interpolated into a `bash -c` string right next to the stream key. The key
+// is injection-guarded below; the URL sits in the SAME arg and must be guarded identically.
+// Allowlist the scheme and reject any whitespace / shell / ffmpeg-tee metacharacter so a crafted
+// URL can't inject an extra tee destination, a local file sink, or a shell command. All four
+// PLATFORM_DEFAULTS pass; only a caller-provided override is validated.
+function isSafeIngestUrl(url: string): boolean {
+  if (!/^rtmps?:\/\/[^\s]+$/i.test(url)) return false           // rtmp:// or rtmps:// only
+  if (/[\s'"`$;|<>&(){}[\]\\]/.test(url)) return false          // no shell / tee metacharacters
+  return true
+}
+
 export async function POST(request: Request) {
   const supabase = createServerClient()
 
@@ -50,6 +62,11 @@ export async function POST(request: Request) {
   if (/[|\[\]\\\s]/.test(stream_key)) {
     return Response.json({ error: 'stream_key contains invalid characters' }, { status: 400 })
   }
+  // M9: validate a caller-supplied ingest URL (a missing one falls back to the safe default).
+  const customUrl = typeof rtmp_url === 'string' ? rtmp_url.trim() : ''
+  if (customUrl && !isSafeIngestUrl(customUrl)) {
+    return Response.json({ error: 'rtmp_url must be a plain rtmp:// or rtmps:// URL' }, { status: 400 })
+  }
 
   const effectiveBitrate = bitrate_kbps
     ? Math.min(bitrate_kbps, defaults.max_bitrate)
@@ -58,7 +75,7 @@ export async function POST(request: Request) {
   const { error } = await supabase.from('platform_connections').upsert({
     user_id: user.id,
     platform,
-    rtmp_url: rtmp_url ?? defaults.rtmp_url,
+    rtmp_url: customUrl || defaults.rtmp_url,
     stream_key_encrypted: encryptSecret(stream_key.trim()),
     bitrate_kbps: effectiveBitrate,
     fps: fps ?? 60,
